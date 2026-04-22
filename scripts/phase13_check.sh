@@ -131,11 +131,17 @@ pass "recently learned list UI in companion view (m13.4)"
 grep -q "if !enabled" "$WATCHER_RS" || fail "clipboard enabled guard missing in poll task"
 pass "clipboard poll skips ingest when disabled"
 
+# 14b. debounce behavior has a named unit test
+grep -q "fn watcher_debounces_rapid_events" "$WATCHER_RS" || \
+  fail "watcher_debounces_rapid_events test missing from watcher.rs"
+pass "watcher debounce behavior test is present"
+
 # 15. full build + test suite
 cd "$ROOT_DIR/desktop"
 npm run lint
 npm run test
 cargo build --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml watcher_debounces_rapid_events -- --test-threads=1
 cargo test --manifest-path src-tauri/Cargo.toml watcher
 cargo test --manifest-path src-tauri/Cargo.toml store::tests::watched_folder
 cargo test --manifest-path src-tauri/Cargo.toml store::tests::file_registry

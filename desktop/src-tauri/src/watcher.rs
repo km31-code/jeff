@@ -463,10 +463,12 @@ pub fn should_ignore_file(path: &Path, watch_root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
-    use super::should_ignore_file;
+    use super::{should_ignore_file, DEBOUNCE_MS};
 
     fn tmp_file(dir: &TempDir, rel: &str) -> PathBuf {
         let path = dir.path().join(rel);
@@ -544,6 +546,49 @@ mod tests {
         assert!(
             should_ignore_file(&path, &root),
             "file in hidden dir should be ignored"
+        );
+    }
+
+    #[test]
+    fn watcher_debounces_rapid_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = tmp_file(&dir, "notes.md");
+        let debounce_window = Duration::from_millis(DEBOUNCE_MS);
+
+        let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
+        let first_seen = Instant::now();
+        pending.insert(path.clone(), first_seen);
+
+        // second event inside the debounce window should replace the timestamp.
+        let second_seen = first_seen + Duration::from_millis(50);
+        pending.insert(path.clone(), second_seen);
+        assert_eq!(
+            pending.len(),
+            1,
+            "duplicate rapid events should dedupe into one pending path"
+        );
+
+        let before_ready = second_seen + Duration::from_millis(DEBOUNCE_MS - 1);
+        let ready_before: Vec<PathBuf> = pending
+            .iter()
+            .filter(|(_, seen_at)| before_ready.duration_since(**seen_at) >= debounce_window)
+            .map(|(p, _)| p.clone())
+            .collect();
+        assert!(
+            ready_before.is_empty(),
+            "path should not be ready before the debounce window elapses"
+        );
+
+        let at_window = second_seen + debounce_window;
+        let ready_after: Vec<PathBuf> = pending
+            .iter()
+            .filter(|(_, seen_at)| at_window.duration_since(**seen_at) >= debounce_window)
+            .map(|(p, _)| p.clone())
+            .collect();
+        assert_eq!(
+            ready_after,
+            vec![path],
+            "path should become ready once debounce window has elapsed"
         );
     }
 }

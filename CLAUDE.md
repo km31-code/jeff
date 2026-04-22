@@ -19,6 +19,7 @@
   the current phase plan explicitly calls for a rewrite.
 - Do not expand backend capability beyond the current phase's scope.
 - After each completed milestone or high-risk file edit, commit and push to `origin` immediately so the latest state is always recoverable.
+- Never recover files from older commits unless the user explicitly requests that rollback.
 
 ## Code style
 - No emojis anywhere. Not in UI copy, not in comments, not in commit 

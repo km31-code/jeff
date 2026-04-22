@@ -84,6 +84,15 @@ pass "proactive nudge notification wiring present"
 grep -q '"visible": false' "$TAURI_CONF" || fail "main window not set to visible:false in tauri.conf.json"
 pass "main window hidden on startup"
 
+# 14b. if overlay window is declared in tauri.conf.json, it must be always-on-top
+if grep -q '"label": "overlay"' "$TAURI_CONF"; then
+  grep -q '"alwaysOnTop": true' "$TAURI_CONF" || \
+    fail "overlay window config in tauri.conf.json must set alwaysOnTop:true"
+  pass "overlay window config has alwaysOnTop:true"
+else
+  pass "overlay window is runtime-created; no overlay entry in tauri.conf.json"
+fi
+
 # 15. overlay window label constant present
 grep -q 'OVERLAY_WINDOW_LABEL' "$AMBIENT_RS" || fail "OVERLAY_WINDOW_LABEL constant not found in ambient.rs"
 pass "overlay window label constant present"

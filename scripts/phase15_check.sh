@@ -66,6 +66,13 @@ grep -q "STUCK_COOLDOWN_SECONDS" "$PROACTIVE_RS" || fail "STUCK_COOLDOWN_SECONDS
 grep -q "DRIFT_SIMILARITY_THRESHOLD" "$PROACTIVE_RS" || fail "DRIFT_SIMILARITY_THRESHOLD constant missing from proactive.rs"
 pass "all cooldown and threshold constants declared in proactive.rs (m15.2)"
 
+# 7b. quiet-mode reorientation suppression has a named unit test
+grep -q "fn quiet_mode_suppresses_reorientation" "$PROACTIVE_RS" || \
+  fail "quiet_mode_suppresses_reorientation test missing from proactive.rs"
+cargo test --manifest-path "$ROOT_DIR/desktop/src-tauri/Cargo.toml" \
+  quiet_mode_suppresses_reorientation -- --test-threads=1
+pass "quiet_mode_suppresses_reorientation test passes"
+
 # 8. quiet mode guard present in all three trigger commands (m15.3)
 grep -q "is_quiet_mode" "$COMMANDS_RS" || fail "quiet mode guard (is_quiet_mode) missing from commands.rs"
 pass "quiet mode guard present in proactive commands (m15.3)"

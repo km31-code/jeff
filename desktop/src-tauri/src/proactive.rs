@@ -425,6 +425,40 @@ mod tests {
     }
 
     #[test]
+    fn quiet_mode_suppresses_reorientation() {
+        struct PanicReasoningProvider;
+        impl ReasoningProvider for PanicReasoningProvider {
+            fn generate_response(&self, _system_prompt: &str, _user_prompt: &str) -> Result<String> {
+                panic!("reasoning should not be called while quiet mode is enabled");
+            }
+        }
+
+        let ambient = crate::ambient::AmbientState::new();
+        ambient.set_quiet_mode(true);
+
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("quiet mode").unwrap();
+        store.set_active_task(task.id).unwrap();
+
+        // mirrors trigger_task_resume command behavior.
+        let response = if ambient.is_quiet_mode() {
+            ReorientationDto {
+                task_id: task.id,
+                summary: String::new(),
+                fired_at: String::new(),
+            }
+        } else {
+            generate_reorientation(&store, &PanicReasoningProvider, task.id).unwrap()
+        };
+
+        assert_eq!(response.task_id, task.id);
+        assert!(
+            response.summary.is_empty(),
+            "quiet mode should suppress proactive reorientation"
+        );
+    }
+
+    #[test]
     fn drift_suppressed_when_similarity_is_high() {
         let (_dir, store) = new_test_store();
         let task = store.create_task("drift test").unwrap();

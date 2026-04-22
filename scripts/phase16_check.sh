@@ -81,6 +81,11 @@ grep -q "fn subtask_chain_rejects_oversized_file_write_proposal_content" "$SUBTA
 grep -q "fn subtask_chain_sanitizes_unsafe_proposed_path_before_persisting_proposal" "$SUBTASK_RS" || fail "subtask_chain_sanitizes_unsafe_proposed_path_before_persisting_proposal test missing"
 pass "chain executor unit tests cover baseline flow plus content/path safety limits (m16.2)"
 
+# 8b. explicit cancel rollback test run
+cargo test --manifest-path "$ROOT_DIR/desktop/src-tauri/Cargo.toml" \
+  subtask_chain_cancel_leaves_no_pending_approval_proposals -- --test-threads=1
+pass "subtask chain cancel rollback test passes in isolation"
+
 # 9. six new tauri commands present in commands.rs (m16.3)
 grep -q "pub fn list_subtask_steps" "$COMMANDS_RS" || fail "list_subtask_steps command missing from commands.rs"
 grep -q "pub fn list_file_write_proposals" "$COMMANDS_RS" || fail "list_file_write_proposals command missing from commands.rs"

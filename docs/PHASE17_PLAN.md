@@ -1,6 +1,6 @@
 # Phase 17: Reliability and Productization Gate — Implementation Plan
 
-**Status:** not started  
+**Status:** done  
 **Phase ref:** docs/PHASES_NEXT.md § Phase 17  
 **Exit criteria location:** docs/PHASES_NEXT.md § Phase 17 → Exit criteria
 
@@ -193,7 +193,7 @@ harness. LLM and TTS budgets are asserted structurally (no blocking ops before r
 
 ## M17.4: Behavioral assertions for phases 11–16
 
-**Status:** pending
+**Status:** done
 
 **Goal:** Each existing phase11–16 check script gets at least one assertion that tests
 runtime behavior or a named unit test, not only symbol presence. Existing grep checks
@@ -275,7 +275,7 @@ cargo test subtask_chain_cancel_leaves_no_pending_approval_proposals -- --test-t
 
 ## M17.5: phase17_check.sh
 
-**Status:** pending
+**Status:** done
 
 **Goal:** Single script that verifies all 4 Phase 17 exit criteria and calls each of
 phase11–16_check.sh as a regression gate.
@@ -345,5 +345,5 @@ phase11–16_check.sh as a regression gate.
 - [x] M17.1 done — phase17_check.sh verifies provider interfaces and OpenAI impls conform.
 - [x] M17.2 done — the 4 failure modes each produce a correct, specific UI message.
 - [x] M17.3 done — all 4 latency budgets are measured and pass on a reference machine.
-- [ ] M17.4 done — phase17_check.sh runs behavioral assertions for phase 11–16 and passes.
-- [ ] M17.5 done — `bash scripts/phase17_check.sh` exits 0 with all PASS lines.
+- [x] M17.4 done — phase17_check.sh runs behavioral assertions for phase 11–16 and passes.
+- [x] M17.5 done — `bash scripts/phase17_check.sh` exits 0 with all PASS lines.

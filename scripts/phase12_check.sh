@@ -131,6 +131,8 @@ cd "$ROOT_DIR/desktop"
 npm run lint
 npm run test
 cargo build --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml phrase_needs_synthesis -- --test-threads=1
+cargo test --manifest-path src-tauri/Cargo.toml streaming -- --test-threads=1
 cargo test --manifest-path src-tauri/Cargo.toml streaming
 cargo test --manifest-path src-tauri/Cargo.toml chat_streaming
 pass "automated build + test suite passed"

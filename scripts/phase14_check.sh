@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CLASSIFIER_RS="$ROOT_DIR/desktop/src-tauri/src/classifier.rs"
+PROVIDERS_RS="$ROOT_DIR/desktop/src-tauri/src/providers.rs"
 MODELS_RS="$ROOT_DIR/desktop/src-tauri/src/models.rs"
 COMMANDS_RS="$ROOT_DIR/desktop/src-tauri/src/commands.rs"
 MAIN_RS="$ROOT_DIR/desktop/src-tauri/src/main.rs"
@@ -20,7 +21,10 @@ pass() { echo "PASS: $1"; }
 test -f "$CLASSIFIER_RS" || fail "classifier.rs missing"
 grep -q "fn classify_intent" "$CLASSIFIER_RS" || fail "classify_intent function missing from classifier.rs"
 grep -q "fn parse_classification" "$CLASSIFIER_RS" || fail "parse_classification function missing from classifier.rs"
-grep -q "response_format" "$CLASSIFIER_RS" || fail "response_format json_object missing from classifier.rs"
+# request formatting may live in classifier.rs or provider seam after phase 17 refactor.
+if ! grep -q "response_format" "$CLASSIFIER_RS" && ! grep -q "response_format" "$PROVIDERS_RS"; then
+  fail "response_format json_object missing from classifier/provider path"
+fi
 grep -q "SYSTEM_PROMPT" "$CLASSIFIER_RS" || fail "SYSTEM_PROMPT constant missing from classifier.rs"
 pass "classifier.rs present with required symbols (m14.1)"
 
@@ -70,7 +74,9 @@ grep -q "OPENAI_API_KEY" "$EVAL_HARNESS" || fail "eval harness does not gate on 
 grep -q "0.90" "$EVAL_HARNESS" || fail "90% accuracy threshold not enforced in eval harness"
 grep -q "expected_slots" "$EVAL_HARNESS" || fail "eval harness does not validate expected slots"
 grep -q "slot accuracy" "$EVAL_HARNESS" || fail "eval harness does not print slot accuracy"
-grep -q "p50 < 150" "$EVAL_HARNESS" || fail "eval harness does not enforce 150ms p50 budget"
+if ! grep -q "CLASSIFIER_BUDGET_MS" "$EVAL_HARNESS" && ! grep -q "p50 < 150" "$EVAL_HARNESS"; then
+  fail "eval harness does not enforce the classifier p50 budget"
+fi
 pass "eval harness covers accuracy, slot quality, and latency budget (m14.2)"
 
 # 8. frontend: classifier function and fallback (m14.3)
@@ -115,8 +121,20 @@ pass "build and test suite passed"
 # 14. live eval (optional — only when OPENAI_API_KEY is set)
 if [ -n "${OPENAI_API_KEY:-}" ]; then
   echo "OPENAI_API_KEY detected — running live eval harness"
-  cargo test --manifest-path src-tauri/Cargo.toml --test intent_eval -- --nocapture
+  if ! eval_output=$(cargo test --manifest-path src-tauri/Cargo.toml --test intent_eval -- --nocapture 2>&1); then
+    echo "$eval_output"
+    fail "live eval harness failed"
+  fi
+  echo "$eval_output"
+  p50_ms=$(echo "$eval_output" | sed -n 's/.*p50=\([0-9][0-9]*\)ms.*/\1/p' | tail -1)
+  [ -n "$p50_ms" ] || fail "could not parse p50 latency from live eval output"
+  case "$p50_ms" in
+    ''|*[!0-9]*)
+      fail "parsed p50 latency is not numeric: '$p50_ms'"
+      ;;
+  esac
   pass "live eval passed 90% accuracy threshold"
+  pass "live eval produced numeric p50 latency (${p50_ms}ms)"
 else
   echo "SKIP: OPENAI_API_KEY not set — skipping live eval (set it to run accuracy check)"
 fi
