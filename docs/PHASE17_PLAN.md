@@ -24,7 +24,7 @@ M17.5 last: aggregates all exit-criteria checks.
 
 ## M17.1: Provider abstraction seams
 
-**Status:** pending
+**Status:** done
 
 **Goal:** All OpenAI call sites go through a Rust trait interface. Swapping a provider
 later (e.g., a local model) is an adapter swap, not a rewrite.
@@ -342,7 +342,7 @@ phase11–16_check.sh as a regression gate.
 
 ## Exit criteria (from PHASES_NEXT.md)
 
-- [ ] M17.1 done — phase17_check.sh verifies provider interfaces and OpenAI impls conform.
+- [x] M17.1 done — phase17_check.sh verifies provider interfaces and OpenAI impls conform.
 - [ ] M17.2 done — the 4 failure modes each produce a correct, specific UI message.
 - [ ] M17.3 done — all 4 latency budgets are measured and pass on a reference machine.
 - [ ] M17.4 done — phase17_check.sh runs behavioral assertions for phase 11–16 and passes.

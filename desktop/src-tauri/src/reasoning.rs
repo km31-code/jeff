@@ -1,7 +1,5 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
-use reqwest::blocking::Client;
-use serde::Deserialize;
 use tokio::sync::mpsc;
 
 pub trait ReasoningProvider: Send + Sync {
@@ -10,76 +8,21 @@ pub trait ReasoningProvider: Send + Sync {
 
 #[derive(Clone)]
 pub struct OpenAiReasoningProvider {
-    client: Client,
-    api_key: Option<String>,
-    model: String,
+    inner: crate::providers::OpenAiReasoningProvider,
 }
 
 impl OpenAiReasoningProvider {
     pub fn from_env() -> Self {
         Self {
-            client: Client::new(),
-            api_key: std::env::var("OPENAI_API_KEY")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
-            model: "gpt-4o-mini".to_string(),
+            inner: crate::providers::OpenAiReasoningProvider::from_env(),
         }
     }
 }
 
 impl ReasoningProvider for OpenAiReasoningProvider {
     fn generate_response(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        let api_key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| anyhow!("OPENAI_API_KEY is not configured"))?;
-
-        let response = self
-            .client
-            .post("https://api.openai.com/v1/chat/completions")
-            .bearer_auth(api_key)
-            .json(&serde_json::json!({
-                "model": self.model,
-                "temperature": 0,
-                "messages": [
-                    { "role": "system", "content": system_prompt },
-                    { "role": "user", "content": user_prompt }
-                ]
-            }))
-            .send()
-            .context("failed to call OpenAI chat completions API")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .unwrap_or_else(|_| "<unreadable-body>".to_string());
-            return Err(anyhow!(
-                "OpenAI reasoning request failed with status {}: {}",
-                status,
-                body
-            ));
-        }
-
-        let payload: ChatCompletionResponse = response
-            .json()
-            .context("failed to parse chat completions response")?;
-
-        let content = payload
-            .choices
-            .into_iter()
-            .next()
-            .map(|choice| choice.message.content)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-
-        if content.is_empty() {
-            Err(anyhow!("OpenAI reasoning response was empty"))
-        } else {
-            Ok(content)
-        }
+        use crate::providers::ReasoningModelProvider;
+        self.inner.generate_response(system_prompt, user_prompt)
     }
 }
 
@@ -210,21 +153,4 @@ impl OpenAiStreamingReasoningProvider {
 
         Ok(rx)
     }
-}
-
-// ---- non-streaming response types ------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<ChatCompletionChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionChoice {
-    message: ChatCompletionMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionMessage {
-    content: String,
 }

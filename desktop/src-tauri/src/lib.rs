@@ -2,3 +2,4 @@
 // only modules needed by tests are declared here.
 pub mod classifier;
 pub mod models;
+pub mod providers;

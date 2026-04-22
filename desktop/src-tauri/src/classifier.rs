@@ -1,14 +1,12 @@
 use anyhow::{anyhow, Context, Result};
-use reqwest::blocking::Client;
 use serde::Deserialize;
-use std::time::Duration;
 
 use crate::models::{IntentClassificationDto, IntentLabel, IntentSlotsDto};
 
-const MODEL: &str = "gpt-4o-mini";
-const REQUEST_TIMEOUT_MS: u64 = 300;
+pub(crate) const MODEL: &str = "gpt-4o-mini";
+pub(crate) const REQUEST_TIMEOUT_MS: u64 = 300;
 
-const SYSTEM_PROMPT: &str = "You are an intent classifier for a writing assistant called Jeff.\
+pub(crate) const SYSTEM_PROMPT: &str = "You are an intent classifier for a writing assistant called Jeff.\
 \nGiven a user message, classify it into exactly one intent and extract structured slots.\
 \n\
 \nIntents:\
@@ -36,21 +34,6 @@ const SYSTEM_PROMPT: &str = "You are an intent classifier for a writing assistan
 \n  }\
 \n}";
 
-#[derive(Debug, Deserialize)]
-struct ApiResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Choice {
-    message: ApiMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiMessage {
-    content: String,
-}
-
 pub fn classify_intent(text: &str, api_key: &str) -> Result<IntentClassificationDto> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -61,54 +44,14 @@ pub fn classify_intent(text: &str, api_key: &str) -> Result<IntentClassification
         });
     }
 
-    let client = Client::builder()
-        .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS))
-        .connect_timeout(Duration::from_millis(REQUEST_TIMEOUT_MS))
-        .build()
-        .context("failed to build HTTP client for intent classification")?;
-
-    let response = client
-        .post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(api_key)
-        .json(&serde_json::json!({
-            "model": MODEL,
-            "temperature": 0,
-            "response_format": { "type": "json_object" },
-            "messages": [
-                { "role": "system", "content": SYSTEM_PROMPT },
-                { "role": "user", "content": trimmed }
-            ]
-        }))
-        .send()
-        .context("failed to call OpenAI chat completions for intent classification")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .unwrap_or_else(|_| "<unreadable>".to_string());
-        return Err(anyhow!(
-            "intent classifier request failed with status {}: {}",
-            status,
-            body
-        ));
-    }
-
-    let payload: ApiResponse = response
-        .json()
-        .context("failed to parse intent classifier API response")?;
-
-    let content = payload
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message.content)
-        .ok_or_else(|| anyhow!("intent classifier response contained no choices"))?;
-
-    parse_classification(&content)
+    use crate::providers::ClassifierProvider;
+    let provider = crate::providers::OpenAiClassifierProvider::new();
+    provider
+        .classify(trimmed, api_key)
+        .map_err(|error| anyhow!(error))
 }
 
-fn parse_classification(content: &str) -> Result<IntentClassificationDto> {
+pub(crate) fn parse_classification(content: &str) -> Result<IntentClassificationDto> {
     #[derive(Deserialize)]
     struct RawSlots {
         target_description: Option<String>,
