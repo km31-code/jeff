@@ -1,0 +1,202 @@
+[
+  {
+    "input": "what is the difference between a mutex and a semaphore?",
+    "expected_intent": "answer",
+    "expected_slots": { "topic": "mutex vs semaphore", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "how does the watcher debounce work in this codebase?",
+    "expected_intent": "answer",
+    "expected_slots": { "topic": "watcher debounce", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "explain what the context pack is and how it gets built",
+    "expected_intent": "answer",
+    "expected_slots": { "topic": "context pack", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "why does the clipboard capture default to off?",
+    "expected_intent": "answer",
+    "expected_slots": { "topic": "clipboard capture default", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "what does idempotent mean in the context of file ingestion?",
+    "expected_intent": "answer",
+    "expected_slots": { "topic": "idempotent file ingestion", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "how does barge-in work in the streaming pipeline?",
+    "expected_intent": "answer",
+    "expected_slots": { "topic": "barge-in streaming", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "tell me about the focus model for the overlay window",
+    "expected_intent": "answer",
+    "expected_slots": { "topic": "overlay focus model", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "what are the four DB tables added in phase 13?",
+    "expected_intent": "answer",
+    "expected_slots": { "topic": "phase 13 DB tables", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "how is mtime used for ingest idempotency?",
+    "expected_intent": "answer",
+    "expected_slots": { "topic": "mtime ingest idempotency", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "can you walk me through how the retrieval pipeline works?",
+    "expected_intent": "answer",
+    "expected_slots": { "topic": "retrieval pipeline", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "make the introduction shorter and more direct",
+    "expected_intent": "revision",
+    "expected_slots": { "target_description": "the introduction", "instruction": "make it shorter and more direct", "draft_type": null, "topic": null }
+  },
+  {
+    "input": "rewrite the conclusion to be more confident",
+    "expected_intent": "revision",
+    "expected_slots": { "target_description": "the conclusion", "instruction": "rewrite to be more confident", "draft_type": null, "topic": null }
+  },
+  {
+    "input": "can you fix the grammar in the third paragraph?",
+    "expected_intent": "revision",
+    "expected_slots": { "target_description": "third paragraph", "instruction": "fix grammar", "draft_type": null, "topic": null }
+  },
+  {
+    "input": "tighten up the executive summary — it's too long",
+    "expected_intent": "revision",
+    "expected_slots": { "target_description": "executive summary", "instruction": "tighten it up, too long", "draft_type": null, "topic": null }
+  },
+  {
+    "input": "the opening sentence is weak, please improve it",
+    "expected_intent": "revision",
+    "expected_slots": { "target_description": "opening sentence", "instruction": "improve it", "draft_type": null, "topic": null }
+  },
+  {
+    "input": "edit the requirements section to be clearer",
+    "expected_intent": "revision",
+    "expected_slots": { "target_description": "requirements section", "instruction": "make it clearer", "draft_type": null, "topic": null }
+  },
+  {
+    "input": "the second bullet point needs to be rephrased",
+    "expected_intent": "revision",
+    "expected_slots": { "target_description": "second bullet point", "instruction": "rephrase it", "draft_type": null, "topic": null }
+  },
+  {
+    "input": "please update this section to reflect the new architecture",
+    "expected_intent": "revision",
+    "expected_slots": { "target_description": "this section", "instruction": "update to reflect new architecture", "draft_type": null, "topic": null }
+  },
+  {
+    "input": "the tone in the feedback section is too harsh, soften it",
+    "expected_intent": "revision",
+    "expected_slots": { "target_description": "feedback section", "instruction": "soften the tone", "draft_type": null, "topic": null }
+  },
+  {
+    "input": "change the title to be more engaging",
+    "expected_intent": "revision",
+    "expected_slots": { "target_description": "the title", "instruction": "make it more engaging", "draft_type": null, "topic": null }
+  },
+  {
+    "input": "write a summary of the Q3 findings from the artifact",
+    "expected_intent": "subtask",
+    "expected_slots": { "draft_type": "summary", "instruction": "write a summary of Q3 findings", "target_description": null, "topic": null }
+  },
+  {
+    "input": "draft an email to the team about the deadline change",
+    "expected_intent": "subtask",
+    "expected_slots": { "draft_type": "email", "instruction": "draft email about deadline change", "target_description": null, "topic": null }
+  },
+  {
+    "input": "create an outline for a blog post about this topic",
+    "expected_intent": "subtask",
+    "expected_slots": { "draft_type": "outline", "instruction": "create outline for blog post", "target_description": null, "topic": null }
+  },
+  {
+    "input": "generate a list of action items from this meeting transcript",
+    "expected_intent": "subtask",
+    "expected_slots": { "draft_type": "action items", "instruction": "generate action items from meeting transcript", "target_description": null, "topic": null }
+  },
+  {
+    "input": "build a project timeline based on the milestones document",
+    "expected_intent": "subtask",
+    "expected_slots": { "draft_type": "timeline", "instruction": "build project timeline from milestones", "target_description": null, "topic": null }
+  },
+  {
+    "input": "write a technical spec for the new feature described in the notes",
+    "expected_intent": "subtask",
+    "expected_slots": { "draft_type": "technical spec", "instruction": "write technical spec for new feature", "target_description": null, "topic": null }
+  },
+  {
+    "input": "produce a changelog entry for this week's changes",
+    "expected_intent": "subtask",
+    "expected_slots": { "draft_type": "changelog", "instruction": "produce changelog entry for this week", "target_description": null, "topic": null }
+  },
+  {
+    "input": "create a FAQ document based on the support tickets",
+    "expected_intent": "subtask",
+    "expected_slots": { "draft_type": "FAQ", "instruction": "create FAQ from support tickets", "target_description": null, "topic": null }
+  },
+  {
+    "input": "generate a one-page executive brief from the full report",
+    "expected_intent": "subtask",
+    "expected_slots": { "draft_type": "executive brief", "instruction": "generate one-page executive brief from report", "target_description": null, "topic": null }
+  },
+  {
+    "input": "prepare a set of interview questions for a senior engineer role",
+    "expected_intent": "subtask",
+    "expected_slots": { "draft_type": "interview questions", "instruction": "prepare interview questions for senior engineer", "target_description": null, "topic": null }
+  },
+  {
+    "input": "what are some ways I could improve the onboarding flow?",
+    "expected_intent": "suggestion",
+    "expected_slots": { "topic": "onboarding flow improvements", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "give me ideas for structuring the architecture document",
+    "expected_intent": "suggestion",
+    "expected_slots": { "topic": "architecture document structure", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "any thoughts on how to make the retrieval faster?",
+    "expected_intent": "suggestion",
+    "expected_slots": { "topic": "retrieval performance", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "suggest some titles for this document",
+    "expected_intent": "suggestion",
+    "expected_slots": { "topic": "document titles", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "what would be a good next step for this project?",
+    "expected_intent": "suggestion",
+    "expected_slots": { "topic": "project next steps", "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "ok",
+    "expected_intent": "unknown",
+    "expected_slots": { "topic": null, "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "...",
+    "expected_intent": "unknown",
+    "expected_slots": { "topic": null, "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "yes please",
+    "expected_intent": "unknown",
+    "expected_slots": { "topic": null, "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "no that's not right",
+    "expected_intent": "unknown",
+    "expected_slots": { "topic": null, "instruction": null, "target_description": null, "draft_type": null }
+  },
+  {
+    "input": "hmm",
+    "expected_intent": "unknown",
+    "expected_slots": { "topic": null, "instruction": null, "target_description": null, "draft_type": null }
+  }
+]

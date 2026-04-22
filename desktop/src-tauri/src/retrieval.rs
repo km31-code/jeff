@@ -1,0 +1,650 @@
+use std::{
+    collections::hash_map::DefaultHasher,
+    fs,
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+    time::UNIX_EPOCH,
+};
+
+use anyhow::{anyhow, Context, Result};
+
+use crate::{
+    artifact_parser::{parse_text_from_artifact, supported_artifact_type, SupportedArtifactType},
+    chunking::{chunk_text, DEFAULT_CHUNK_OVERLAP_CHARS, DEFAULT_CHUNK_SIZE_CHARS},
+    embedding::{EmbeddingProvider, OpenAiEmbeddingProvider},
+    models::{ArtifactDto, ContextArtifactDto, RetrievedChunkDto, TaskContextPackDto},
+    similarity::cosine_similarity,
+    store::{ChunkEmbeddingInput, StoredChunkEmbedding, TaskStore},
+};
+
+const DEFAULT_TOP_K: usize = 5;
+
+pub fn import_artifact_for_task(
+    store: &TaskStore,
+    embeddings: &dyn EmbeddingProvider,
+    task_id: i64,
+    file_path: &str,
+) -> Result<ArtifactDto> {
+    let source_path = PathBuf::from(file_path.trim());
+    if source_path.as_os_str().is_empty() {
+        return Err(anyhow!("artifact path cannot be empty"));
+    }
+
+    if !source_path.exists() {
+        return Err(anyhow!(
+            "artifact path does not exist: {}",
+            source_path.display()
+        ));
+    }
+
+    if !source_path.is_file() {
+        return Err(anyhow!(
+            "artifact path is not a file: {}",
+            source_path.display()
+        ));
+    }
+
+    let canonical_source = fs::canonicalize(&source_path)
+        .with_context(|| format!("failed to canonicalize path {}", source_path.display()))?;
+
+    let artifact_type = supported_artifact_type(&canonical_source)?;
+    let parsed_text = parse_text_from_artifact(&canonical_source)?;
+
+    let raw_chunks = chunk_text(
+        &parsed_text,
+        DEFAULT_CHUNK_SIZE_CHARS,
+        DEFAULT_CHUNK_OVERLAP_CHARS,
+    );
+
+    if raw_chunks.is_empty() {
+        return Err(anyhow!("artifact text did not produce any chunks"));
+    }
+
+    let mut chunk_rows = Vec::with_capacity(raw_chunks.len());
+    for (index, chunk) in raw_chunks.iter().enumerate() {
+        let embedding = embeddings
+            .embed_text(chunk)
+            .with_context(|| format!("failed to embed chunk index {}", index))?;
+
+        if embedding.is_empty() {
+            return Err(anyhow!(
+                "embedding provider returned an empty vector for chunk {index}"
+            ));
+        }
+
+        chunk_rows.push(ChunkEmbeddingInput {
+            chunk_text: chunk.to_string(),
+            position_index: index as i64,
+            embedding,
+        });
+    }
+
+    let workspace_path = store.get_task_workspace_path(task_id)?;
+    let artifact_dir = workspace_path.join("artifacts");
+    fs::create_dir_all(&artifact_dir).with_context(|| {
+        format!(
+            "failed to create artifact directory {}",
+            artifact_dir.display()
+        )
+    })?;
+
+    let file_name = canonical_source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow!("artifact file name is invalid utf-8"))?
+        .to_string();
+
+    let sanitized_name = sanitize_file_name(&file_name);
+    let destination_path = next_available_artifact_path(&artifact_dir, &sanitized_name);
+
+    fs::copy(&canonical_source, &destination_path).with_context(|| {
+        format!(
+            "failed to copy artifact from {} to {}",
+            canonical_source.display(),
+            destination_path.display()
+        )
+    })?;
+
+    let file_extension = match artifact_type {
+        SupportedArtifactType::Markdown => "md",
+        SupportedArtifactType::Text => "txt",
+        SupportedArtifactType::Pdf => "pdf",
+    }
+    .to_string();
+
+    store.insert_artifact_with_chunks(
+        task_id,
+        &file_name,
+        &file_extension,
+        &canonical_source.to_string_lossy(),
+        &destination_path.to_string_lossy(),
+        &chunk_rows,
+    )
+}
+
+pub fn retrieve_relevant_chunks(
+    store: &TaskStore,
+    embeddings: &dyn EmbeddingProvider,
+    task_id: i64,
+    query: &str,
+) -> Result<Vec<RetrievedChunkDto>> {
+    retrieve_relevant_chunks_with_top_k(store, embeddings, task_id, query, DEFAULT_TOP_K)
+}
+
+pub fn retrieve_relevant_chunks_with_top_k(
+    store: &TaskStore,
+    embeddings: &dyn EmbeddingProvider,
+    task_id: i64,
+    query: &str,
+    top_k: usize,
+) -> Result<Vec<RetrievedChunkDto>> {
+    let clean_query = query.trim();
+    if clean_query.is_empty() {
+        return Err(anyhow!("retrieval query cannot be empty"));
+    }
+
+    let query_embedding = embeddings
+        .embed_text(clean_query)
+        .context("failed to generate query embedding")?;
+
+    let stored_chunks = store.fetch_chunk_embeddings_for_task(task_id)?;
+    if stored_chunks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut scored: Vec<(f32, StoredChunkEmbedding)> = stored_chunks
+        .into_iter()
+        .map(|chunk| (cosine_similarity(&query_embedding, &chunk.embedding), chunk))
+        .collect();
+
+    scored.sort_by(|left, right| right.0.total_cmp(&left.0));
+
+    Ok(scored
+        .into_iter()
+        .take(top_k)
+        .map(|(score, chunk)| RetrievedChunkDto {
+            chunk_id: chunk.chunk_id,
+            task_id: chunk.task_id,
+            artifact_id: chunk.artifact_id,
+            artifact_file_name: chunk.artifact_file_name,
+            artifact_stored_path: chunk.artifact_stored_path,
+            chunk_text: chunk.chunk_text,
+            position_index: chunk.position_index,
+            similarity_score: score,
+        })
+        .collect())
+}
+
+pub fn build_task_context_pack(
+    store: &TaskStore,
+    embeddings: &dyn EmbeddingProvider,
+    task_id: i64,
+    query: &str,
+) -> Result<TaskContextPackDto> {
+    let summary = store.get_task_summary(task_id)?;
+    let retrieved_chunks = retrieve_relevant_chunks(store, embeddings, task_id, query)?;
+
+    let active_artifact = retrieved_chunks.first().map(|chunk| ContextArtifactDto {
+        artifact_id: chunk.artifact_id,
+        file_name: chunk.artifact_file_name.clone(),
+        stored_path: chunk.artifact_stored_path.clone(),
+    });
+
+    Ok(TaskContextPackDto {
+        task_summary: summary.summary_text,
+        active_task_id: task_id,
+        recent_transcript: Vec::new(),
+        active_artifact,
+        retrieved_chunks,
+    })
+}
+
+pub fn default_embeddings_provider() -> OpenAiEmbeddingProvider {
+    OpenAiEmbeddingProvider::from_env()
+}
+
+// phase 13: idempotent auto-ingest for the filesystem watcher.
+// if the file has been ingested before and mtime is unchanged, this is a no-op.
+// if mtime changed, existing chunks are replaced without creating a new artifact row.
+// on first ingest, a new artifact is created via the standard pipeline.
+pub fn auto_ingest_file_for_task(
+    store: &crate::store::TaskStore,
+    embeddings: &dyn EmbeddingProvider,
+    task_id: i64,
+    file_path: &Path,
+) -> Result<()> {
+    let canonical = fs::canonicalize(file_path)
+        .with_context(|| format!("failed to canonicalize {}", file_path.display()))?;
+
+    let file_version = fs::metadata(&canonical)
+        .ok()
+        .map(|metadata| {
+            let modified_nanos = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            let content_hash = fs::read(&canonical)
+                .ok()
+                .map(|bytes| {
+                    let mut hasher = DefaultHasher::new();
+                    bytes.hash(&mut hasher);
+                    hasher.finish()
+                })
+                .unwrap_or_default();
+            format!("{modified_nanos}:{}:{content_hash}", metadata.len())
+        })
+        .unwrap_or_default();
+
+    let canonical_str = canonical.to_string_lossy().to_string();
+
+    // check registry to detect whether file is already up to date.
+    let existing = store.get_file_registry_entry(task_id, &canonical_str)?;
+    if let Some(ref entry) = existing {
+        if entry.last_modified_at == file_version && !file_version.is_empty() {
+            return Ok(());
+        }
+    }
+
+    // parse + chunk + embed.
+    let parsed_text = crate::artifact_parser::parse_text_from_artifact(&canonical)?;
+    let raw_chunks = crate::chunking::chunk_text(
+        &parsed_text,
+        crate::chunking::DEFAULT_CHUNK_SIZE_CHARS,
+        crate::chunking::DEFAULT_CHUNK_OVERLAP_CHARS,
+    );
+    if raw_chunks.is_empty() {
+        return Err(anyhow::anyhow!("auto-ingest: file produced no chunks"));
+    }
+
+    let mut chunk_rows = Vec::with_capacity(raw_chunks.len());
+    for (index, chunk) in raw_chunks.iter().enumerate() {
+        let embedding = embeddings
+            .embed_text(chunk)
+            .with_context(|| format!("failed to embed chunk {index}"))?;
+        if embedding.is_empty() {
+            return Err(anyhow::anyhow!(
+                "embedding provider returned empty vector for chunk {index}"
+            ));
+        }
+        chunk_rows.push(crate::store::ChunkEmbeddingInput {
+            chunk_text: chunk.to_string(),
+            position_index: index as i64,
+            embedding,
+        });
+    }
+
+    let preview_text = raw_chunks
+        .first()
+        .map(|c| c.chars().take(150).collect::<String>())
+        .unwrap_or_default();
+
+    let file_name = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    if let Some(entry) = existing {
+        // re-ingest: replace chunks for the existing artifact.
+        if let Some(artifact_id) = entry.artifact_id {
+            // overwrite the stored copy so artifact content stays in sync.
+            let artifact_list = store.list_artifacts(task_id)?;
+            if let Some(artifact) = artifact_list.iter().find(|a| a.id == artifact_id) {
+                let _ = fs::copy(&canonical, &artifact.stored_path);
+            }
+
+            store.replace_artifact_chunks(task_id, artifact_id, &chunk_rows)?;
+            store.upsert_file_registry_entry(
+                task_id,
+                &canonical_str,
+                Some(artifact_id),
+                &file_version,
+            )?;
+            store.append_recently_learned(task_id, "file", &file_name, &preview_text)?;
+            return Ok(());
+        }
+    }
+
+    // first ingest: create artifact via standard pipeline and register it.
+    let artifact = import_artifact_for_task(store, embeddings, task_id, &canonical_str)?;
+    store.upsert_file_registry_entry(task_id, &canonical_str, Some(artifact.id), &file_version)?;
+    store.append_recently_learned(task_id, "file", &file_name, &preview_text)?;
+    Ok(())
+}
+
+fn sanitize_file_name(file_name: &str) -> String {
+    let mut output = String::new();
+
+    for character in file_name.chars() {
+        if character.is_ascii_alphanumeric()
+            || character == '.'
+            || character == '-'
+            || character == '_'
+        {
+            output.push(character);
+        } else {
+            output.push('-');
+        }
+    }
+
+    let trimmed = output.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "artifact".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn next_available_artifact_path(directory: &Path, file_name: &str) -> PathBuf {
+    let candidate = directory.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("artifact");
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+
+    for suffix in 2..1000 {
+        let candidate = directory.join(format!("{stem}-{suffix}{extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    directory.join(format!("{stem}-fallback{extension}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    use anyhow::Result;
+
+    use crate::{embedding::EmbeddingProvider, store::TaskStore};
+
+    use super::{
+        auto_ingest_file_for_task, build_task_context_pack, import_artifact_for_task,
+        retrieve_relevant_chunks_with_top_k,
+    };
+
+    #[derive(Clone)]
+    struct KeywordEmbeddingProvider;
+
+    impl EmbeddingProvider for KeywordEmbeddingProvider {
+        fn embed_text(&self, input: &str) -> Result<Vec<f32>> {
+            let lower = input.to_lowercase();
+            let score = |terms: &[&str]| -> f32 {
+                terms
+                    .iter()
+                    .map(|term| lower.matches(term).count() as f32)
+                    .sum()
+            };
+
+            Ok(vec![
+                score(&["storymap"]),
+                score(&["requirement", "requirements", "required"]),
+                score(&["structure", "section", "sections"]),
+                score(&["evidence", "primary source", "primary sources"]),
+                score(&["timeline", "map"]),
+                (lower.len() as f32) / 1000.0,
+            ])
+        }
+    }
+
+    fn write_file(path: &Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("failed to create parent directory");
+        }
+
+        fs::write(path, body).expect("failed to write file");
+    }
+
+    #[test]
+    fn import_file_stores_artifact_in_workspace_and_metadata() {
+        let temp = tempfile::tempdir().expect("failed to create temp directory");
+        let base_path = temp.path().join("app_local_data");
+        let store = TaskStore::initialize(&base_path).expect("failed to initialize store");
+
+        let task = store
+            .create_task("History StoryMap")
+            .expect("failed to create task");
+
+        let source_path = temp.path().join("fixtures").join("notes.md");
+        write_file(
+            &source_path,
+            "# StoryMap Notes\n\nThe project requires clear structure and evidence.",
+        );
+
+        let artifact = import_artifact_for_task(
+            &store,
+            &KeywordEmbeddingProvider,
+            task.id,
+            &source_path.to_string_lossy(),
+        )
+        .expect("failed to import artifact");
+
+        assert_eq!(artifact.task_id, task.id);
+        assert!(artifact.chunk_count > 0);
+        assert!(PathBuf::from(&artifact.stored_path).exists());
+
+        let artifacts = store
+            .list_artifacts(task.id)
+            .expect("failed to list artifacts for task");
+        assert_eq!(artifacts.len(), 1);
+    }
+
+    #[test]
+    fn import_creates_chunks_and_stores_embeddings() {
+        let temp = tempfile::tempdir().expect("failed to create temp directory");
+        let base_path = temp.path().join("app_local_data");
+        let store = TaskStore::initialize(&base_path).expect("failed to initialize store");
+
+        let task = store
+            .create_task("History StoryMap")
+            .expect("failed to create task");
+
+        let source_path = temp.path().join("fixtures").join("rubric.txt");
+        write_file(
+            &source_path,
+            "StoryMap requirements include a clear structure, sections, and evidence expectations.",
+        );
+
+        import_artifact_for_task(
+            &store,
+            &KeywordEmbeddingProvider,
+            task.id,
+            &source_path.to_string_lossy(),
+        )
+        .expect("failed to import artifact");
+
+        let chunks = store
+            .fetch_chunk_embeddings_for_task(task.id)
+            .expect("failed to load chunk embeddings");
+
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|chunk| !chunk.embedding.is_empty()));
+    }
+
+    #[test]
+    fn retrieval_ranks_relevant_chunks_higher() {
+        let temp = tempfile::tempdir().expect("failed to create temp directory");
+        let base_path = temp.path().join("app_local_data");
+        let store = TaskStore::initialize(&base_path).expect("failed to initialize store");
+
+        let task = store
+            .create_task("History StoryMap")
+            .expect("failed to create task");
+
+        let notes_path = temp.path().join("fixtures").join("notes.md");
+        let unrelated_path = temp.path().join("fixtures").join("other.txt");
+
+        write_file(
+            &notes_path,
+            "StoryMap requirements:\n1. Include clear structure\n2. Add sections\n3. Provide primary source evidence.",
+        );
+        write_file(&unrelated_path, "Shopping list: apples, milk, bread.");
+
+        import_artifact_for_task(
+            &store,
+            &KeywordEmbeddingProvider,
+            task.id,
+            &notes_path.to_string_lossy(),
+        )
+        .expect("failed to import notes");
+
+        import_artifact_for_task(
+            &store,
+            &KeywordEmbeddingProvider,
+            task.id,
+            &unrelated_path.to_string_lossy(),
+        )
+        .expect("failed to import unrelated file");
+
+        let retrieved = retrieve_relevant_chunks_with_top_k(
+            &store,
+            &KeywordEmbeddingProvider,
+            task.id,
+            "what are the storymap requirements",
+            3,
+        )
+        .expect("failed to retrieve chunks");
+
+        assert!(!retrieved.is_empty());
+
+        let top_text = retrieved[0].chunk_text.to_lowercase();
+        assert!(top_text.contains("structure") || top_text.contains("sections"));
+        assert!(top_text.contains("evidence") || top_text.contains("primary source"));
+    }
+
+    #[test]
+    fn context_pack_contains_summary_and_retrieved_chunks() {
+        let temp = tempfile::tempdir().expect("failed to create temp directory");
+        let base_path = temp.path().join("app_local_data");
+        let store = TaskStore::initialize(&base_path).expect("failed to initialize store");
+
+        let task = store
+            .create_task("History StoryMap")
+            .expect("failed to create task");
+
+        let notes_path = temp.path().join("fixtures").join("notes.md");
+        write_file(
+            &notes_path,
+            "The StoryMap rubric requires structure, sections, and supporting evidence.",
+        );
+
+        import_artifact_for_task(
+            &store,
+            &KeywordEmbeddingProvider,
+            task.id,
+            &notes_path.to_string_lossy(),
+        )
+        .expect("failed to import notes");
+
+        let context_pack = build_task_context_pack(
+            &store,
+            &KeywordEmbeddingProvider,
+            task.id,
+            "storymap requirements",
+        )
+        .expect("failed to build context pack");
+
+        assert_eq!(context_pack.active_task_id, task.id);
+        assert!(!context_pack.task_summary.is_empty());
+        assert!(!context_pack.retrieved_chunks.is_empty());
+        assert!(context_pack.recent_transcript.is_empty());
+    }
+
+    #[test]
+    fn auto_ingest_is_idempotent_and_reindexes_existing_artifact() {
+        let temp = tempfile::tempdir().expect("failed to create temp directory");
+        let base_path = temp.path().join("app_local_data");
+        let store = TaskStore::initialize(&base_path).expect("failed to initialize store");
+
+        let task = store
+            .create_task("Watcher Task")
+            .expect("failed to create task");
+        let source_path = temp.path().join("fixtures").join("watch.md");
+        write_file(
+            &source_path,
+            "# Draft\n\nThe first draft needs tighter evidence integration.",
+        );
+
+        auto_ingest_file_for_task(&store, &KeywordEmbeddingProvider, task.id, &source_path)
+            .expect("first auto-ingest failed");
+
+        let artifacts_after_first = store
+            .list_artifacts(task.id)
+            .expect("failed to list artifacts");
+        assert_eq!(
+            artifacts_after_first.len(),
+            1,
+            "first ingest should create one artifact"
+        );
+        let chunks_after_first = store
+            .fetch_chunk_embeddings_for_task(task.id)
+            .expect("failed to load chunks after first ingest");
+        assert!(
+            !chunks_after_first.is_empty(),
+            "first ingest should store chunks"
+        );
+
+        auto_ingest_file_for_task(&store, &KeywordEmbeddingProvider, task.id, &source_path)
+            .expect("second auto-ingest failed");
+
+        let artifacts_after_second = store
+            .list_artifacts(task.id)
+            .expect("failed to list artifacts");
+        assert_eq!(
+            artifacts_after_second.len(),
+            1,
+            "idempotent ingest should not create a duplicate artifact"
+        );
+        let chunks_after_second = store
+            .fetch_chunk_embeddings_for_task(task.id)
+            .expect("failed to load chunks after second ingest");
+        assert_eq!(
+            chunks_after_second.len(),
+            chunks_after_first.len(),
+            "idempotent ingest should keep chunk count stable for unchanged content"
+        );
+
+        write_file(
+            &source_path,
+            "# Draft\n\nUpdated draft now anchors each claim in a primary source and course reading.",
+        );
+
+        auto_ingest_file_for_task(&store, &KeywordEmbeddingProvider, task.id, &source_path)
+            .expect("reindex after file update failed");
+
+        let artifacts_after_update = store
+            .list_artifacts(task.id)
+            .expect("failed to list artifacts");
+        assert_eq!(
+            artifacts_after_update.len(),
+            1,
+            "updated ingest should reindex existing artifact, not create a new row"
+        );
+
+        let updated_chunks = store
+            .fetch_chunk_embeddings_for_task(task.id)
+            .expect("failed to load chunks after update");
+        assert!(
+            updated_chunks
+                .iter()
+                .any(|chunk| chunk.chunk_text.to_lowercase().contains("updated draft")),
+            "updated content should be visible in reindexed chunks"
+        );
+    }
+}

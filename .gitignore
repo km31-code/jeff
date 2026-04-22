@@ -1,0 +1,12 @@
+# Node
+node_modules/
+.DS_Store
+
+# Desktop frontend outputs
+desktop/dist/
+
+# Rust outputs
+desktop/src-tauri/target/
+
+# Env files
+.env

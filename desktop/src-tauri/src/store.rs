@@ -1,0 +1,3662 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{anyhow, Context, Result};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
+use serde_json::json;
+
+use crate::{
+    message_kind::MessageKind,
+    models::{
+        ArtifactContentDto, ArtifactDto, ArtifactVersionDto, ChatMessageDto, EventLogEntryDto,
+        FileWriteProposalDto, OpenResourceDto, RecentlyLearnedItemDto, RevisionProposalDto,
+        SessionModeStateDto, SubTaskDto, SubTaskStepDto, SuggestionDto, TaskDto, TaskSummaryDto,
+        WatchedFileRegistryEntry, WatchedFolderDto, WorkspaceInfoDto, WriteAuditEntryDto,
+    },
+    workspace::slugify_title,
+};
+
+const SQLITE_NOW_EXPR: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
+
+#[derive(Debug, Clone)]
+pub struct StorePaths {
+    pub db_path: PathBuf,
+    pub workspace_root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskStore {
+    pub paths: StorePaths,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkEmbeddingInput {
+    pub chunk_text: String,
+    pub position_index: i64,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredChunkEmbedding {
+    pub chunk_id: i64,
+    pub task_id: i64,
+    pub artifact_id: i64,
+    pub artifact_file_name: String,
+    pub artifact_stored_path: String,
+    pub chunk_text: String,
+    pub position_index: i64,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewRevisionProposalInput {
+    pub task_id: i64,
+    pub artifact_id: i64,
+    pub target_start_offset: i64,
+    pub target_end_offset: i64,
+    pub target_description: String,
+    pub original_text: String,
+    pub proposed_text: String,
+    pub instruction_text: String,
+    pub instruction_source: String,
+    pub rationale: Option<String>,
+    pub grounding_notes: Option<String>,
+    pub retrieval_confidence: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewArtifactVersionInput {
+    pub task_id: i64,
+    pub artifact_id: i64,
+    pub revision_id: Option<i64>,
+    pub version_reason: String,
+    pub content_snapshot: String,
+    pub stored_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArtifactVersionSnapshot {
+    pub dto: ArtifactVersionDto,
+    pub content_snapshot: String,
+    pub stored_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewSubTaskInput {
+    pub task_id: i64,
+    pub title: String,
+    pub description: String,
+    pub execution_type: String,
+    pub instruction_source: String,
+    pub parent_context_snapshot: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionModeUpdateInput {
+    pub task_id: i64,
+    pub current_mode: String,
+    pub mode_reason: String,
+    pub waiting_on_user_decision: bool,
+    pub last_engine_decision: String,
+    pub active_artifact_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewSuggestionInput {
+    pub task_id: i64,
+    pub title: String,
+    pub description: String,
+    pub suggestion_type: String,
+    pub source_reason: String,
+    pub suggestion_key: String,
+    pub linked_context: Option<String>,
+    pub linked_subtask_type: Option<String>,
+    pub linked_revision_intent: Option<String>,
+}
+
+impl TaskStore {
+    pub fn initialize(base_dir: &Path) -> Result<Self> {
+        fs::create_dir_all(base_dir)
+            .with_context(|| format!("failed to create store base dir {}", base_dir.display()))?;
+
+        let db_path = base_dir.join("jeff_store.sqlite3");
+        let workspace_root = base_dir.join("tasks");
+        fs::create_dir_all(&workspace_root).with_context(|| {
+            format!(
+                "failed to create workspace root {}",
+                workspace_root.display()
+            )
+        })?;
+
+        let store = Self {
+            paths: StorePaths {
+                db_path,
+                workspace_root,
+            },
+        };
+
+        store.initialize_schema()?;
+        Ok(store)
+    }
+
+    fn connect(&self) -> Result<Connection> {
+        let conn = Connection::open(&self.paths.db_path).with_context(|| {
+            format!("failed to open sqlite db {}", self.paths.db_path.display())
+        })?;
+        conn.execute_batch(
+            "
+            PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = WAL;
+            PRAGMA busy_timeout = 10000;
+            ",
+        )
+        .context("failed to initialize sqlite pragmas")?;
+        Ok(conn)
+    }
+
+    fn initialize_schema(&self) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute_batch(&format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                slug TEXT NOT NULL UNIQUE,
+                workspace_path TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                updated_at TEXT NOT NULL DEFAULT ({now}),
+                is_active INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_single_active
+                ON tasks(is_active)
+                WHERE is_active = 1;
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE TABLE IF NOT EXISTS task_summaries (
+                task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                summary_text TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE TABLE IF NOT EXISTS open_resources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                resource_type TEXT NOT NULL,
+                resource_path_or_url TEXT NOT NULL,
+                label TEXT NOT NULL,
+                position_index INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                file_name TEXT NOT NULL,
+                file_extension TEXT NOT NULL,
+                original_path TEXT NOT NULL,
+                stored_path TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE TABLE IF NOT EXISTS artifact_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+                chunk_text TEXT NOT NULL,
+                position_index INTEGER NOT NULL,
+                embedding_json TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_artifact_chunks_task ON artifact_chunks(task_id);
+            CREATE INDEX IF NOT EXISTS idx_artifact_chunks_artifact ON artifact_chunks(artifact_id, position_index);
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                session_id INTEGER,
+                role TEXT NOT NULL,
+                message_source TEXT NOT NULL,
+                message_kind TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_task ON chat_messages(task_id, id);
+
+            CREATE TABLE IF NOT EXISTS artifact_revisions (
+                revision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+                target_start_offset INTEGER NOT NULL,
+                target_end_offset INTEGER NOT NULL,
+                target_description TEXT NOT NULL,
+                original_text TEXT NOT NULL,
+                proposed_text TEXT NOT NULL,
+                instruction_text TEXT NOT NULL,
+                instruction_source TEXT NOT NULL,
+                rationale TEXT,
+                grounding_notes TEXT,
+                retrieval_confidence REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_revisions_task ON artifact_revisions(task_id, status, revision_id);
+            CREATE INDEX IF NOT EXISTS idx_revisions_artifact ON artifact_revisions(artifact_id, status, revision_id);
+
+            CREATE TABLE IF NOT EXISTS artifact_versions (
+                version_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+                revision_id INTEGER,
+                version_reason TEXT NOT NULL,
+                content_snapshot TEXT NOT NULL,
+                stored_path TEXT NOT NULL,
+                content_preview TEXT NOT NULL,
+                content_length INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_versions_artifact ON artifact_versions(artifact_id, version_id DESC);
+
+            CREATE TABLE IF NOT EXISTS subtasks (
+                subtask_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                execution_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                result_review_status TEXT NOT NULL DEFAULT 'unreviewed',
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                updated_at TEXT NOT NULL DEFAULT ({now}),
+                result_summary TEXT,
+                result_payload TEXT,
+                instruction_source TEXT NOT NULL,
+                parent_context_snapshot TEXT NOT NULL,
+                error_message TEXT,
+                max_steps INTEGER NOT NULL DEFAULT 5,
+                current_step INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_subtasks_task ON subtasks(task_id, subtask_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_subtasks_status ON subtasks(task_id, status);
+
+            CREATE TABLE IF NOT EXISTS session_mode_state (
+                task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                current_mode TEXT NOT NULL,
+                mode_reason TEXT NOT NULL,
+                waiting_on_user_decision INTEGER NOT NULL DEFAULT 0,
+                last_engine_decision TEXT NOT NULL,
+                active_artifact_id INTEGER,
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE TABLE IF NOT EXISTS suggestions (
+                suggestion_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                suggestion_type TEXT NOT NULL,
+                source_reason TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                suggestion_key TEXT NOT NULL,
+                linked_context TEXT,
+                linked_subtask_type TEXT,
+                linked_revision_intent TEXT,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_suggestions_task_status ON suggestions(task_id, status, suggestion_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_suggestions_task_key ON suggestions(task_id, suggestion_key);
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE TABLE IF NOT EXISTS event_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_event_log_task ON event_log(task_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS watched_folders (
+                task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                folder_path TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                ignore_rules_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE TABLE IF NOT EXISTS watched_file_registry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                canonical_path TEXT NOT NULL,
+                artifact_id INTEGER,
+                last_modified_at TEXT NOT NULL DEFAULT '',
+                ingested_at TEXT NOT NULL DEFAULT ({now}),
+                UNIQUE(task_id, canonical_path)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_file_registry_task ON watched_file_registry(task_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS clipboard_capture_settings (
+                task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE TABLE IF NOT EXISTS recently_learned_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                display_label TEXT NOT NULL,
+                preview_text TEXT NOT NULL,
+                ingested_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_recently_learned_task ON recently_learned_log(task_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS proactive_trigger_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                trigger_type TEXT NOT NULL,
+                fired_at TEXT NOT NULL DEFAULT ({now}),
+                suppressed INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_proactive_trigger_task_type
+                ON proactive_trigger_log(task_id, trigger_type, id DESC);
+
+            CREATE TABLE IF NOT EXISTS task_focus_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                focused_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_task_focus_task ON task_focus_log(task_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS subtask_steps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subtask_id INTEGER NOT NULL REFERENCES subtasks(subtask_id) ON DELETE CASCADE,
+                step_index INTEGER NOT NULL,
+                step_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                description TEXT NOT NULL DEFAULT '',
+                result_summary TEXT,
+                result_payload TEXT,
+                error_message TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                UNIQUE(subtask_id, step_index)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_subtask_steps_subtask ON subtask_steps(subtask_id, step_index);
+
+            CREATE TABLE IF NOT EXISTS subtask_file_write_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subtask_id INTEGER NOT NULL REFERENCES subtasks(subtask_id) ON DELETE CASCADE,
+                step_id INTEGER REFERENCES subtask_steps(id) ON DELETE SET NULL,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                proposed_path TEXT NOT NULL,
+                proposed_content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending_approval',
+                proposed_at TEXT NOT NULL DEFAULT ({now}),
+                resolved_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_file_write_proposals_task_status
+                ON subtask_file_write_proposals(task_id, status, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_file_write_proposals_subtask
+                ON subtask_file_write_proposals(subtask_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS subtask_write_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                subtask_id INTEGER NOT NULL,
+                proposal_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                proposed_path TEXT NOT NULL,
+                resolved_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_write_audit_task ON subtask_write_audit_log(task_id, id DESC);
+            "#,
+            now = SQLITE_NOW_EXPR,
+        ))
+        .context("failed to initialize sqlite schema")?;
+
+        // idempotent migration for older subtasks schema without phase 16 columns.
+        let _ = conn
+            .execute_batch("ALTER TABLE subtasks ADD COLUMN max_steps INTEGER NOT NULL DEFAULT 5;");
+        let _ = conn.execute_batch(
+            "ALTER TABLE subtasks ADD COLUMN current_step INTEGER NOT NULL DEFAULT 0;",
+        );
+
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // task core
+    // ---------------------------------------------------------------------
+
+    pub fn create_task(&self, title: &str) -> Result<TaskDto> {
+        let clean_title = title.trim();
+        if clean_title.is_empty() {
+            return Err(anyhow!("task title cannot be empty"));
+        }
+
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start task creation transaction")?;
+
+        let base_slug = slugify_title(clean_title);
+        let slug = Self::next_available_slug(&tx, &base_slug)?;
+        let workspace_path = self.paths.workspace_root.join(&slug);
+        fs::create_dir_all(&workspace_path).with_context(|| {
+            format!(
+                "failed to create task workspace {}",
+                workspace_path.display()
+            )
+        })?;
+
+        let has_active: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE is_active = 1",
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to check active task count")?;
+        let should_activate = has_active == 0;
+
+        tx.execute(
+            &format!(
+                "INSERT INTO tasks (title, slug, workspace_path, created_at, updated_at, is_active)
+                 VALUES (?1, ?2, ?3, ({now}), ({now}), ?4)",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                clean_title,
+                slug,
+                workspace_path.to_string_lossy().to_string(),
+                if should_activate { 1 } else { 0 },
+            ],
+        )
+        .context("failed to insert task")?;
+
+        let task_id = tx.last_insert_rowid();
+
+        tx.execute(
+            &format!(
+                "INSERT INTO task_summaries (task_id, summary_text, updated_at)
+                 VALUES (?1, ?2, ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                task_id,
+                format!("Summary placeholder for '{}'.", clean_title)
+            ],
+        )
+        .context("failed to insert task summary")?;
+
+        tx.execute(
+            &format!(
+                "INSERT INTO clipboard_capture_settings (task_id, enabled, updated_at)
+                 VALUES (?1, 0, ({now}))
+                 ON CONFLICT(task_id) DO NOTHING",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id],
+        )
+        .context("failed to seed clipboard settings")?;
+
+        Self::record_event_tx(
+            &tx,
+            task_id,
+            "task_created",
+            &json!({ "task_id": task_id, "title": clean_title, "slug": slug }).to_string(),
+        )?;
+
+        if should_activate {
+            Self::record_event_tx(
+                &tx,
+                task_id,
+                "task_activated",
+                &json!({ "task_id": task_id }).to_string(),
+            )?;
+        }
+
+        tx.commit()
+            .context("failed to commit task creation transaction")?;
+
+        self.get_task_by_id(task_id)?
+            .ok_or_else(|| anyhow!("task was created but could not be reloaded"))
+    }
+
+    pub fn list_tasks(&self) -> Result<Vec<TaskDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, slug, workspace_path, created_at, updated_at, is_active
+                 FROM tasks
+                 ORDER BY is_active DESC, updated_at DESC, id DESC",
+            )
+            .context("failed to prepare list_tasks query")?;
+
+        let rows = stmt
+            .query_map([], task_from_row)
+            .context("failed to query tasks")?;
+
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.context("failed to map task row")?);
+        }
+        Ok(tasks)
+    }
+
+    pub fn get_active_task(&self) -> Result<Option<TaskDto>> {
+        let conn = self.connect()?;
+        let task = conn
+            .query_row(
+                "SELECT id, title, slug, workspace_path, created_at, updated_at, is_active
+                 FROM tasks
+                 WHERE is_active = 1
+                 LIMIT 1",
+                [],
+                task_from_row,
+            )
+            .optional()
+            .context("failed to query active task")?;
+        Ok(task)
+    }
+
+    pub fn set_active_task(&self, task_id: i64) -> Result<TaskDto> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start set_active_task transaction")?;
+
+        let exists: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to verify task exists")?;
+        if exists.is_none() {
+            return Err(anyhow!("task id={} not found", task_id));
+        }
+
+        tx.execute("UPDATE tasks SET is_active = 0 WHERE is_active = 1", [])
+            .context("failed to deactivate current active task")?;
+
+        tx.execute(
+            &format!(
+                "UPDATE tasks
+                 SET is_active = 1, updated_at = ({now})
+                 WHERE id = ?1",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id],
+        )
+        .context("failed to activate task")?;
+
+        Self::record_event_tx(
+            &tx,
+            task_id,
+            "task_activated",
+            &json!({ "task_id": task_id }).to_string(),
+        )?;
+
+        tx.commit()
+            .context("failed to commit set_active_task transaction")?;
+
+        self.get_task_by_id(task_id)?
+            .ok_or_else(|| anyhow!("activated task could not be reloaded"))
+    }
+
+    pub fn get_task_workspace(&self, task_id: i64) -> Result<WorkspaceInfoDto> {
+        let task = self
+            .get_task_by_id(task_id)?
+            .ok_or_else(|| anyhow!("task id={} not found", task_id))?;
+
+        Ok(WorkspaceInfoDto {
+            task_id: task.id,
+            slug: task.slug,
+            workspace_path: task.workspace_path.clone(),
+            exists_on_disk: Path::new(&task.workspace_path).exists(),
+        })
+    }
+
+    pub fn get_task_workspace_path(&self, task_id: i64) -> Result<PathBuf> {
+        let workspace = self.get_task_workspace(task_id)?;
+        Ok(PathBuf::from(workspace.workspace_path))
+    }
+
+    pub fn get_task_summary(&self, task_id: i64) -> Result<TaskSummaryDto> {
+        let conn = self.connect()?;
+
+        if let Some(summary) = conn
+            .query_row(
+                "SELECT task_id, summary_text, updated_at FROM task_summaries WHERE task_id = ?1",
+                params![task_id],
+                task_summary_from_row,
+            )
+            .optional()
+            .context("failed to query task summary")?
+        {
+            return Ok(summary);
+        }
+
+        let task = self
+            .get_task_by_id(task_id)?
+            .ok_or_else(|| anyhow!("task id={} not found", task_id))?;
+
+        conn.execute(
+            &format!(
+                "INSERT INTO task_summaries (task_id, summary_text, updated_at)
+                 VALUES (?1, ?2, ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                task_id,
+                format!("Summary placeholder for '{}'.", task.title)
+            ],
+        )
+        .context("failed to auto-seed task summary")?;
+
+        conn.query_row(
+            "SELECT task_id, summary_text, updated_at FROM task_summaries WHERE task_id = ?1",
+            params![task_id],
+            task_summary_from_row,
+        )
+        .context("failed to reload seeded task summary")
+    }
+
+    pub fn list_open_resources(&self, task_id: i64) -> Result<Vec<OpenResourceDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, resource_type, resource_path_or_url, label, position_index
+                 FROM open_resources
+                 WHERE task_id = ?1
+                 ORDER BY position_index ASC, id ASC",
+            )
+            .context("failed to prepare list_open_resources query")?;
+
+        let rows = stmt
+            .query_map(params![task_id], open_resource_from_row)
+            .context("failed to query open resources")?;
+
+        let mut resources = Vec::new();
+        for row in rows {
+            resources.push(row.context("failed to map open resource row")?);
+        }
+        Ok(resources)
+    }
+
+    // ---------------------------------------------------------------------
+    // artifacts + retrieval support
+    // ---------------------------------------------------------------------
+
+    pub fn insert_artifact_with_chunks(
+        &self,
+        task_id: i64,
+        file_name: &str,
+        file_extension: &str,
+        original_path: &str,
+        stored_path: &str,
+        chunks: &[ChunkEmbeddingInput],
+    ) -> Result<ArtifactDto> {
+        let clean_file_name = file_name.trim();
+        if clean_file_name.is_empty() {
+            return Err(anyhow!("file_name cannot be empty"));
+        }
+
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start insert_artifact_with_chunks transaction")?;
+
+        let _task_exists: i64 = tx
+            .query_row(
+                "SELECT id FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to verify task exists for artifact insert")?
+            .ok_or_else(|| anyhow!("task id={} not found", task_id))?;
+
+        tx.execute(
+            &format!(
+                "INSERT INTO artifacts
+                 (task_id, file_name, file_extension, original_path, stored_path, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ({now}), ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                task_id,
+                clean_file_name,
+                file_extension.trim(),
+                original_path.trim(),
+                stored_path.trim(),
+            ],
+        )
+        .context("failed to insert artifact row")?;
+
+        let artifact_id = tx.last_insert_rowid();
+
+        for chunk in chunks {
+            let embedding_json = serde_json::to_string(&chunk.embedding)
+                .context("failed to serialize chunk embedding")?;
+            tx.execute(
+                "INSERT INTO artifact_chunks (task_id, artifact_id, chunk_text, position_index, embedding_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    task_id,
+                    artifact_id,
+                    chunk.chunk_text,
+                    chunk.position_index,
+                    embedding_json,
+                ],
+            )
+            .context("failed to insert artifact chunk")?;
+        }
+
+        Self::record_event_tx(
+            &tx,
+            task_id,
+            "artifact_imported",
+            &json!({
+                "artifact_id": artifact_id,
+                "file_name": clean_file_name,
+                "chunk_count": chunks.len(),
+            })
+            .to_string(),
+        )?;
+
+        tx.commit()
+            .context("failed to commit insert_artifact_with_chunks transaction")?;
+
+        self.get_artifact_by_id(artifact_id)?
+            .ok_or_else(|| anyhow!("artifact was inserted but could not be reloaded"))
+    }
+
+    pub fn list_artifacts(&self, task_id: i64) -> Result<Vec<ArtifactDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT a.id,
+                        a.task_id,
+                        a.file_name,
+                        a.file_extension,
+                        a.original_path,
+                        a.stored_path,
+                        a.created_at,
+                        a.updated_at,
+                        COUNT(c.id) AS chunk_count
+                 FROM artifacts a
+                 LEFT JOIN artifact_chunks c ON c.artifact_id = a.id
+                 WHERE a.task_id = ?1
+                 GROUP BY a.id
+                 ORDER BY a.id DESC",
+            )
+            .context("failed to prepare list_artifacts query")?;
+
+        let rows = stmt
+            .query_map(params![task_id], artifact_from_row)
+            .context("failed to query artifacts")?;
+
+        let mut artifacts = Vec::new();
+        for row in rows {
+            artifacts.push(row.context("failed to map artifact row")?);
+        }
+        Ok(artifacts)
+    }
+
+    pub fn fetch_chunk_embeddings_for_task(
+        &self,
+        task_id: i64,
+    ) -> Result<Vec<StoredChunkEmbedding>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id,
+                        c.task_id,
+                        c.artifact_id,
+                        a.file_name,
+                        a.stored_path,
+                        c.chunk_text,
+                        c.position_index,
+                        c.embedding_json
+                 FROM artifact_chunks c
+                 JOIN artifacts a ON a.id = c.artifact_id
+                 WHERE c.task_id = ?1
+                 ORDER BY c.artifact_id ASC, c.position_index ASC, c.id ASC",
+            )
+            .context("failed to prepare fetch_chunk_embeddings_for_task query")?;
+
+        let rows = stmt
+            .query_map(params![task_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })
+            .context("failed to query chunk embeddings")?;
+
+        let mut chunks = Vec::new();
+        for row in rows {
+            let (
+                chunk_id,
+                row_task_id,
+                artifact_id,
+                artifact_file_name,
+                artifact_stored_path,
+                chunk_text,
+                position_index,
+                embedding_json,
+            ) = row.context("failed to decode stored chunk row")?;
+
+            let embedding: Vec<f32> = serde_json::from_str(&embedding_json)
+                .context("failed to deserialize stored embedding json")?;
+
+            chunks.push(StoredChunkEmbedding {
+                chunk_id,
+                task_id: row_task_id,
+                artifact_id,
+                artifact_file_name,
+                artifact_stored_path,
+                chunk_text,
+                position_index,
+                embedding,
+            });
+        }
+
+        Ok(chunks)
+    }
+
+    pub fn replace_artifact_chunks(
+        &self,
+        task_id: i64,
+        artifact_id: i64,
+        chunks: &[ChunkEmbeddingInput],
+    ) -> Result<()> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start replace_artifact_chunks transaction")?;
+
+        let owner_task_id: Option<i64> = tx
+            .query_row(
+                "SELECT task_id FROM artifacts WHERE id = ?1",
+                params![artifact_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to verify artifact owner task")?;
+
+        match owner_task_id {
+            Some(id) if id == task_id => {}
+            Some(id) => {
+                return Err(anyhow!(
+                    "artifact id={} belongs to task id={}, not task id={}",
+                    artifact_id,
+                    id,
+                    task_id
+                ));
+            }
+            None => return Err(anyhow!("artifact id={} not found", artifact_id)),
+        }
+
+        tx.execute(
+            "DELETE FROM artifact_chunks WHERE artifact_id = ?1",
+            params![artifact_id],
+        )
+        .context("failed to delete previous artifact chunks")?;
+
+        for chunk in chunks {
+            let embedding_json = serde_json::to_string(&chunk.embedding)
+                .context("failed to serialize replacement embedding")?;
+            tx.execute(
+                "INSERT INTO artifact_chunks (task_id, artifact_id, chunk_text, position_index, embedding_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    task_id,
+                    artifact_id,
+                    chunk.chunk_text,
+                    chunk.position_index,
+                    embedding_json,
+                ],
+            )
+            .context("failed to insert replacement artifact chunk")?;
+        }
+
+        tx.execute(
+            &format!(
+                "UPDATE artifacts SET updated_at = ({now}) WHERE id = ?1",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![artifact_id],
+        )
+        .context("failed to touch artifact updated_at during reindex")?;
+
+        Self::record_event_tx(
+            &tx,
+            task_id,
+            "artifact_reindexed",
+            &json!({ "artifact_id": artifact_id, "chunk_count": chunks.len() }).to_string(),
+        )?;
+
+        tx.commit()
+            .context("failed to commit replace_artifact_chunks transaction")?;
+
+        Ok(())
+    }
+
+    pub fn get_artifact_content(&self, artifact_id: i64) -> Result<ArtifactContentDto> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, file_name, file_extension, stored_path
+                 FROM artifacts
+                 WHERE id = ?1",
+            )
+            .context("failed to prepare get_artifact_content query")?;
+
+        let artifact_row: Option<(i64, i64, String, String, String)> = stmt
+            .query_row(params![artifact_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .optional()
+            .context("failed to query artifact content metadata")?;
+
+        let (id, task_id, file_name, file_extension, stored_path) =
+            artifact_row.ok_or_else(|| anyhow!("artifact id={} not found", artifact_id))?;
+
+        let editable = matches!(file_extension.to_ascii_lowercase().as_str(), "md" | "txt");
+        let content = fs::read_to_string(&stored_path).unwrap_or_default();
+
+        Ok(ArtifactContentDto {
+            artifact_id: id,
+            task_id,
+            file_name,
+            file_extension,
+            stored_path,
+            content,
+            is_editable: editable,
+        })
+    }
+
+    pub fn touch_artifact_updated_at(&self, artifact_id: i64) -> Result<()> {
+        let conn = self.connect()?;
+        let changed = conn
+            .execute(
+                &format!(
+                    "UPDATE artifacts SET updated_at = ({now}) WHERE id = ?1",
+                    now = SQLITE_NOW_EXPR,
+                ),
+                params![artifact_id],
+            )
+            .context("failed to touch artifact updated_at")?;
+
+        if changed == 0 {
+            return Err(anyhow!("artifact id={} not found", artifact_id));
+        }
+
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // chat messages + streaming placeholders
+    // ---------------------------------------------------------------------
+
+    pub fn append_chat_message(
+        &self,
+        task_id: i64,
+        role: &str,
+        message_source: &str,
+        message_kind: MessageKind,
+        content: &str,
+    ) -> Result<ChatMessageDto> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start append_chat_message transaction")?;
+
+        tx.execute(
+            &format!(
+                "INSERT INTO chat_messages
+                 (task_id, session_id, role, message_source, message_kind, content, created_at)
+                 VALUES (?1, NULL, ?2, ?3, ?4, ?5, ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                task_id,
+                role.trim(),
+                message_source.trim(),
+                message_kind.as_str(),
+                content
+            ],
+        )
+        .context("failed to insert chat message")?;
+
+        let message_id = tx.last_insert_rowid();
+
+        Self::record_event_tx(
+            &tx,
+            task_id,
+            "message_appended",
+            &json!({
+                "message_id": message_id,
+                "role": role,
+                "message_kind": message_kind.as_str(),
+            })
+            .to_string(),
+        )?;
+
+        tx.commit()
+            .context("failed to commit append_chat_message transaction")?;
+
+        self.get_chat_message_by_id(message_id)?
+            .ok_or_else(|| anyhow!("chat message id={} missing after insert", message_id))
+    }
+
+    pub fn list_chat_messages(&self, task_id: i64) -> Result<Vec<ChatMessageDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, session_id, role, message_source, message_kind, content, created_at
+                 FROM chat_messages
+                 WHERE task_id = ?1
+                 ORDER BY id ASC",
+            )
+            .context("failed to prepare list_chat_messages query")?;
+
+        let rows = stmt
+            .query_map(params![task_id], chat_message_from_row)
+            .context("failed to query chat messages")?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row.context("failed to map chat message row")?);
+        }
+        Ok(messages)
+    }
+
+    pub fn list_recent_chat_messages(
+        &self,
+        task_id: i64,
+        limit: usize,
+    ) -> Result<Vec<ChatMessageDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, session_id, role, message_source, message_kind, content, created_at
+                 FROM chat_messages
+                 WHERE task_id = ?1
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )
+            .context("failed to prepare list_recent_chat_messages query")?;
+
+        let rows = stmt
+            .query_map(params![task_id, limit as i64], chat_message_from_row)
+            .context("failed to query recent chat messages")?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row.context("failed to map recent chat message row")?);
+        }
+        messages.reverse();
+        Ok(messages)
+    }
+
+    pub fn insert_streaming_placeholder(&self, task_id: i64) -> Result<i64> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO chat_messages
+                 (task_id, session_id, role, message_source, message_kind, content, created_at)
+                 VALUES (?1, NULL, 'assistant', 'assistant', 'assistant_partial', '', ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id],
+        )
+        .context("failed to insert streaming placeholder")?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn finalize_streaming_message(
+        &self,
+        message_id: i64,
+        content: &str,
+        final_kind: MessageKind,
+    ) -> Result<()> {
+        let final_content = if matches!(final_kind, MessageKind::AssistantInterrupted)
+            && content.trim().is_empty()
+        {
+            "(interrupted)".to_string()
+        } else {
+            content.to_string()
+        };
+
+        let conn = self.connect()?;
+        let changed = conn
+            .execute(
+                "UPDATE chat_messages
+                 SET content = ?1, message_kind = ?2, message_source = 'assistant'
+                 WHERE id = ?3",
+                params![final_content, final_kind.as_str(), message_id],
+            )
+            .context("failed to finalize streaming placeholder")?;
+        if changed == 0 {
+            return Err(anyhow!("streaming placeholder id={} not found", message_id));
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // revisions + versions
+    // ---------------------------------------------------------------------
+
+    pub fn create_revision_proposal(
+        &self,
+        input: &NewRevisionProposalInput,
+    ) -> Result<RevisionProposalDto> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start create_revision_proposal transaction")?;
+
+        tx.execute(
+            &format!(
+                "INSERT INTO artifact_revisions
+                 (
+                   task_id,
+                   artifact_id,
+                   target_start_offset,
+                   target_end_offset,
+                   target_description,
+                   original_text,
+                   proposed_text,
+                   instruction_text,
+                   instruction_source,
+                   rationale,
+                   grounding_notes,
+                   retrieval_confidence,
+                   status,
+                   created_at,
+                   updated_at
+                 )
+                 VALUES
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'pending', ({now}), ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                input.task_id,
+                input.artifact_id,
+                input.target_start_offset,
+                input.target_end_offset,
+                input.target_description,
+                input.original_text,
+                input.proposed_text,
+                input.instruction_text,
+                input.instruction_source,
+                input.rationale,
+                input.grounding_notes,
+                input.retrieval_confidence,
+            ],
+        )
+        .context("failed to insert revision proposal")?;
+
+        let revision_id = tx.last_insert_rowid();
+
+        Self::record_event_tx(
+            &tx,
+            input.task_id,
+            "revision_proposed",
+            &json!({ "revision_id": revision_id, "artifact_id": input.artifact_id }).to_string(),
+        )?;
+
+        tx.commit()
+            .context("failed to commit create_revision_proposal transaction")?;
+
+        self.get_revision_by_id(revision_id)?
+            .ok_or_else(|| anyhow!("revision id={} missing after insert", revision_id))
+    }
+
+    pub fn list_pending_revisions(
+        &self,
+        task_id: i64,
+        artifact_id: i64,
+    ) -> Result<Vec<RevisionProposalDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT revision_id,
+                        task_id,
+                        artifact_id,
+                        target_start_offset,
+                        target_end_offset,
+                        target_description,
+                        original_text,
+                        proposed_text,
+                        instruction_text,
+                        instruction_source,
+                        rationale,
+                        grounding_notes,
+                        retrieval_confidence,
+                        status,
+                        created_at,
+                        updated_at
+                 FROM artifact_revisions
+                 WHERE task_id = ?1
+                   AND artifact_id = ?2
+                   AND status = 'pending'
+                 ORDER BY revision_id DESC",
+            )
+            .context("failed to prepare list_pending_revisions query")?;
+
+        let rows = stmt
+            .query_map(params![task_id, artifact_id], revision_from_row)
+            .context("failed to query pending revisions")?;
+
+        let mut revisions = Vec::new();
+        for row in rows {
+            revisions.push(row.context("failed to map pending revision row")?);
+        }
+        Ok(revisions)
+    }
+
+    pub fn list_pending_revisions_for_task(
+        &self,
+        task_id: i64,
+    ) -> Result<Vec<RevisionProposalDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT revision_id,
+                        task_id,
+                        artifact_id,
+                        target_start_offset,
+                        target_end_offset,
+                        target_description,
+                        original_text,
+                        proposed_text,
+                        instruction_text,
+                        instruction_source,
+                        rationale,
+                        grounding_notes,
+                        retrieval_confidence,
+                        status,
+                        created_at,
+                        updated_at
+                 FROM artifact_revisions
+                 WHERE task_id = ?1
+                   AND status = 'pending'
+                 ORDER BY revision_id DESC",
+            )
+            .context("failed to prepare list_pending_revisions_for_task query")?;
+
+        let rows = stmt
+            .query_map(params![task_id], revision_from_row)
+            .context("failed to query pending revisions for task")?;
+
+        let mut revisions = Vec::new();
+        for row in rows {
+            revisions.push(row.context("failed to map task pending revision row")?);
+        }
+        Ok(revisions)
+    }
+
+    pub fn get_revision_by_id(&self, revision_id: i64) -> Result<Option<RevisionProposalDto>> {
+        let conn = self.connect()?;
+        let revision = conn
+            .query_row(
+                "SELECT revision_id,
+                        task_id,
+                        artifact_id,
+                        target_start_offset,
+                        target_end_offset,
+                        target_description,
+                        original_text,
+                        proposed_text,
+                        instruction_text,
+                        instruction_source,
+                        rationale,
+                        grounding_notes,
+                        retrieval_confidence,
+                        status,
+                        created_at,
+                        updated_at
+                 FROM artifact_revisions
+                 WHERE revision_id = ?1",
+                params![revision_id],
+                revision_from_row,
+            )
+            .optional()
+            .context("failed to query revision by id")?;
+        Ok(revision)
+    }
+
+    pub fn set_revision_status(
+        &self,
+        revision_id: i64,
+        status: &str,
+    ) -> Result<RevisionProposalDto> {
+        let conn = self.connect()?;
+        let changed = conn
+            .execute(
+                &format!(
+                    "UPDATE artifact_revisions
+                     SET status = ?1, updated_at = ({now})
+                     WHERE revision_id = ?2",
+                    now = SQLITE_NOW_EXPR,
+                ),
+                params![status.trim(), revision_id],
+            )
+            .context("failed to update revision status")?;
+
+        if changed == 0 {
+            return Err(anyhow!("revision id={} not found", revision_id));
+        }
+
+        self.get_revision_by_id(revision_id)?
+            .ok_or_else(|| anyhow!("revision disappeared after status update"))
+    }
+
+    pub fn create_artifact_version(
+        &self,
+        input: &NewArtifactVersionInput,
+    ) -> Result<ArtifactVersionDto> {
+        let preview = compact_preview(&input.content_snapshot, 240);
+        let content_length = input.content_snapshot.chars().count() as i64;
+
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO artifact_versions
+                 (
+                    task_id,
+                    artifact_id,
+                    revision_id,
+                    version_reason,
+                    content_snapshot,
+                    stored_path,
+                    content_preview,
+                    content_length,
+                    created_at
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                input.task_id,
+                input.artifact_id,
+                input.revision_id,
+                input.version_reason,
+                input.content_snapshot,
+                input.stored_path,
+                preview,
+                content_length,
+            ],
+        )
+        .context("failed to insert artifact version")?;
+
+        let version_id = conn.last_insert_rowid();
+        self.get_artifact_version_by_id(version_id)?
+            .ok_or_else(|| anyhow!("artifact version id={} missing after insert", version_id))
+    }
+
+    pub fn list_artifact_versions(&self, artifact_id: i64) -> Result<Vec<ArtifactVersionDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT version_id,
+                        task_id,
+                        artifact_id,
+                        revision_id,
+                        version_reason,
+                        content_preview,
+                        content_length,
+                        created_at
+                 FROM artifact_versions
+                 WHERE artifact_id = ?1
+                 ORDER BY version_id DESC",
+            )
+            .context("failed to prepare list_artifact_versions query")?;
+
+        let rows = stmt
+            .query_map(params![artifact_id], artifact_version_from_row)
+            .context("failed to query artifact versions")?;
+
+        let mut versions = Vec::new();
+        for row in rows {
+            versions.push(row.context("failed to map artifact version row")?);
+        }
+        Ok(versions)
+    }
+
+    pub fn get_artifact_version_snapshot(
+        &self,
+        version_id: i64,
+    ) -> Result<Option<ArtifactVersionSnapshot>> {
+        let conn = self.connect()?;
+        let row = conn
+            .query_row(
+                "SELECT version_id,
+                        task_id,
+                        artifact_id,
+                        revision_id,
+                        version_reason,
+                        content_snapshot,
+                        stored_path,
+                        content_preview,
+                        content_length,
+                        created_at
+                 FROM artifact_versions
+                 WHERE version_id = ?1",
+                params![version_id],
+                |row| {
+                    Ok((
+                        ArtifactVersionDto {
+                            version_id: row.get(0)?,
+                            task_id: row.get(1)?,
+                            artifact_id: row.get(2)?,
+                            revision_id: row.get(3)?,
+                            version_reason: row.get(4)?,
+                            content_preview: row.get(7)?,
+                            content_length: row.get(8)?,
+                            created_at: row.get(9)?,
+                        },
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to query artifact version snapshot")?;
+
+        Ok(row.map(
+            |(dto, content_snapshot, stored_path)| ArtifactVersionSnapshot {
+                dto,
+                content_snapshot,
+                stored_path,
+            },
+        ))
+    }
+
+    // ---------------------------------------------------------------------
+    // subtasks + chain steps + file proposals
+    // ---------------------------------------------------------------------
+
+    pub fn create_subtask(&self, input: &NewSubTaskInput) -> Result<SubTaskDto> {
+        let clean_title = input.title.trim();
+        let clean_description = input.description.trim();
+        if clean_title.is_empty() {
+            return Err(anyhow!("subtask title cannot be empty"));
+        }
+        if clean_description.is_empty() {
+            return Err(anyhow!("subtask description cannot be empty"));
+        }
+
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO subtasks
+                 (
+                    task_id,
+                    title,
+                    description,
+                    execution_type,
+                    status,
+                    result_review_status,
+                    created_at,
+                    updated_at,
+                    result_summary,
+                    result_payload,
+                    instruction_source,
+                    parent_context_snapshot,
+                    error_message,
+                    max_steps,
+                    current_step
+                 )
+                 VALUES
+                 (?1, ?2, ?3, ?4, 'pending', 'unreviewed', ({now}), ({now}), NULL, NULL, ?5, ?6, NULL, 5, 0)",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                input.task_id,
+                clean_title,
+                clean_description,
+                input.execution_type.trim(),
+                input.instruction_source.trim(),
+                input.parent_context_snapshot,
+            ],
+        )
+        .context("failed to insert subtask")?;
+
+        let subtask_id = conn.last_insert_rowid();
+        self.get_subtask_by_id(subtask_id)?
+            .ok_or_else(|| anyhow!("subtask id={} missing after insert", subtask_id))
+    }
+
+    pub fn list_subtasks(&self, task_id: i64) -> Result<Vec<SubTaskDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT subtask_id,
+                        task_id,
+                        title,
+                        description,
+                        execution_type,
+                        status,
+                        result_review_status,
+                        created_at,
+                        updated_at,
+                        result_summary,
+                        result_payload,
+                        instruction_source,
+                        parent_context_snapshot,
+                        error_message
+                 FROM subtasks
+                 WHERE task_id = ?1
+                 ORDER BY subtask_id DESC",
+            )
+            .context("failed to prepare list_subtasks query")?;
+
+        let rows = stmt
+            .query_map(params![task_id], subtask_from_row)
+            .context("failed to query subtasks")?;
+
+        let mut subtasks = Vec::new();
+        for row in rows {
+            subtasks.push(row.context("failed to map subtask row")?);
+        }
+        Ok(subtasks)
+    }
+
+    pub fn get_subtask_by_id(&self, subtask_id: i64) -> Result<Option<SubTaskDto>> {
+        let conn = self.connect()?;
+        let subtask = conn
+            .query_row(
+                "SELECT subtask_id,
+                        task_id,
+                        title,
+                        description,
+                        execution_type,
+                        status,
+                        result_review_status,
+                        created_at,
+                        updated_at,
+                        result_summary,
+                        result_payload,
+                        instruction_source,
+                        parent_context_snapshot,
+                        error_message
+                 FROM subtasks
+                 WHERE subtask_id = ?1",
+                params![subtask_id],
+                subtask_from_row,
+            )
+            .optional()
+            .context("failed to query subtask by id")?;
+
+        Ok(subtask)
+    }
+
+    pub fn transition_subtask_status(
+        &self,
+        subtask_id: i64,
+        status: &str,
+        result_summary: Option<&str>,
+        result_payload: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<SubTaskDto> {
+        let existing = self
+            .get_subtask_by_id(subtask_id)?
+            .ok_or_else(|| anyhow!("subtask id={} not found", subtask_id))?;
+
+        let next_summary = result_summary
+            .map(|value| value.to_string())
+            .or(existing.result_summary.clone());
+        let next_payload = result_payload
+            .map(|value| value.to_string())
+            .or(existing.result_payload.clone());
+        let next_error = error_message
+            .map(|value| value.to_string())
+            .or(existing.error_message.clone());
+
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "UPDATE subtasks
+                 SET status = ?1,
+                     result_summary = ?2,
+                     result_payload = ?3,
+                     error_message = ?4,
+                     updated_at = ({now})
+                 WHERE subtask_id = ?5",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                status.trim(),
+                next_summary,
+                next_payload,
+                next_error,
+                subtask_id
+            ],
+        )
+        .context("failed to transition subtask status")?;
+
+        self.get_subtask_by_id(subtask_id)?
+            .ok_or_else(|| anyhow!("subtask disappeared after status transition"))
+    }
+
+    pub fn set_subtask_result_review_status(
+        &self,
+        subtask_id: i64,
+        status: &str,
+    ) -> Result<SubTaskDto> {
+        let conn = self.connect()?;
+        let changed = conn
+            .execute(
+                &format!(
+                    "UPDATE subtasks
+                     SET result_review_status = ?1,
+                         updated_at = ({now})
+                     WHERE subtask_id = ?2",
+                    now = SQLITE_NOW_EXPR,
+                ),
+                params![status.trim(), subtask_id],
+            )
+            .context("failed to set subtask review status")?;
+
+        if changed == 0 {
+            return Err(anyhow!("subtask id={} not found", subtask_id));
+        }
+
+        self.get_subtask_by_id(subtask_id)?
+            .ok_or_else(|| anyhow!("subtask disappeared after review status update"))
+    }
+
+    pub fn update_subtask_current_step(&self, subtask_id: i64, current_step: i64) -> Result<()> {
+        let conn = self.connect()?;
+        let changed = conn
+            .execute(
+                &format!(
+                    "UPDATE subtasks
+                     SET current_step = ?1,
+                         updated_at = ({now})
+                     WHERE subtask_id = ?2",
+                    now = SQLITE_NOW_EXPR,
+                ),
+                params![current_step, subtask_id],
+            )
+            .context("failed to update subtask current_step")?;
+
+        if changed == 0 {
+            return Err(anyhow!("subtask id={} not found", subtask_id));
+        }
+
+        Ok(())
+    }
+
+    pub fn create_subtask_step(
+        &self,
+        subtask_id: i64,
+        step_index: i64,
+        step_type: &str,
+        description: &str,
+    ) -> Result<SubTaskStepDto> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO subtask_steps
+             (subtask_id, step_index, step_type, status, description)
+             VALUES (?1, ?2, ?3, 'pending', ?4)",
+            params![subtask_id, step_index, step_type.trim(), description],
+        )
+        .context("failed to insert subtask step")?;
+
+        let step_id = conn.last_insert_rowid();
+        self.get_subtask_step(step_id)?
+            .ok_or_else(|| anyhow!("step id={} missing after insert", step_id))
+    }
+
+    pub fn update_subtask_step_status(
+        &self,
+        step_id: i64,
+        status: &str,
+        result_summary: Option<&str>,
+        result_payload: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<SubTaskStepDto> {
+        let existing = self
+            .get_subtask_step(step_id)?
+            .ok_or_else(|| anyhow!("subtask step id={} not found", step_id))?;
+
+        let clean_status = status.trim();
+        let started_at = if clean_status == "running" && existing.started_at.is_none() {
+            Some(now_string()?)
+        } else {
+            existing.started_at.clone()
+        };
+
+        let completed_at = if matches!(clean_status, "completed" | "failed" | "skipped") {
+            Some(now_string()?)
+        } else {
+            existing.completed_at.clone()
+        };
+
+        let next_summary = result_summary
+            .map(|value| value.to_string())
+            .or(existing.result_summary.clone());
+        let next_payload = result_payload
+            .map(|value| value.to_string())
+            .or(existing.result_payload.clone());
+        let next_error = error_message
+            .map(|value| value.to_string())
+            .or(existing.error_message.clone());
+
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE subtask_steps
+             SET status = ?1,
+                 result_summary = ?2,
+                 result_payload = ?3,
+                 error_message = ?4,
+                 started_at = ?5,
+                 completed_at = ?6
+             WHERE id = ?7",
+            params![
+                clean_status,
+                next_summary,
+                next_payload,
+                next_error,
+                started_at,
+                completed_at,
+                step_id,
+            ],
+        )
+        .context("failed to update subtask step status")?;
+
+        self.get_subtask_step(step_id)?
+            .ok_or_else(|| anyhow!("subtask step disappeared after update"))
+    }
+
+    pub fn list_subtask_steps(&self, subtask_id: i64) -> Result<Vec<SubTaskStepDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id,
+                        subtask_id,
+                        step_index,
+                        step_type,
+                        status,
+                        description,
+                        result_summary,
+                        result_payload,
+                        error_message,
+                        started_at,
+                        completed_at
+                 FROM subtask_steps
+                 WHERE subtask_id = ?1
+                 ORDER BY step_index ASC, id ASC",
+            )
+            .context("failed to prepare list_subtask_steps query")?;
+
+        let rows = stmt
+            .query_map(params![subtask_id], subtask_step_from_row)
+            .context("failed to query subtask steps")?;
+
+        let mut steps = Vec::new();
+        for row in rows {
+            steps.push(row.context("failed to map subtask step row")?);
+        }
+        Ok(steps)
+    }
+
+    pub fn get_subtask_step(&self, step_id: i64) -> Result<Option<SubTaskStepDto>> {
+        let conn = self.connect()?;
+        let step = conn
+            .query_row(
+                "SELECT id,
+                        subtask_id,
+                        step_index,
+                        step_type,
+                        status,
+                        description,
+                        result_summary,
+                        result_payload,
+                        error_message,
+                        started_at,
+                        completed_at
+                 FROM subtask_steps
+                 WHERE id = ?1",
+                params![step_id],
+                subtask_step_from_row,
+            )
+            .optional()
+            .context("failed to query subtask step by id")?;
+
+        Ok(step)
+    }
+
+    pub fn create_file_write_proposal(
+        &self,
+        subtask_id: i64,
+        step_id: Option<i64>,
+        task_id: i64,
+        proposed_path: &str,
+        proposed_content: &str,
+    ) -> Result<FileWriteProposalDto> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO subtask_file_write_proposals
+                 (subtask_id, step_id, task_id, proposed_path, proposed_content, status, proposed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending_approval', ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                subtask_id,
+                step_id,
+                task_id,
+                proposed_path.trim(),
+                proposed_content,
+            ],
+        )
+        .context("failed to insert file write proposal")?;
+
+        let proposal_id = conn.last_insert_rowid();
+        self.get_file_write_proposal_by_id(proposal_id)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "file write proposal id={} missing after insert",
+                    proposal_id
+                )
+            })
+    }
+
+    pub fn transition_file_write_proposal_status(
+        &self,
+        proposal_id: i64,
+        expected_status: &str,
+        next_status: &str,
+        mark_resolved: bool,
+    ) -> Result<FileWriteProposalDto> {
+        let clean_expected = expected_status.trim();
+        let clean_next = next_status.trim();
+        if clean_expected.is_empty() || clean_next.is_empty() {
+            return Err(anyhow!(
+                "expected_status and next_status must be non-empty for proposal transition"
+            ));
+        }
+
+        let conn = self.connect()?;
+        let changed = if mark_resolved {
+            conn.execute(
+                &format!(
+                    "UPDATE subtask_file_write_proposals
+                     SET status = ?1,
+                         resolved_at = ({now})
+                     WHERE id = ?2
+                       AND status = ?3",
+                    now = SQLITE_NOW_EXPR,
+                ),
+                params![clean_next, proposal_id, clean_expected],
+            )
+            .context("failed to transition file write proposal status with resolved_at")?
+        } else {
+            conn.execute(
+                "UPDATE subtask_file_write_proposals
+                 SET status = ?1,
+                     resolved_at = NULL
+                 WHERE id = ?2
+                   AND status = ?3",
+                params![clean_next, proposal_id, clean_expected],
+            )
+            .context("failed to transition file write proposal status without resolved_at")?
+        };
+
+        if changed == 0 {
+            let current_status = self
+                .get_file_write_proposal_by_id(proposal_id)?
+                .map(|proposal| proposal.status)
+                .unwrap_or_else(|| "missing".to_string());
+            return Err(anyhow!(
+                "proposal id={} transition rejected: expected status '{}' but current status is '{}'",
+                proposal_id,
+                clean_expected,
+                current_status
+            ));
+        }
+
+        self.get_file_write_proposal_by_id(proposal_id)?
+            .ok_or_else(|| anyhow!("proposal disappeared after transition"))
+    }
+
+    pub fn begin_file_write_proposal_apply(
+        &self,
+        proposal_id: i64,
+    ) -> Result<FileWriteProposalDto> {
+        self.transition_file_write_proposal_status(
+            proposal_id,
+            "pending_approval",
+            "applying",
+            false,
+        )
+    }
+
+    pub fn complete_file_write_proposal_apply(
+        &self,
+        proposal_id: i64,
+    ) -> Result<FileWriteProposalDto> {
+        self.transition_file_write_proposal_status(proposal_id, "applying", "approved", true)
+    }
+
+    pub fn rollback_file_write_proposal_apply(
+        &self,
+        proposal_id: i64,
+    ) -> Result<FileWriteProposalDto> {
+        self.transition_file_write_proposal_status(
+            proposal_id,
+            "applying",
+            "pending_approval",
+            false,
+        )
+    }
+
+    pub fn resolve_file_write_proposal(
+        &self,
+        proposal_id: i64,
+        action: &str,
+    ) -> Result<FileWriteProposalDto> {
+        let normalized = action.trim().to_ascii_lowercase();
+        if normalized != "approved" && normalized != "rejected" {
+            return Err(anyhow!(
+                "invalid proposal resolution action '{}' (expected approved or rejected)",
+                action
+            ));
+        }
+
+        let conn = self.connect()?;
+        let changed = conn
+            .execute(
+                &format!(
+                    "UPDATE subtask_file_write_proposals
+                     SET status = ?1,
+                         resolved_at = ({now})
+                     WHERE id = ?2",
+                    now = SQLITE_NOW_EXPR,
+                ),
+                params![normalized, proposal_id],
+            )
+            .context("failed to resolve file write proposal")?;
+
+        if changed == 0 {
+            return Err(anyhow!("file write proposal id={} not found", proposal_id));
+        }
+
+        self.get_file_write_proposal_by_id(proposal_id)?
+            .ok_or_else(|| anyhow!("proposal disappeared after resolution"))
+    }
+
+    pub fn list_pending_file_write_proposals(
+        &self,
+        task_id: i64,
+    ) -> Result<Vec<FileWriteProposalDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id,
+                        subtask_id,
+                        step_id,
+                        task_id,
+                        proposed_path,
+                        proposed_content,
+                        status,
+                        proposed_at,
+                        resolved_at
+                 FROM subtask_file_write_proposals
+                 WHERE task_id = ?1
+                   AND status = 'pending_approval'
+                 ORDER BY id ASC",
+            )
+            .context("failed to prepare list_pending_file_write_proposals query")?;
+
+        let rows = stmt
+            .query_map(params![task_id], file_write_proposal_from_row)
+            .context("failed to query pending file write proposals")?;
+
+        let mut proposals = Vec::new();
+        for row in rows {
+            proposals.push(row.context("failed to map pending file write proposal row")?);
+        }
+        Ok(proposals)
+    }
+
+    pub fn list_file_write_proposals_for_subtask(
+        &self,
+        subtask_id: i64,
+    ) -> Result<Vec<FileWriteProposalDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id,
+                        subtask_id,
+                        step_id,
+                        task_id,
+                        proposed_path,
+                        proposed_content,
+                        status,
+                        proposed_at,
+                        resolved_at
+                 FROM subtask_file_write_proposals
+                 WHERE subtask_id = ?1
+                 ORDER BY id ASC",
+            )
+            .context("failed to prepare list_file_write_proposals_for_subtask query")?;
+
+        let rows = stmt
+            .query_map(params![subtask_id], file_write_proposal_from_row)
+            .context("failed to query file write proposals for subtask")?;
+
+        let mut proposals = Vec::new();
+        for row in rows {
+            proposals.push(row.context("failed to map subtask file write proposal row")?);
+        }
+        Ok(proposals)
+    }
+
+    pub fn get_file_write_proposal_by_id(
+        &self,
+        proposal_id: i64,
+    ) -> Result<Option<FileWriteProposalDto>> {
+        let conn = self.connect()?;
+        let proposal = conn
+            .query_row(
+                "SELECT id,
+                        subtask_id,
+                        step_id,
+                        task_id,
+                        proposed_path,
+                        proposed_content,
+                        status,
+                        proposed_at,
+                        resolved_at
+                 FROM subtask_file_write_proposals
+                 WHERE id = ?1",
+                params![proposal_id],
+                file_write_proposal_from_row,
+            )
+            .optional()
+            .context("failed to query file write proposal by id")?;
+
+        Ok(proposal)
+    }
+
+    pub fn append_write_audit_entry(
+        &self,
+        task_id: i64,
+        subtask_id: i64,
+        proposal_id: i64,
+        action: &str,
+        path: &str,
+    ) -> Result<WriteAuditEntryDto> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO subtask_write_audit_log
+                 (task_id, subtask_id, proposal_id, action, proposed_path, resolved_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id, subtask_id, proposal_id, action.trim(), path],
+        )
+        .context("failed to append write audit entry")?;
+
+        let audit_id = conn.last_insert_rowid();
+        self.get_write_audit_entry_by_id(audit_id)?
+            .ok_or_else(|| anyhow!("write audit entry id={} missing after insert", audit_id))
+    }
+
+    pub fn list_write_audit_log(
+        &self,
+        task_id: i64,
+        limit: usize,
+    ) -> Result<Vec<WriteAuditEntryDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id,
+                        task_id,
+                        subtask_id,
+                        proposal_id,
+                        action,
+                        proposed_path,
+                        resolved_at
+                 FROM subtask_write_audit_log
+                 WHERE task_id = ?1
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )
+            .context("failed to prepare list_write_audit_log query")?;
+
+        let rows = stmt
+            .query_map(params![task_id, limit as i64], write_audit_from_row)
+            .context("failed to query write audit log")?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.context("failed to map write audit row")?);
+        }
+        Ok(entries)
+    }
+
+    // ---------------------------------------------------------------------
+    // flow/session mode/suggestions
+    // ---------------------------------------------------------------------
+
+    pub fn upsert_session_mode_state(
+        &self,
+        input: &SessionModeUpdateInput,
+    ) -> Result<SessionModeStateDto> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO session_mode_state
+                 (task_id, current_mode, mode_reason, waiting_on_user_decision, last_engine_decision, active_artifact_id, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ({now}))
+                 ON CONFLICT(task_id) DO UPDATE SET
+                    current_mode = excluded.current_mode,
+                    mode_reason = excluded.mode_reason,
+                    waiting_on_user_decision = excluded.waiting_on_user_decision,
+                    last_engine_decision = excluded.last_engine_decision,
+                    active_artifact_id = excluded.active_artifact_id,
+                    updated_at = ({now})",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                input.task_id,
+                input.current_mode.trim(),
+                input.mode_reason,
+                if input.waiting_on_user_decision { 1 } else { 0 },
+                input.last_engine_decision,
+                input.active_artifact_id,
+            ],
+        )
+        .context("failed to upsert session_mode_state")?;
+
+        self.get_session_mode_state(input.task_id)?
+            .ok_or_else(|| anyhow!("session mode state missing after upsert"))
+    }
+
+    pub fn get_session_mode_state(&self, task_id: i64) -> Result<Option<SessionModeStateDto>> {
+        let conn = self.connect()?;
+        let state = conn
+            .query_row(
+                "SELECT task_id,
+                        current_mode,
+                        mode_reason,
+                        waiting_on_user_decision,
+                        last_engine_decision,
+                        active_artifact_id,
+                        updated_at
+                 FROM session_mode_state
+                 WHERE task_id = ?1",
+                params![task_id],
+                session_mode_from_row,
+            )
+            .optional()
+            .context("failed to query session mode state")?;
+
+        Ok(state)
+    }
+
+    pub fn create_suggestion(&self, input: &NewSuggestionInput) -> Result<SuggestionDto> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO suggestions
+                 (
+                    task_id,
+                    title,
+                    description,
+                    suggestion_type,
+                    source_reason,
+                    status,
+                    suggestion_key,
+                    linked_context,
+                    linked_subtask_type,
+                    linked_revision_intent,
+                    created_at,
+                    updated_at
+                 )
+                 VALUES
+                 (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8, ?9, ({now}), ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                input.task_id,
+                input.title.trim(),
+                input.description,
+                input.suggestion_type.trim(),
+                input.source_reason,
+                input.suggestion_key.trim(),
+                input.linked_context,
+                input.linked_subtask_type,
+                input.linked_revision_intent,
+            ],
+        )
+        .context("failed to insert suggestion")?;
+
+        let suggestion_id = conn.last_insert_rowid();
+        self.get_suggestion_by_id(suggestion_id)?
+            .ok_or_else(|| anyhow!("suggestion id={} missing after insert", suggestion_id))
+    }
+
+    pub fn list_suggestions(
+        &self,
+        task_id: i64,
+        include_resolved: bool,
+    ) -> Result<Vec<SuggestionDto>> {
+        let conn = self.connect()?;
+        let sql = if include_resolved {
+            "SELECT suggestion_id,
+                    task_id,
+                    title,
+                    description,
+                    suggestion_type,
+                    source_reason,
+                    status,
+                    suggestion_key,
+                    linked_context,
+                    linked_subtask_type,
+                    linked_revision_intent,
+                    created_at,
+                    updated_at
+             FROM suggestions
+             WHERE task_id = ?1
+             ORDER BY suggestion_id DESC"
+        } else {
+            "SELECT suggestion_id,
+                    task_id,
+                    title,
+                    description,
+                    suggestion_type,
+                    source_reason,
+                    status,
+                    suggestion_key,
+                    linked_context,
+                    linked_subtask_type,
+                    linked_revision_intent,
+                    created_at,
+                    updated_at
+             FROM suggestions
+             WHERE task_id = ?1
+               AND status = 'pending'
+             ORDER BY suggestion_id DESC"
+        };
+
+        let mut stmt = conn
+            .prepare(sql)
+            .context("failed to prepare list_suggestions query")?;
+        let rows = stmt
+            .query_map(params![task_id], suggestion_from_row)
+            .context("failed to query suggestions")?;
+
+        let mut suggestions = Vec::new();
+        for row in rows {
+            suggestions.push(row.context("failed to map suggestion row")?);
+        }
+        Ok(suggestions)
+    }
+
+    pub fn get_suggestion_by_id(&self, suggestion_id: i64) -> Result<Option<SuggestionDto>> {
+        let conn = self.connect()?;
+        let suggestion = conn
+            .query_row(
+                "SELECT suggestion_id,
+                        task_id,
+                        title,
+                        description,
+                        suggestion_type,
+                        source_reason,
+                        status,
+                        suggestion_key,
+                        linked_context,
+                        linked_subtask_type,
+                        linked_revision_intent,
+                        created_at,
+                        updated_at
+                 FROM suggestions
+                 WHERE suggestion_id = ?1",
+                params![suggestion_id],
+                suggestion_from_row,
+            )
+            .optional()
+            .context("failed to query suggestion by id")?;
+
+        Ok(suggestion)
+    }
+
+    pub fn set_suggestion_status(&self, suggestion_id: i64, status: &str) -> Result<SuggestionDto> {
+        let conn = self.connect()?;
+        let changed = conn
+            .execute(
+                &format!(
+                    "UPDATE suggestions
+                     SET status = ?1,
+                         updated_at = ({now})
+                     WHERE suggestion_id = ?2",
+                    now = SQLITE_NOW_EXPR,
+                ),
+                params![status.trim(), suggestion_id],
+            )
+            .context("failed to set suggestion status")?;
+
+        if changed == 0 {
+            return Err(anyhow!("suggestion id={} not found", suggestion_id));
+        }
+
+        self.get_suggestion_by_id(suggestion_id)?
+            .ok_or_else(|| anyhow!("suggestion disappeared after status update"))
+    }
+
+    pub fn has_recent_suggestion_key(
+        &self,
+        task_id: i64,
+        suggestion_key: &str,
+        cooldown_seconds: i64,
+    ) -> Result<bool> {
+        let conn = self.connect()?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM suggestions
+                 WHERE task_id = ?1
+                   AND suggestion_key = ?2
+                   AND (strftime('%s','now') - strftime('%s', created_at)) <= ?3",
+                params![task_id, suggestion_key.trim(), cooldown_seconds.max(0)],
+                |row| row.get(0),
+            )
+            .context("failed to query suggestion key cooldown")?;
+        Ok(count > 0)
+    }
+
+    pub fn was_suggestion_key_dismissed_recently(
+        &self,
+        task_id: i64,
+        suggestion_key: &str,
+        suppression_seconds: i64,
+    ) -> Result<bool> {
+        let conn = self.connect()?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM suggestions
+                 WHERE task_id = ?1
+                   AND suggestion_key = ?2
+                   AND status = 'dismissed'
+                   AND (strftime('%s','now') - strftime('%s', updated_at)) <= ?3",
+                params![task_id, suggestion_key.trim(), suppression_seconds.max(0)],
+                |row| row.get(0),
+            )
+            .context("failed to query dismissed suggestion suppression window")?;
+        Ok(count > 0)
+    }
+
+    pub fn count_recent_revision_activity(&self, task_id: i64, window_seconds: i64) -> Result<i64> {
+        let conn = self.connect()?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM artifact_revisions
+                 WHERE task_id = ?1
+                   AND (strftime('%s','now') - strftime('%s', updated_at)) <= ?2",
+                params![task_id, window_seconds.max(0)],
+                |row| row.get(0),
+            )
+            .context("failed to count recent revision activity")?;
+        Ok(count)
+    }
+
+    // ---------------------------------------------------------------------
+    // app settings
+    // ---------------------------------------------------------------------
+
+    pub fn get_app_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.connect()?;
+        let value = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![key.trim()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("failed to query app setting")?;
+        Ok(value)
+    }
+
+    pub fn set_app_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO app_settings (key, value, updated_at)
+                 VALUES (?1, ?2, ({now}))
+                 ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = ({now})",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![key.trim(), value],
+        )
+        .context("failed to upsert app setting")?;
+        Ok(())
+    }
+
+    pub fn delete_app_setting(&self, key: &str) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            params![key.trim()],
+        )
+        .context("failed to delete app setting")?;
+        Ok(())
+    }
+
+    pub fn get_app_setting_bool(&self, key: &str) -> Result<Option<bool>> {
+        let raw = self.get_app_setting(key)?;
+        Ok(raw.map(|value| {
+            let lowered = value.trim().to_ascii_lowercase();
+            matches!(lowered.as_str(), "1" | "true" | "yes" | "on")
+        }))
+    }
+
+    // ---------------------------------------------------------------------
+    // event log
+    // ---------------------------------------------------------------------
+
+    pub fn list_recent_events(&self, task_id: i64, limit: usize) -> Result<Vec<EventLogEntryDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, event_type, payload_json, created_at
+                 FROM event_log
+                 WHERE task_id = ?1
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )
+            .context("failed to prepare list_recent_events query")?;
+
+        let rows = stmt
+            .query_map(params![task_id, limit as i64], event_log_from_row)
+            .context("failed to query event log entries")?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.context("failed to map event log row")?);
+        }
+        Ok(entries)
+    }
+
+    // ---------------------------------------------------------------------
+    // phase 13 workspace awareness
+    // ---------------------------------------------------------------------
+
+    pub fn set_watched_folder(&self, task_id: i64, folder_path: &str) -> Result<WatchedFolderDto> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO watched_folders
+                 (task_id, folder_path, is_active, ignore_rules_json, created_at, updated_at)
+                 VALUES (?1, ?2, 1, '[]', ({now}), ({now}))
+                 ON CONFLICT(task_id) DO UPDATE SET
+                    folder_path = excluded.folder_path,
+                    is_active = 1,
+                    updated_at = ({now})",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id, folder_path.trim()],
+        )
+        .context("failed to set watched folder")?;
+
+        self.get_watched_folder(task_id)?
+            .ok_or_else(|| anyhow!("watched folder missing after upsert"))
+    }
+
+    pub fn clear_watched_folder(&self, task_id: i64) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "UPDATE watched_folders
+                 SET is_active = 0,
+                     updated_at = ({now})
+                 WHERE task_id = ?1",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id],
+        )
+        .context("failed to clear watched folder")?;
+        Ok(())
+    }
+
+    pub fn get_watched_folder(&self, task_id: i64) -> Result<Option<WatchedFolderDto>> {
+        let conn = self.connect()?;
+        let folder = conn
+            .query_row(
+                "SELECT task_id, folder_path, is_active, ignore_rules_json, created_at, updated_at
+                 FROM watched_folders
+                 WHERE task_id = ?1 AND is_active = 1",
+                params![task_id],
+                watched_folder_from_row,
+            )
+            .optional()
+            .context("failed to query watched folder")?;
+
+        Ok(folder)
+    }
+
+    pub fn upsert_file_registry_entry(
+        &self,
+        task_id: i64,
+        canonical_path: &str,
+        artifact_id: Option<i64>,
+        version_tag: &str,
+    ) -> Result<WatchedFileRegistryEntry> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO watched_file_registry
+                 (task_id, canonical_path, artifact_id, last_modified_at, ingested_at)
+                 VALUES (?1, ?2, ?3, ?4, ({now}))
+                 ON CONFLICT(task_id, canonical_path) DO UPDATE SET
+                    artifact_id = excluded.artifact_id,
+                    last_modified_at = excluded.last_modified_at,
+                    ingested_at = ({now})",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id, canonical_path.trim(), artifact_id, version_tag],
+        )
+        .context("failed to upsert watched file registry entry")?;
+
+        self.get_file_registry_entry(task_id, canonical_path)?
+            .ok_or_else(|| anyhow!("watched file registry entry missing after upsert"))
+    }
+
+    pub fn get_file_registry_entry(
+        &self,
+        task_id: i64,
+        canonical_path: &str,
+    ) -> Result<Option<WatchedFileRegistryEntry>> {
+        let conn = self.connect()?;
+        let entry = conn
+            .query_row(
+                "SELECT id, task_id, canonical_path, artifact_id, last_modified_at, ingested_at
+                 FROM watched_file_registry
+                 WHERE task_id = ?1 AND canonical_path = ?2",
+                params![task_id, canonical_path.trim()],
+                watched_file_registry_from_row,
+            )
+            .optional()
+            .context("failed to query watched file registry entry")?;
+
+        Ok(entry)
+    }
+
+    pub fn remove_file_registry_entry(&self, task_id: i64, canonical_path: &str) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "DELETE FROM watched_file_registry WHERE task_id = ?1 AND canonical_path = ?2",
+            params![task_id, canonical_path.trim()],
+        )
+        .context("failed to remove watched file registry entry")?;
+        Ok(())
+    }
+
+    pub fn set_clipboard_capture(&self, task_id: i64, enabled: bool) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO clipboard_capture_settings (task_id, enabled, updated_at)
+                 VALUES (?1, ?2, ({now}))
+                 ON CONFLICT(task_id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    updated_at = ({now})",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id, if enabled { 1 } else { 0 }],
+        )
+        .context("failed to upsert clipboard capture setting")?;
+        Ok(())
+    }
+
+    pub fn get_clipboard_capture(&self, task_id: i64) -> Result<bool> {
+        let conn = self.connect()?;
+        let enabled = conn
+            .query_row(
+                "SELECT enabled FROM clipboard_capture_settings WHERE task_id = ?1",
+                params![task_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("failed to query clipboard capture setting")?;
+
+        Ok(enabled.unwrap_or(0) != 0)
+    }
+
+    pub fn append_recently_learned(
+        &self,
+        task_id: i64,
+        source: &str,
+        label: &str,
+        preview: &str,
+    ) -> Result<RecentlyLearnedItemDto> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO recently_learned_log
+                 (task_id, source, display_label, preview_text, ingested_at)
+                 VALUES (?1, ?2, ?3, ?4, ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id, source.trim(), label.trim(), preview],
+        )
+        .context("failed to append recently learned item")?;
+
+        let id = conn.last_insert_rowid();
+        self.get_recently_learned_by_id(id)?
+            .ok_or_else(|| anyhow!("recently learned id={} missing after insert", id))
+    }
+
+    pub fn list_recently_learned(
+        &self,
+        task_id: i64,
+        limit: usize,
+    ) -> Result<Vec<RecentlyLearnedItemDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, source, display_label, preview_text, ingested_at
+                 FROM recently_learned_log
+                 WHERE task_id = ?1
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )
+            .context("failed to prepare list_recently_learned query")?;
+
+        let rows = stmt
+            .query_map(params![task_id, limit as i64], recently_learned_from_row)
+            .context("failed to query recently learned items")?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row.context("failed to map recently learned row")?);
+        }
+        Ok(items)
+    }
+
+    // ---------------------------------------------------------------------
+    // phase 15 proactive initiation
+    // ---------------------------------------------------------------------
+
+    pub fn record_task_focus(&self, task_id: i64) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO task_focus_log (task_id, focused_at)
+                 VALUES (?1, ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id],
+        )
+        .context("failed to record task focus")?;
+        Ok(())
+    }
+
+    pub fn get_last_task_focus(&self, task_id: i64) -> Result<Option<String>> {
+        let conn = self.connect()?;
+        let value = conn
+            .query_row(
+                "SELECT focused_at
+                 FROM task_focus_log
+                 WHERE task_id = ?1
+                 ORDER BY id DESC
+                 LIMIT 1",
+                params![task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("failed to query last task focus")?;
+        Ok(value)
+    }
+
+    pub fn record_proactive_trigger(
+        &self,
+        task_id: i64,
+        trigger_type: &str,
+        suppressed: bool,
+    ) -> Result<i64> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO proactive_trigger_log
+                 (task_id, trigger_type, fired_at, suppressed)
+                 VALUES (?1, ?2, ({now}), ?3)",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id, trigger_type.trim(), if suppressed { 1 } else { 0 }],
+        )
+        .context("failed to record proactive trigger")?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_last_proactive_trigger(
+        &self,
+        task_id: i64,
+        trigger_type: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.connect()?;
+        // cooldown should only consider real fired triggers, not suppressed attempts.
+        let value = conn
+            .query_row(
+                "SELECT fired_at
+                 FROM proactive_trigger_log
+                 WHERE task_id = ?1
+                   AND trigger_type = ?2
+                   AND suppressed = 0
+                 ORDER BY id DESC
+                 LIMIT 1",
+                params![task_id, trigger_type.trim()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("failed to query last proactive trigger")?;
+        Ok(value)
+    }
+
+    // ---------------------------------------------------------------------
+    // shared helpers
+    // ---------------------------------------------------------------------
+
+    fn get_task_by_id(&self, task_id: i64) -> Result<Option<TaskDto>> {
+        let conn = self.connect()?;
+        let task = conn
+            .query_row(
+                "SELECT id, title, slug, workspace_path, created_at, updated_at, is_active
+                 FROM tasks
+                 WHERE id = ?1",
+                params![task_id],
+                task_from_row,
+            )
+            .optional()
+            .context("failed to query task by id")?;
+        Ok(task)
+    }
+
+    fn get_artifact_by_id(&self, artifact_id: i64) -> Result<Option<ArtifactDto>> {
+        let conn = self.connect()?;
+        let artifact = conn
+            .query_row(
+                "SELECT a.id,
+                        a.task_id,
+                        a.file_name,
+                        a.file_extension,
+                        a.original_path,
+                        a.stored_path,
+                        a.created_at,
+                        a.updated_at,
+                        COUNT(c.id) AS chunk_count
+                 FROM artifacts a
+                 LEFT JOIN artifact_chunks c ON c.artifact_id = a.id
+                 WHERE a.id = ?1
+                 GROUP BY a.id",
+                params![artifact_id],
+                artifact_from_row,
+            )
+            .optional()
+            .context("failed to query artifact by id")?;
+        Ok(artifact)
+    }
+
+    fn get_chat_message_by_id(&self, message_id: i64) -> Result<Option<ChatMessageDto>> {
+        let conn = self.connect()?;
+        let message = conn
+            .query_row(
+                "SELECT id, task_id, session_id, role, message_source, message_kind, content, created_at
+                 FROM chat_messages
+                 WHERE id = ?1",
+                params![message_id],
+                chat_message_from_row,
+            )
+            .optional()
+            .context("failed to query chat message by id")?;
+        Ok(message)
+    }
+
+    fn get_artifact_version_by_id(&self, version_id: i64) -> Result<Option<ArtifactVersionDto>> {
+        let conn = self.connect()?;
+        let version = conn
+            .query_row(
+                "SELECT version_id,
+                        task_id,
+                        artifact_id,
+                        revision_id,
+                        version_reason,
+                        content_preview,
+                        content_length,
+                        created_at
+                 FROM artifact_versions
+                 WHERE version_id = ?1",
+                params![version_id],
+                artifact_version_from_row,
+            )
+            .optional()
+            .context("failed to query artifact version by id")?;
+        Ok(version)
+    }
+
+    fn get_recently_learned_by_id(&self, id: i64) -> Result<Option<RecentlyLearnedItemDto>> {
+        let conn = self.connect()?;
+        let item = conn
+            .query_row(
+                "SELECT id, task_id, source, display_label, preview_text, ingested_at
+                 FROM recently_learned_log
+                 WHERE id = ?1",
+                params![id],
+                recently_learned_from_row,
+            )
+            .optional()
+            .context("failed to query recently learned by id")?;
+        Ok(item)
+    }
+
+    fn get_write_audit_entry_by_id(&self, id: i64) -> Result<Option<WriteAuditEntryDto>> {
+        let conn = self.connect()?;
+        let entry = conn
+            .query_row(
+                "SELECT id, task_id, subtask_id, proposal_id, action, proposed_path, resolved_at
+                 FROM subtask_write_audit_log
+                 WHERE id = ?1",
+                params![id],
+                write_audit_from_row,
+            )
+            .optional()
+            .context("failed to query write audit entry by id")?;
+        Ok(entry)
+    }
+
+    fn next_available_slug(tx: &Transaction<'_>, base_slug: &str) -> Result<String> {
+        let mut candidate = base_slug.to_string();
+        let mut suffix: i64 = 2;
+
+        loop {
+            let exists: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE slug = ?1",
+                    params![candidate],
+                    |row| row.get(0),
+                )
+                .context("failed to check slug uniqueness")?;
+
+            if exists == 0 {
+                return Ok(candidate);
+            }
+
+            candidate = format!("{}-{}", base_slug, suffix);
+            suffix += 1;
+        }
+    }
+
+    fn record_event_tx(
+        tx: &Transaction<'_>,
+        task_id: i64,
+        event_type: &str,
+        payload_json: &str,
+    ) -> Result<()> {
+        tx.execute(
+            &format!(
+                "INSERT INTO event_log (task_id, event_type, payload_json, created_at)
+                 VALUES (?1, ?2, ?3, ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![task_id, event_type.trim(), payload_json],
+        )
+        .with_context(|| format!("failed to record event '{}'", event_type))?;
+        Ok(())
+    }
+}
+
+// -------------------------------------------------------------------------
+// row mappers
+// -------------------------------------------------------------------------
+
+fn task_from_row(row: &Row<'_>) -> rusqlite::Result<TaskDto> {
+    Ok(TaskDto {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        slug: row.get(2)?,
+        workspace_path: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        is_active: row.get::<_, i64>(6)? != 0,
+    })
+}
+
+fn task_summary_from_row(row: &Row<'_>) -> rusqlite::Result<TaskSummaryDto> {
+    Ok(TaskSummaryDto {
+        task_id: row.get(0)?,
+        summary_text: row.get(1)?,
+        updated_at: row.get(2)?,
+    })
+}
+
+fn open_resource_from_row(row: &Row<'_>) -> rusqlite::Result<OpenResourceDto> {
+    Ok(OpenResourceDto {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        resource_type: row.get(2)?,
+        resource_path_or_url: row.get(3)?,
+        label: row.get(4)?,
+        position_index: row.get(5)?,
+    })
+}
+
+fn artifact_from_row(row: &Row<'_>) -> rusqlite::Result<ArtifactDto> {
+    Ok(ArtifactDto {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        file_name: row.get(2)?,
+        file_extension: row.get(3)?,
+        original_path: row.get(4)?,
+        stored_path: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+        chunk_count: row.get(8)?,
+    })
+}
+
+fn chat_message_from_row(row: &Row<'_>) -> rusqlite::Result<ChatMessageDto> {
+    Ok(ChatMessageDto {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        session_id: row.get(2)?,
+        role: row.get(3)?,
+        message_source: row.get(4)?,
+        message_kind: row.get(5)?,
+        content: row.get(6)?,
+        created_at: row.get(7)?,
+    })
+}
+
+fn revision_from_row(row: &Row<'_>) -> rusqlite::Result<RevisionProposalDto> {
+    Ok(RevisionProposalDto {
+        revision_id: row.get(0)?,
+        task_id: row.get(1)?,
+        artifact_id: row.get(2)?,
+        target_start_offset: row.get(3)?,
+        target_end_offset: row.get(4)?,
+        target_description: row.get(5)?,
+        original_text: row.get(6)?,
+        proposed_text: row.get(7)?,
+        instruction_text: row.get(8)?,
+        instruction_source: row.get(9)?,
+        rationale: row.get(10)?,
+        grounding_notes: row.get(11)?,
+        retrieval_confidence: row.get(12)?,
+        status: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
+    })
+}
+
+fn artifact_version_from_row(row: &Row<'_>) -> rusqlite::Result<ArtifactVersionDto> {
+    Ok(ArtifactVersionDto {
+        version_id: row.get(0)?,
+        task_id: row.get(1)?,
+        artifact_id: row.get(2)?,
+        revision_id: row.get(3)?,
+        version_reason: row.get(4)?,
+        content_preview: row.get(5)?,
+        content_length: row.get(6)?,
+        created_at: row.get(7)?,
+    })
+}
+
+fn subtask_from_row(row: &Row<'_>) -> rusqlite::Result<SubTaskDto> {
+    Ok(SubTaskDto {
+        subtask_id: row.get(0)?,
+        task_id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        execution_type: row.get(4)?,
+        status: row.get(5)?,
+        result_review_status: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        result_summary: row.get(9)?,
+        result_payload: row.get(10)?,
+        instruction_source: row.get(11)?,
+        parent_context_snapshot: row.get(12)?,
+        error_message: row.get(13)?,
+    })
+}
+
+fn session_mode_from_row(row: &Row<'_>) -> rusqlite::Result<SessionModeStateDto> {
+    Ok(SessionModeStateDto {
+        task_id: row.get(0)?,
+        current_mode: row.get(1)?,
+        mode_reason: row.get(2)?,
+        waiting_on_user_decision: row.get::<_, i64>(3)? != 0,
+        last_engine_decision: row.get(4)?,
+        active_artifact_id: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
+fn suggestion_from_row(row: &Row<'_>) -> rusqlite::Result<SuggestionDto> {
+    Ok(SuggestionDto {
+        suggestion_id: row.get(0)?,
+        task_id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        suggestion_type: row.get(4)?,
+        source_reason: row.get(5)?,
+        status: row.get(6)?,
+        suggestion_key: row.get(7)?,
+        linked_context: row.get(8)?,
+        linked_subtask_type: row.get(9)?,
+        linked_revision_intent: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+fn event_log_from_row(row: &Row<'_>) -> rusqlite::Result<EventLogEntryDto> {
+    Ok(EventLogEntryDto {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        event_type: row.get(2)?,
+        payload_json: row.get(3)?,
+        created_at: row.get(4)?,
+    })
+}
+
+fn watched_folder_from_row(row: &Row<'_>) -> rusqlite::Result<WatchedFolderDto> {
+    Ok(WatchedFolderDto {
+        task_id: row.get(0)?,
+        folder_path: row.get(1)?,
+        is_active: row.get::<_, i64>(2)? != 0,
+        ignore_rules_json: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn watched_file_registry_from_row(row: &Row<'_>) -> rusqlite::Result<WatchedFileRegistryEntry> {
+    Ok(WatchedFileRegistryEntry {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        canonical_path: row.get(2)?,
+        artifact_id: row.get(3)?,
+        last_modified_at: row.get(4)?,
+        ingested_at: row.get(5)?,
+    })
+}
+
+fn recently_learned_from_row(row: &Row<'_>) -> rusqlite::Result<RecentlyLearnedItemDto> {
+    Ok(RecentlyLearnedItemDto {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        source: row.get(2)?,
+        display_label: row.get(3)?,
+        preview_text: row.get(4)?,
+        ingested_at: row.get(5)?,
+    })
+}
+
+fn subtask_step_from_row(row: &Row<'_>) -> rusqlite::Result<SubTaskStepDto> {
+    Ok(SubTaskStepDto {
+        id: row.get(0)?,
+        subtask_id: row.get(1)?,
+        step_index: row.get(2)?,
+        step_type: row.get(3)?,
+        status: row.get(4)?,
+        description: row.get(5)?,
+        result_summary: row.get(6)?,
+        result_payload: row.get(7)?,
+        error_message: row.get(8)?,
+        started_at: row.get(9)?,
+        completed_at: row.get(10)?,
+    })
+}
+
+fn file_write_proposal_from_row(row: &Row<'_>) -> rusqlite::Result<FileWriteProposalDto> {
+    Ok(FileWriteProposalDto {
+        id: row.get(0)?,
+        subtask_id: row.get(1)?,
+        step_id: row.get(2)?,
+        task_id: row.get(3)?,
+        proposed_path: row.get(4)?,
+        proposed_content: row.get(5)?,
+        status: row.get(6)?,
+        proposed_at: row.get(7)?,
+        resolved_at: row.get(8)?,
+    })
+}
+
+fn write_audit_from_row(row: &Row<'_>) -> rusqlite::Result<WriteAuditEntryDto> {
+    Ok(WriteAuditEntryDto {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        subtask_id: row.get(2)?,
+        proposal_id: row.get(3)?,
+        action: row.get(4)?,
+        proposed_path: row.get(5)?,
+        resolved_at: row.get(6)?,
+    })
+}
+
+fn compact_preview(content: &str, max_chars: usize) -> String {
+    let compact = content.split_whitespace().collect::<Vec<&str>>().join(" ");
+
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+
+    let mut trimmed: String = compact.chars().take(max_chars).collect();
+    while trimmed.ends_with(' ') {
+        trimmed.pop();
+    }
+    format!("{trimmed}...")
+}
+
+fn now_string() -> Result<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before unix epoch")?
+        .as_secs() as i64;
+
+    let (year, month, day, hour, minute, second) = unix_to_ymd_hms(now);
+    Ok(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hour, minute, second
+    ))
+}
+
+fn unix_to_ymd_hms(secs: i64) -> (i64, i64, i64, i64, i64, i64) {
+    let hour = (secs / 3600) % 24;
+    let minute = (secs / 60) % 60;
+    let second = secs % 60;
+    let mut days = secs / 86400;
+
+    let leap = |year: i64| -> bool { (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 };
+
+    let mut year = 1970i64;
+    loop {
+        let days_in_year = if leap(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+
+    let month_days = [
+        31i64,
+        if leap(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+
+    let mut month = 1i64;
+    for day_count in month_days {
+        if days < day_count {
+            break;
+        }
+        days -= day_count;
+        month += 1;
+    }
+
+    (year, month, days + 1, hour, minute, second)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn new_test_store() -> (TempDir, TaskStore) {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let store = TaskStore::initialize(dir.path()).expect("failed to initialize store");
+        (dir, store)
+    }
+
+    #[test]
+    fn schema_table_count_matches_phase_16_expectation() {
+        let (_dir, store) = new_test_store();
+        let conn = store.connect().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(count, 23, "expected 23 application tables after phase 16");
+    }
+
+    #[test]
+    fn task_creation_and_activation_round_trip() {
+        let (_dir, store) = new_test_store();
+        let first = store.create_task("History StoryMap").unwrap();
+        let second = store.create_task("History StoryMap").unwrap();
+
+        assert_eq!(first.slug, "history-storymap");
+        assert_eq!(second.slug, "history-storymap-2");
+        assert!(PathBuf::from(first.workspace_path).exists());
+        assert!(PathBuf::from(second.workspace_path).exists());
+
+        let active = store.get_active_task().unwrap().unwrap();
+        assert_eq!(active.id, first.id);
+
+        let switched = store.set_active_task(second.id).unwrap();
+        assert_eq!(switched.id, second.id);
+        assert!(switched.is_active);
+
+        let active_after = store.get_active_task().unwrap().unwrap();
+        assert_eq!(active_after.id, second.id);
+    }
+
+    #[test]
+    fn watched_folder_round_trips_and_clear_works() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Watcher").unwrap();
+
+        let set = store
+            .set_watched_folder(task.id, "/tmp/watch-root")
+            .unwrap();
+        assert_eq!(set.task_id, task.id);
+        assert!(set.is_active);
+
+        let fetched = store.get_watched_folder(task.id).unwrap().unwrap();
+        assert_eq!(fetched.folder_path, "/tmp/watch-root");
+
+        store.clear_watched_folder(task.id).unwrap();
+        assert!(store.get_watched_folder(task.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn file_registry_upsert_and_remove_round_trip() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Registry").unwrap();
+
+        let first = store
+            .upsert_file_registry_entry(task.id, "/tmp/a.md", Some(42), "v1")
+            .unwrap();
+        assert_eq!(first.canonical_path, "/tmp/a.md");
+        assert_eq!(first.artifact_id, Some(42));
+        assert_eq!(first.last_modified_at, "v1");
+
+        let second = store
+            .upsert_file_registry_entry(task.id, "/tmp/a.md", Some(43), "v2")
+            .unwrap();
+        assert_eq!(second.artifact_id, Some(43));
+        assert_eq!(second.last_modified_at, "v2");
+
+        store
+            .remove_file_registry_entry(task.id, "/tmp/a.md")
+            .unwrap();
+        assert!(store
+            .get_file_registry_entry(task.id, "/tmp/a.md")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn clipboard_defaults_off_and_can_toggle() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Clipboard").unwrap();
+
+        assert!(!store.get_clipboard_capture(task.id).unwrap());
+        store.set_clipboard_capture(task.id, true).unwrap();
+        assert!(store.get_clipboard_capture(task.id).unwrap());
+        store.set_clipboard_capture(task.id, false).unwrap();
+        assert!(!store.get_clipboard_capture(task.id).unwrap());
+    }
+
+    #[test]
+    fn recently_learned_round_trip_ordering() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Learned").unwrap();
+
+        store
+            .append_recently_learned(task.id, "file", "notes.md", "first")
+            .unwrap();
+        store
+            .append_recently_learned(task.id, "clipboard", "snippet", "second")
+            .unwrap();
+
+        let rows = store.list_recently_learned(task.id, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].source, "clipboard");
+        assert_eq!(rows[1].source, "file");
+    }
+
+    #[test]
+    fn proactive_trigger_cooldown_ignores_suppressed_entries() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Proactive").unwrap();
+
+        store
+            .record_proactive_trigger(task.id, "resume", true)
+            .unwrap();
+        assert!(store
+            .get_last_proactive_trigger(task.id, "resume")
+            .unwrap()
+            .is_none());
+
+        store
+            .record_proactive_trigger(task.id, "resume", false)
+            .unwrap();
+        assert!(store
+            .get_last_proactive_trigger(task.id, "resume")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn subtask_steps_create_and_update_round_trip() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Subtask Steps").unwrap();
+
+        let subtask = store
+            .create_subtask(&NewSubTaskInput {
+                task_id: task.id,
+                title: "Chain task".to_string(),
+                description: "Run steps".to_string(),
+                execution_type: "synthesis".to_string(),
+                instruction_source: "text".to_string(),
+                parent_context_snapshot: "{}".to_string(),
+            })
+            .unwrap();
+
+        let step = store
+            .create_subtask_step(subtask.subtask_id, 0, "llm_call", "draft section")
+            .unwrap();
+        assert_eq!(step.status, "pending");
+
+        let running = store
+            .update_subtask_step_status(step.id, "running", None, None, None)
+            .unwrap();
+        assert_eq!(running.status, "running");
+        assert!(running.started_at.is_some());
+
+        let done = store
+            .update_subtask_step_status(step.id, "completed", Some("ok"), Some("payload"), None)
+            .unwrap();
+        assert_eq!(done.status, "completed");
+        assert_eq!(done.result_summary.as_deref(), Some("ok"));
+        assert_eq!(done.result_payload.as_deref(), Some("payload"));
+        assert!(done.completed_at.is_some());
+
+        let listed = store.list_subtask_steps(subtask.subtask_id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, step.id);
+    }
+
+    #[test]
+    fn file_write_proposal_resolution_and_audit_round_trip() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("File proposals").unwrap();
+
+        let subtask = store
+            .create_subtask(&NewSubTaskInput {
+                task_id: task.id,
+                title: "writer".to_string(),
+                description: "propose file".to_string(),
+                execution_type: "draft_generation".to_string(),
+                instruction_source: "system".to_string(),
+                parent_context_snapshot: "{}".to_string(),
+            })
+            .unwrap();
+
+        let step = store
+            .create_subtask_step(
+                subtask.subtask_id,
+                0,
+                "file_write_proposal",
+                "path:out.md|intent:test",
+            )
+            .unwrap();
+
+        let proposal = store
+            .create_file_write_proposal(
+                subtask.subtask_id,
+                Some(step.id),
+                task.id,
+                "drafts/out.md",
+                "# hello",
+            )
+            .unwrap();
+
+        assert_eq!(proposal.status, "pending_approval");
+        let pending = store.list_pending_file_write_proposals(task.id).unwrap();
+        assert_eq!(pending.len(), 1);
+
+        let resolved = store
+            .resolve_file_write_proposal(proposal.id, "approved")
+            .unwrap();
+        assert_eq!(resolved.status, "approved");
+        assert!(resolved.resolved_at.is_some());
+
+        let audit = store
+            .append_write_audit_entry(
+                task.id,
+                subtask.subtask_id,
+                proposal.id,
+                "approved",
+                "drafts/out.md",
+            )
+            .unwrap();
+        assert_eq!(audit.action, "approved");
+
+        let entries = store.list_write_audit_log(task.id, 10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, audit.id);
+    }
+
+    #[test]
+    fn file_write_proposal_apply_state_machine_round_trip() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Apply state machine").unwrap();
+
+        let subtask = store
+            .create_subtask(&NewSubTaskInput {
+                task_id: task.id,
+                title: "writer".to_string(),
+                description: "propose file".to_string(),
+                execution_type: "draft_generation".to_string(),
+                instruction_source: "system".to_string(),
+                parent_context_snapshot: "{}".to_string(),
+            })
+            .unwrap();
+
+        let step = store
+            .create_subtask_step(
+                subtask.subtask_id,
+                0,
+                "file_write_proposal",
+                "path:out.md|intent:test",
+            )
+            .unwrap();
+
+        let proposal = store
+            .create_file_write_proposal(
+                subtask.subtask_id,
+                Some(step.id),
+                task.id,
+                "drafts/out.md",
+                "# hello",
+            )
+            .unwrap();
+        assert_eq!(proposal.status, "pending_approval");
+
+        let applying = store.begin_file_write_proposal_apply(proposal.id).unwrap();
+        assert_eq!(applying.status, "applying");
+        assert!(applying.resolved_at.is_none());
+
+        let pending_after_begin = store.list_pending_file_write_proposals(task.id).unwrap();
+        assert_eq!(
+            pending_after_begin.len(),
+            0,
+            "applying proposals must not remain in pending queue"
+        );
+
+        let approved = store
+            .complete_file_write_proposal_apply(proposal.id)
+            .unwrap();
+        assert_eq!(approved.status, "approved");
+        assert!(approved.resolved_at.is_some());
+    }
+
+    #[test]
+    fn file_write_proposal_apply_rollback_restores_pending_state() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Apply rollback").unwrap();
+
+        let subtask = store
+            .create_subtask(&NewSubTaskInput {
+                task_id: task.id,
+                title: "writer".to_string(),
+                description: "propose file".to_string(),
+                execution_type: "draft_generation".to_string(),
+                instruction_source: "system".to_string(),
+                parent_context_snapshot: "{}".to_string(),
+            })
+            .unwrap();
+
+        let step = store
+            .create_subtask_step(
+                subtask.subtask_id,
+                0,
+                "file_write_proposal",
+                "path:out.md|intent:test",
+            )
+            .unwrap();
+
+        let proposal = store
+            .create_file_write_proposal(
+                subtask.subtask_id,
+                Some(step.id),
+                task.id,
+                "drafts/out.md",
+                "# hello",
+            )
+            .unwrap();
+
+        store.begin_file_write_proposal_apply(proposal.id).unwrap();
+        let rolled_back = store
+            .rollback_file_write_proposal_apply(proposal.id)
+            .unwrap();
+        assert_eq!(rolled_back.status, "pending_approval");
+        assert!(rolled_back.resolved_at.is_none());
+
+        let pending = store.list_pending_file_write_proposals(task.id).unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "rolled-back proposal should return to pending queue"
+        );
+    }
+
+    #[test]
+    fn file_write_proposal_apply_requires_expected_status() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Apply status guard").unwrap();
+
+        let subtask = store
+            .create_subtask(&NewSubTaskInput {
+                task_id: task.id,
+                title: "writer".to_string(),
+                description: "propose file".to_string(),
+                execution_type: "draft_generation".to_string(),
+                instruction_source: "system".to_string(),
+                parent_context_snapshot: "{}".to_string(),
+            })
+            .unwrap();
+
+        let step = store
+            .create_subtask_step(
+                subtask.subtask_id,
+                0,
+                "file_write_proposal",
+                "path:out.md|intent:test",
+            )
+            .unwrap();
+
+        let proposal = store
+            .create_file_write_proposal(
+                subtask.subtask_id,
+                Some(step.id),
+                task.id,
+                "drafts/out.md",
+                "# hello",
+            )
+            .unwrap();
+
+        let err = store
+            .complete_file_write_proposal_apply(proposal.id)
+            .expect_err("completing apply should fail before begin");
+        assert!(
+            err.to_string().contains("expected status 'applying'"),
+            "unexpected error: {}",
+            err
+        );
+    }
+}

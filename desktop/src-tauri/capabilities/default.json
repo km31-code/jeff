@@ -1,0 +1,28 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for Jeff windows (main workspace + ambient overlay)",
+  "windows": ["main", "overlay"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-is-visible",
+    "core:window:allow-is-focused",
+    "core:webview:default",
+    "core:event:default",
+    "core:app:default",
+    "notification:default",
+    "notification:allow-notify",
+    "notification:allow-request-permission",
+    "notification:allow-is-permission-granted",
+    "global-shortcut:allow-is-registered",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister"
+  ]
+}

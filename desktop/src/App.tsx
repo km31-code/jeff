@@ -1,0 +1,3858 @@
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import {
+  isStreamingEnabled,
+  LlmCompletePayload,
+  LlmTokenPayload,
+  TtsChunkPayload,
+  TurnCancelledPayload,
+  TurnCompletePayload,
+  EVENT_LLM_TOKEN,
+  EVENT_LLM_COMPLETE,
+  EVENT_TTS_CHUNK,
+  EVENT_TURN_CANCELLED,
+  EVENT_TURN_COMPLETE,
+} from "./streamClient";
+import {
+  acceptSuggestion,
+  acceptSubtaskResult,
+  applyRevision,
+  ArtifactContentDto,
+  ArtifactDto,
+  ArtifactVersionDto,
+  cancelSubtask,
+  cancelInteraction,
+  ChatMessageDto,
+  convertSubtaskToRevision,
+  CoworkingStatusDto,
+  createTask,
+  dismissSuggestion,
+  EventLogEntryDto,
+  evaluateProactiveNudge,
+  evaluateNextSuggestions,
+  explainSuggestion,
+  getActiveArtifactSelection,
+  refineSubtask,
+  getActiveTask,
+  getArtifactContent,
+  getCoworkingStatus,
+  getSessionModeState,
+  getTaskSummary,
+  getTaskWorkspace,
+  importArtifact,
+  listArtifacts,
+  listArtifactVersions,
+  listMessages,
+  listOpenResources,
+  listPendingRevisions,
+  listRecentEvents,
+  listSuggestions,
+  listSubtasks,
+  listTaskPendingRevisions,
+  listTasks,
+  OpenResourceDto,
+  proposeArtifactRevision,
+  rejectRevision,
+  rejectSubtaskResult,
+  RetrievedChunkDto,
+  revertArtifactToVersion,
+  RevisionProposalDto,
+  RevisionTargetDto,
+  SessionModeStateDto,
+  sendMessage,
+  sendMessageStreaming,
+  cancelStreamingTurn,
+  setActiveTask,
+  setActiveArtifactSelection,
+  setAssistantSpeaking,
+  setProactiveMode,
+  setUserSpeaking,
+  setUserTyping,
+  SuggestionAcceptanceDto,
+  SuggestionDto,
+  SuggestionEvaluationDto,
+  SubTaskDto,
+  SubTaskSuggestionDto,
+  suggestSubtask,
+  synthesizeSpeech,
+  TaskDto,
+  TaskSummaryDto,
+  transcribeAudio,
+  WorkspaceInfoDto,
+  WatcherStatusDto,
+  RecentlyLearnedItemDto,
+  startWorkspaceWatcher,
+  stopWorkspaceWatcher,
+  getWatcherStatus,
+  listRecentlyLearned,
+  setClipboardCapture,
+  getClipboardCaptureSetting,
+  IntentSlotsDto,
+  classifyMessageIntent,
+  triggerTaskResume,
+  checkTaskDrift,
+  triggerSpeculativeSubtask,
+  dismissProactiveTrigger,
+  recordTaskFocus,
+  DriftFlagDto,
+  ReorientationDto,
+  FileWriteProposalDto,
+  SubTaskStepDto,
+  WriteAuditEntryDto,
+  listFileWriteProposals,
+  listSubtaskSteps,
+  approveSubtaskFileWrite,
+  rejectSubtaskFileWrite,
+  listWriteAuditLog,
+  startSubtaskChain,
+} from "./tauriClient";
+import { setTrayStatus as setAmbientTrayStatus, setQuietMode, TrayStatus } from "./ambientClient";
+
+type ViewMode = "home" | "workspace";
+type RecordingPurpose = "chat" | "revision" | "subtask" | "cancel_subtask";
+
+// minimal web speech api types — not always present in all lib.dom versions.
+interface SpeechRecognitionAlternative {
+  transcript: string;
+  confidence: number;
+}
+interface SpeechRecognitionResult {
+  isFinal: boolean;
+  length: number;
+  [index: number]: SpeechRecognitionAlternative;
+}
+interface SpeechRecognitionResultList {
+  length: number;
+  [index: number]: SpeechRecognitionResult;
+}
+interface SpeechRecognitionEvent extends Event {
+  resultIndex: number;
+  results: SpeechRecognitionResultList;
+}
+interface PartialSpeechRecognition {
+  interimResults: boolean;
+  continuous: boolean;
+  lang: string;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onerror: (() => void) | null;
+  onend: (() => void) | null;
+  start(): void;
+  stop(): void;
+}
+type ExecutionType = "draft_generation" | "expansion" | "synthesis" | "targeted_research_synthesis";
+type RoutedIntent = "answer" | "revision" | "subtask" | "suggestion" | "unknown";
+
+type RetrievalDebugMeta = {
+  decisionEventType: string;
+  decisionReason: string;
+  confidence: number | null;
+};
+
+type RevisionDebugInfo = {
+  activeArtifactId: number | null;
+  selectedStart: number | null;
+  selectedEnd: number | null;
+  selectionSource: string;
+  confidence: number | null;
+  groundingNotes: string;
+  contextSource: string;
+  instructionSource: string;
+  retrievedChunks: RetrievedChunkDto[];
+};
+
+type SubTaskDebugInfo = {
+  selectedSubtaskId: number | null;
+  executionType: string;
+  instructionSource: string;
+  contextSnapshot: string;
+  retrievedChunks: RetrievedChunkDto[];
+};
+
+type FlowDebugInfo = {
+  decisionReason: string;
+  suppressionState: string;
+  noOp: boolean;
+  evidenceScore: number | null;
+  modeReason: string;
+  retrievedChunks: RetrievedChunkDto[];
+};
+
+function App() {
+  const [viewMode, setViewMode] = useState<ViewMode>("home");
+  const [fullWorkspaceVisible, setFullWorkspaceVisible] = useState(false);
+
+  const [tasks, setTasks] = useState<TaskDto[]>([]);
+  const [activeTask, setActiveTaskState] = useState<TaskDto | null>(null);
+  const [taskSummary, setTaskSummary] = useState<TaskSummaryDto | null>(null);
+  const [workspaceInfo, setWorkspaceInfo] = useState<WorkspaceInfoDto | null>(null);
+  const [openResources, setOpenResources] = useState<OpenResourceDto[]>([]);
+  const [artifacts, setArtifacts] = useState<ArtifactDto[]>([]);
+  const [messages, setMessages] = useState<ChatMessageDto[]>([]);
+  const [retrievalDebugChunks, setRetrievalDebugChunks] = useState<RetrievedChunkDto[]>([]);
+  const [retrievalDebugMeta, setRetrievalDebugMeta] = useState<RetrievalDebugMeta>({
+    decisionEventType: "system_status_event",
+    decisionReason: "awaiting_activity",
+    confidence: null
+  });
+
+  const [selectedArtifactId, setSelectedArtifactId] = useState<number | null>(null);
+  const [artifactContent, setArtifactContent] = useState<ArtifactContentDto | null>(null);
+  const [artifactSelectionStart, setArtifactSelectionStart] = useState(0);
+  const [artifactSelectionEnd, setArtifactSelectionEnd] = useState(0);
+  const [revisionInstruction, setRevisionInstruction] = useState("");
+  const [pendingRevisions, setPendingRevisions] = useState<RevisionProposalDto[]>([]);
+  const [taskPendingRevisions, setTaskPendingRevisions] = useState<RevisionProposalDto[]>([]);
+  const [artifactVersions, setArtifactVersions] = useState<ArtifactVersionDto[]>([]);
+  const [subtasks, setSubtasks] = useState<SubTaskDto[]>([]);
+  const [recentEvents, setRecentEvents] = useState<EventLogEntryDto[]>([]);
+  const [subtaskInstruction, setSubtaskInstruction] = useState("");
+  const [subtaskExecutionType, setSubtaskExecutionType] = useState<ExecutionType>("draft_generation");
+  const [subtaskSuggestion, setSubtaskSuggestion] = useState<SubTaskSuggestionDto | null>(null);
+  const [subtaskRefinementInputById, setSubtaskRefinementInputById] = useState<Record<number, string>>({});
+  const [suggestions, setSuggestions] = useState<SuggestionDto[]>([]);
+  const [sessionModeState, setSessionModeState] = useState<SessionModeStateDto | null>(null);
+  const [flowDebug, setFlowDebug] = useState<FlowDebugInfo>({
+    decisionReason: "not_evaluated",
+    suppressionState: "none",
+    noOp: true,
+    evidenceScore: null,
+    modeReason: "Flow engine not evaluated yet.",
+    retrievedChunks: []
+  });
+  const [suggestionActionMessage, setSuggestionActionMessage] = useState<string | null>(null);
+  const [suggestionExplainById, setSuggestionExplainById] = useState<Record<number, string>>({});
+  const [revisionDebug, setRevisionDebug] = useState<RevisionDebugInfo>({
+    activeArtifactId: null,
+    selectedStart: null,
+    selectedEnd: null,
+    selectionSource: "none",
+    confidence: null,
+    groundingNotes: "No revision proposal yet.",
+    contextSource: "none",
+    instructionSource: "none",
+    retrievedChunks: []
+  });
+  const [subtaskDebug, setSubtaskDebug] = useState<SubTaskDebugInfo>({
+    selectedSubtaskId: null,
+    executionType: "none",
+    instructionSource: "none",
+    contextSnapshot: "No subtask snapshot selected.",
+    retrievedChunks: []
+  });
+
+  const [newTaskTitle, setNewTaskTitle] = useState("");
+  const [artifactPathInput, setArtifactPathInput] = useState("");
+  const [chatInput, setChatInput] = useState("");
+
+  // phase 13: workspace awareness state
+  const [recentlyLearned, setRecentlyLearned] = useState<RecentlyLearnedItemDto[]>([]);
+  const [recentlyLearnedOpen, setRecentlyLearnedOpen] = useState(false);
+  const [watcherStatus, setWatcherStatus] = useState<WatcherStatusDto | null>(null);
+  const [clipboardCaptureEnabled, setClipboardCaptureEnabled] = useState(false);
+
+  // phase 15: proactive initiation state
+  const [reorientationBanner, setReorientationBanner] = useState<string | null>(null);
+  const [driftNotice, setDriftNotice] = useState<string | null>(null);
+  const [speculativeSubtask, setSpeculativeSubtask] = useState<SubTaskDto | null>(null);
+  const [quietMode, setQuietModeState] = useState(false);
+  const reorientationDismissTimerRef = useRef<number | null>(null);
+
+  // phase 16: richer parallel work state
+  const [fileWriteProposals, setFileWriteProposals] = useState<FileWriteProposalDto[]>([]);
+  const [subtaskStepsById, setSubtaskStepsById] = useState<Record<number, SubTaskStepDto[]>>({});
+  const [writeAuditLog, setWriteAuditLog] = useState<WriteAuditEntryDto[]>([]);
+
+  const [loading, setLoading] = useState(true);
+  const [recording, setRecording] = useState(false);
+  const [recordingPurpose, setRecordingPurpose] = useState<RecordingPurpose>("chat");
+  const [coworkingStatus, setCoworkingStatus] = useState<CoworkingStatusDto | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [pendingActionKeys, setPendingActionKeys] = useState<Record<string, boolean>>({});
+  const [expandedCompanionRevisionId, setExpandedCompanionRevisionId] = useState<number | null>(null);
+  const [expandedCompanionSubtaskId, setExpandedCompanionSubtaskId] = useState<number | null>(null);
+  const [lastRoutedIntent, setLastRoutedIntent] = useState<RoutedIntent>("answer");
+
+  // phase 12: streaming state. keyed by turn_id so concurrent turns (e.g.
+  // a subtask and a main chat turn) render independently.
+  const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
+  const [streamingText, setStreamingText] = useState<Record<string, string>>({});
+  const streamingTurnIdRef = useRef<string | null>(null);
+
+  // phase 12: streaming tts queue. ordered by phrase_id so chunks play in
+  // order even when synthesized concurrently and delivered out of order.
+  const ttsActiveTurnIdRef = useRef<string | null>(null);
+  const streamTtsQueueRef = useRef<Map<number, { audio: HTMLAudioElement; url: string }>>(new Map());
+  const streamTtsNextPhraseRef = useRef<number>(1);
+  const streamTtsCurrentRef = useRef<HTMLAudioElement | null>(null);
+
+  // phase 12: partial stt via web speech api.
+  const speechRecognitionRef = useRef<PartialSpeechRecognition | null>(null);
+  const partialSttSentRef = useRef<boolean>(false);
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingPurposeRef = useRef<RecordingPurpose>("chat");
+
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const ttsObjectUrlRef = useRef<string | null>(null);
+  const sendRequestIdRef = useRef(0);
+  const proactiveEvaluationInFlightRef = useRef(false);
+  const suggestionEvaluationInFlightRef = useRef(false);
+  const typingTimeoutRef = useRef<number | null>(null);
+  const artifactTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const activeWatcherTaskIdRef = useRef<number | null>(null);
+
+  const activeTaskLabel = useMemo(() => activeTask?.title ?? "No active task", [activeTask]);
+
+  function updateTrayStatus(status: TrayStatus) {
+    void setAmbientTrayStatus(status).catch(() => undefined);
+  }
+
+  const activeSubtasks = useMemo(
+    () => subtasks.filter((subtask) => subtask.status === "pending" || subtask.status === "running"),
+    [subtasks]
+  );
+  const completedSubtasks = useMemo(
+    () => subtasks.filter((subtask) => subtask.status !== "pending" && subtask.status !== "running"),
+    [subtasks]
+  );
+  const completedSubtasksAwaitingReview = useMemo(
+    () =>
+      completedSubtasks.filter(
+        (subtask) => subtask.status === "completed" && subtask.result_review_status === "unreviewed"
+      ),
+    [completedSubtasks]
+  );
+  const pendingSuggestions = useMemo(
+    () => suggestions.filter((suggestion) => suggestion.status === "pending"),
+    [suggestions]
+  );
+  const topPendingSuggestion = useMemo(
+    () => pendingSuggestions[0] ?? null,
+    [pendingSuggestions]
+  );
+
+  useEffect(() => {
+    void refreshShellState();
+
+    return () => {
+      if (typingTimeoutRef.current !== null) {
+        window.clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+      }
+
+      stopSpeechPlayback();
+      stopStreamingTtsPlayback();
+      stopPartialStt();
+      stopMicrophoneStream();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // phase 12: subscribe to streaming llm events. subscriptions are
+  // unconditional (set up once) but the handlers gate on streamingTurnId
+  // so they are no-ops when no streaming turn is active.
+  useEffect(() => {
+    if (!isStreamingEnabled()) return;
+
+    const unlisteners: Promise<() => void>[] = [];
+
+    unlisteners.push(
+      listen<LlmTokenPayload>(EVENT_LLM_TOKEN, (event) => {
+        const { turn_id, delta } = event.payload;
+        if (streamingTurnIdRef.current !== turn_id) return;
+        setStreamingText((prev) => ({
+          ...prev,
+          [turn_id]: (prev[turn_id] ?? "") + delta,
+        }));
+      })
+    );
+
+    unlisteners.push(
+      listen<LlmCompletePayload>(EVENT_LLM_COMPLETE, (event) => {
+        const { turn_id } = event.payload;
+        if (streamingTurnIdRef.current !== turn_id) return;
+        // refresh the messages list so the finalized db row replaces the
+        // streaming accumulator in the ui.
+        void (async () => {
+          if (!activeTask) return;
+          const messageList = await listMessages(activeTask.id);
+          setMessages(messageList);
+          await refreshActionCenterState(activeTask.id);
+        })();
+      })
+    );
+
+    unlisteners.push(
+      listen<TurnCancelledPayload>(EVENT_TURN_CANCELLED, (event) => {
+        const { turn_id } = event.payload;
+        if (streamingTurnIdRef.current !== turn_id) return;
+        stopStreamingTtsPlayback();
+        streamingTurnIdRef.current = null;
+        setStreamingTurnId(null);
+        setStreamingText((prev) => {
+          const next = { ...prev };
+          delete next[turn_id];
+          return next;
+        });
+        updateTrayStatus("idle");
+        void (async () => {
+          if (!activeTask) return;
+          const messageList = await listMessages(activeTask.id);
+          setMessages(messageList);
+        })();
+      })
+    );
+
+    unlisteners.push(
+      listen<TurnCompletePayload>(EVENT_TURN_COMPLETE, (event) => {
+        const { turn_id } = event.payload;
+        if (streamingTurnIdRef.current !== turn_id) return;
+        streamingTurnIdRef.current = null;
+        setStreamingTurnId(null);
+        setStreamingText((prev) => {
+          const next = { ...prev };
+          delete next[turn_id];
+          return next;
+        });
+        // ttsActiveTurnIdRef stays set so late-arriving tts chunks still play.
+        if (streamTtsCurrentRef.current === null && streamTtsQueueRef.current.size === 0) {
+          updateTrayStatus("idle");
+        }
+      })
+    );
+
+    // tts_chunk events arrive concurrently with and after llm_complete.
+    // gated on ttsActiveTurnIdRef (not streamingTurnIdRef) so chunks that
+    // arrive after turn_complete still get played.
+    unlisteners.push(
+      listen<TtsChunkPayload>(EVENT_TTS_CHUNK, (event) => {
+        const { turn_id, phrase_id, audio_b64 } = event.payload;
+        if (ttsActiveTurnIdRef.current !== turn_id) return;
+        const blob = base64ToBlob(audio_b64, "audio/mpeg");
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        streamTtsQueueRef.current.set(phrase_id, { audio, url });
+        scheduleStreamTtsPlayback();
+      })
+    );
+
+    return () => {
+      unlisteners.forEach((p) =>
+        p.then((unlisten) => unlisten()).catch(() => undefined)
+      );
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTask?.id]);
+
+  useEffect(() => {
+    if (!activeTask || viewMode !== "workspace") {
+      return;
+    }
+
+    let cancelled = false;
+    const intervalId = window.setInterval(() => {
+      if (cancelled || proactiveEvaluationInFlightRef.current) {
+        return;
+      }
+
+      proactiveEvaluationInFlightRef.current = true;
+      void runProactiveEvaluation(activeTask.id)
+        .catch((error) => {
+          if (!cancelled) {
+            setErrorMessage(formatError(error));
+          }
+        })
+        .finally(() => {
+          proactiveEvaluationInFlightRef.current = false;
+        });
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTask?.id, viewMode]);
+
+  useEffect(() => {
+    if (!activeTask || viewMode !== "workspace") {
+      return;
+    }
+
+    let cancelled = false;
+    const intervalId = window.setInterval(() => {
+      if (cancelled) {
+        return;
+      }
+
+      void refreshSubtasks(activeTask.id).catch(() => undefined);
+    }, 1400);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeTask?.id, viewMode]);
+
+  // phase 16: poll file write proposals and step state for running subtasks.
+  // runs in both companion and workspace views so approval cards appear anywhere.
+  useEffect(() => {
+    if (!activeTask) {
+      setFileWriteProposals([]);
+      setSubtaskStepsById({});
+      return;
+    }
+
+    let cancelled = false;
+    const intervalId = window.setInterval(() => {
+      if (cancelled) return;
+      void listFileWriteProposals(activeTask.id)
+        .then((proposals) => { if (!cancelled) setFileWriteProposals(proposals); })
+        .catch(() => undefined);
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeTask?.id]);
+
+  // refresh step list whenever running subtasks change
+  useEffect(() => {
+    if (!activeTask) return;
+    const running = subtasks.filter((s) => s.status === "running" || s.status === "pending");
+    if (running.length === 0) return;
+
+    let cancelled = false;
+    const intervalId = window.setInterval(() => {
+      if (cancelled) return;
+      running.forEach((subtask) => {
+        void listSubtaskSteps(activeTask.id, subtask.subtask_id)
+          .then((steps) => {
+            if (!cancelled) {
+              setSubtaskStepsById((prev) => ({ ...prev, [subtask.subtask_id]: steps }));
+            }
+          })
+          .catch(() => undefined);
+      });
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeTask?.id, subtasks]);
+
+  useEffect(() => {
+    if (!activeTask || viewMode !== "workspace") {
+      return;
+    }
+
+    let cancelled = false;
+    const intervalId = window.setInterval(() => {
+      if (cancelled) {
+        return;
+      }
+
+      void refreshActionCenterState(activeTask.id).catch(() => undefined);
+    }, 2300);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeTask?.id, viewMode]);
+
+  // phase 13: load recently learned + watcher state whenever the active task changes.
+  useEffect(() => {
+    const priorTaskId = activeWatcherTaskIdRef.current;
+    if (!activeTask) {
+      if (priorTaskId !== null) {
+        void stopWorkspaceWatcher(priorTaskId).catch(() => undefined);
+        activeWatcherTaskIdRef.current = null;
+      }
+      setRecentlyLearned([]);
+      setWatcherStatus(null);
+      setClipboardCaptureEnabled(false);
+      return;
+    }
+
+    if (priorTaskId !== null && priorTaskId !== activeTask.id) {
+      void stopWorkspaceWatcher(priorTaskId).catch(() => undefined);
+    }
+    activeWatcherTaskIdRef.current = activeTask.id;
+
+    void refreshRecentlyLearned(activeTask.id, { ensureWatcher: true }).catch(() => undefined);
+  }, [activeTask?.id]);
+
+  // phase 15: window focus triggers proactive checks, then records focus timestamp.
+  // recording after resume avoids suppressing re-orientation due to near-zero "absence".
+  useEffect(() => {
+    const handleFocus = async () => {
+      if (!activeTask) return;
+      const taskId = activeTask.id;
+
+      try {
+        const result = await triggerTaskResume(taskId);
+        if (result.summary && result.summary.trim().length > 0) {
+          if (reorientationDismissTimerRef.current !== null) {
+            window.clearTimeout(reorientationDismissTimerRef.current);
+          }
+          setReorientationBanner(result.summary);
+          reorientationDismissTimerRef.current = window.setTimeout(() => {
+            setReorientationBanner(null);
+            reorientationDismissTimerRef.current = null;
+          }, 8000);
+        }
+      } catch {
+        // non-critical; swallow reorientation errors
+      }
+
+      void recordTaskFocus(taskId).catch(() => undefined);
+
+      void triggerSpeculativeSubtask(taskId)
+        .then((subtask) => {
+          if (subtask) setSpeculativeSubtask(subtask);
+        })
+        .catch(() => undefined);
+    };
+
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, [activeTask?.id]);
+
+  useEffect(() => {
+    if (!activeTask || viewMode !== "workspace") {
+      return;
+    }
+
+    let cancelled = false;
+    const intervalId = window.setInterval(() => {
+      if (cancelled || suggestionEvaluationInFlightRef.current) {
+        return;
+      }
+
+      suggestionEvaluationInFlightRef.current = true;
+      void runSuggestionEvaluation(activeTask.id)
+        .catch((error) => {
+          if (!cancelled) {
+            setErrorMessage(formatError(error));
+          }
+        })
+        .finally(() => {
+          suggestionEvaluationInFlightRef.current = false;
+        });
+    }, 3200);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTask?.id, viewMode, selectedArtifactId]);
+
+  async function refreshShellState() {
+    setLoading(true);
+    setErrorMessage(null);
+
+    try {
+      const [persistedTasks, persistedActiveTask, status] = await Promise.all([
+        listTasks(),
+        getActiveTask(),
+        getCoworkingStatus()
+      ]);
+
+      setTasks(persistedTasks);
+      setActiveTaskState(persistedActiveTask);
+      setCoworkingStatus(status);
+
+      if (persistedActiveTask) {
+        await loadWorkspaceState(persistedActiveTask.id);
+      } else {
+        clearWorkspaceState();
+      }
+    } catch (error) {
+      setErrorMessage(formatError(error));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function refreshCoworkingStatus() {
+    try {
+      const status = await getCoworkingStatus();
+      setCoworkingStatus(status);
+    } catch {
+      // status refresh errors should not break interaction flow
+    }
+  }
+
+  async function loadWorkspaceState(taskId: number) {
+    const [
+      summary,
+      workspace,
+      resources,
+      artifactList,
+      messageList,
+      subtaskList,
+      suggestionList,
+      modeState,
+      taskPending,
+      eventList,
+      persistedActiveArtifactId
+    ] = await Promise.all([
+      getTaskSummary(taskId),
+      getTaskWorkspace(taskId),
+      listOpenResources(taskId),
+      listArtifacts(taskId),
+      listMessages(taskId),
+      listSubtasks(taskId),
+      listSuggestions(taskId),
+      getSessionModeState(taskId),
+      listTaskPendingRevisions(taskId),
+      listRecentEvents(taskId, 18),
+      getActiveArtifactSelection(taskId)
+    ]);
+
+    setTaskSummary(summary);
+    setWorkspaceInfo(workspace);
+    setOpenResources(resources);
+    setArtifacts(artifactList);
+    setMessages(messageList);
+    setSubtasks(subtaskList);
+    setSuggestions(suggestionList);
+    setSessionModeState(modeState);
+    setTaskPendingRevisions(taskPending);
+    setRecentEvents(eventList);
+
+    const preferredArtifactId = persistedActiveArtifactId ?? modeState?.active_artifact_id ?? selectedArtifactId;
+    const nextArtifactId = pickNextEditableArtifactId(artifactList, preferredArtifactId);
+    setSelectedArtifactId(nextArtifactId);
+
+    if (nextArtifactId !== null) {
+      if (persistedActiveArtifactId !== nextArtifactId) {
+        await setActiveArtifactSelection(taskId, nextArtifactId);
+      }
+      await loadArtifactRevisionState(taskId, nextArtifactId);
+    } else {
+      await setActiveArtifactSelection(taskId, null);
+      clearArtifactRevisionState();
+    }
+
+    if (subtaskList.length === 0) {
+      setSubtaskDebug({
+        selectedSubtaskId: null,
+        executionType: "none",
+        instructionSource: "none",
+        contextSnapshot: "No subtask snapshot selected.",
+        retrievedChunks: []
+      });
+    }
+  }
+
+  async function refreshSubtasks(taskId: number) {
+    const latestSubtasks = await listSubtasks(taskId);
+    setSubtasks(latestSubtasks);
+  }
+
+  async function refreshSuggestions(taskId: number) {
+    const latestSuggestions = await listSuggestions(taskId);
+    setSuggestions(latestSuggestions);
+  }
+
+  async function refreshActionCenterState(taskId: number) {
+    const [taskPending, eventList, suggestionList, subtaskList] = await Promise.all([
+      listTaskPendingRevisions(taskId),
+      listRecentEvents(taskId, 18),
+      listSuggestions(taskId),
+      listSubtasks(taskId)
+    ]);
+
+    setTaskPendingRevisions(taskPending);
+    setRecentEvents(eventList);
+    setSuggestions(suggestionList);
+    setSubtasks(subtaskList);
+  }
+
+  // phase 13: load recently learned items and watcher/clipboard state for a task.
+  async function refreshRecentlyLearned(taskId: number, options?: { ensureWatcher?: boolean }) {
+    try {
+      const [workspace, items, statusSnapshot, cbEnabled] = await Promise.all([
+        getTaskWorkspace(taskId),
+        listRecentlyLearned(taskId, 10),
+        getWatcherStatus(taskId),
+        getClipboardCaptureSetting(taskId)
+      ]);
+
+      let status = statusSnapshot;
+      if (options?.ensureWatcher) {
+        const expectedPath = normalizeFsPath(workspace.workspace_path);
+        const currentPath = normalizeFsPath(status.watched_path);
+        if (!status.is_watching || expectedPath !== currentPath) {
+          status = await startWorkspaceWatcher(taskId, workspace.workspace_path);
+        }
+      }
+
+      setRecentlyLearned(items);
+      setWatcherStatus(status);
+      setClipboardCaptureEnabled(cbEnabled);
+    } catch {
+      // non-fatal — recently learned is informational only
+    }
+  }
+
+  async function loadArtifactRevisionState(taskId: number, artifactId: number) {
+    const [content, pending, versions, taskPending] = await Promise.all([
+      getArtifactContent(artifactId),
+      listPendingRevisions(taskId, artifactId),
+      listArtifactVersions(artifactId),
+      listTaskPendingRevisions(taskId)
+    ]);
+
+    setArtifactContent(content);
+    setPendingRevisions(pending);
+    setTaskPendingRevisions(taskPending);
+    setArtifactVersions(versions);
+    setArtifactSelectionStart(0);
+    setArtifactSelectionEnd(0);
+
+    setRevisionDebug((current) => ({
+      ...current,
+      activeArtifactId: artifactId
+    }));
+  }
+
+  function clearWorkspaceState() {
+    setFullWorkspaceVisible(false);
+    setTaskSummary(null);
+    setWorkspaceInfo(null);
+    setOpenResources([]);
+    setArtifacts([]);
+    setMessages([]);
+    setSubtasks([]);
+    setSuggestions([]);
+    setSessionModeState(null);
+    setTaskPendingRevisions([]);
+    setRecentEvents([]);
+    setSubtaskInstruction("");
+    setSubtaskSuggestion(null);
+    setSuggestionActionMessage(null);
+    setSuggestionExplainById({});
+    setSubtaskRefinementInputById({});
+    setPendingActionKeys({});
+    setRetrievalDebugChunks([]);
+    setRetrievalDebugMeta({
+      decisionEventType: "system_status_event",
+      decisionReason: "awaiting_activity",
+      confidence: null
+    });
+    setSubtaskDebug({
+      selectedSubtaskId: null,
+      executionType: "none",
+      instructionSource: "none",
+      contextSnapshot: "No subtask snapshot selected.",
+      retrievedChunks: []
+    });
+    setFlowDebug({
+      decisionReason: "not_evaluated",
+      suppressionState: "none",
+      noOp: true,
+      evidenceScore: null,
+      modeReason: "Flow engine not evaluated yet.",
+      retrievedChunks: []
+    });
+    clearArtifactRevisionState();
+  }
+
+  function clearArtifactRevisionState() {
+    setSelectedArtifactId(null);
+    setArtifactContent(null);
+    setArtifactSelectionStart(0);
+    setArtifactSelectionEnd(0);
+    setRevisionInstruction("");
+    setPendingRevisions([]);
+    setArtifactVersions([]);
+    setRevisionDebug({
+      activeArtifactId: null,
+      selectedStart: null,
+      selectedEnd: null,
+      selectionSource: "none",
+      confidence: null,
+      groundingNotes: "No revision proposal yet.",
+      contextSource: "none",
+      instructionSource: "none",
+      retrievedChunks: []
+    });
+  }
+
+  async function handleCreateTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmedTitle = newTaskTitle.trim();
+    if (!trimmedTitle) {
+      return;
+    }
+
+    setErrorMessage(null);
+
+    try {
+      await createTask(trimmedTitle);
+      setNewTaskTitle("");
+      await refreshShellState();
+    } catch (error) {
+      setErrorMessage(formatError(error));
+    }
+  }
+
+  async function handleSetActiveTask(taskId: number) {
+    setErrorMessage(null);
+
+    try {
+      const nextActiveTask = await setActiveTask(taskId);
+      const updatedTasks = await listTasks();
+      setTasks(updatedTasks);
+      setActiveTaskState(nextActiveTask);
+      await loadWorkspaceState(taskId);
+      await refreshCoworkingStatus();
+      setFullWorkspaceVisible(false);
+      setViewMode("workspace");
+    } catch (error) {
+      setErrorMessage(formatError(error));
+    }
+  }
+
+  async function handleContinueTask() {
+    if (!activeTask) {
+      return;
+    }
+
+    setErrorMessage(null);
+
+    try {
+      await loadWorkspaceState(activeTask.id);
+      await refreshCoworkingStatus();
+      setFullWorkspaceVisible(false);
+      setViewMode("workspace");
+    } catch (error) {
+      setErrorMessage(formatError(error));
+    }
+  }
+
+  async function handleImportArtifact(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!activeTask) {
+      setErrorMessage("Select an active task before importing artifacts.");
+      return;
+    }
+
+    const filePath = artifactPathInput.trim();
+    if (!filePath) {
+      return;
+    }
+
+    setErrorMessage(null);
+
+    try {
+      await importArtifact(activeTask.id, filePath);
+      setArtifactPathInput("");
+      await loadWorkspaceState(activeTask.id);
+    } catch (error) {
+      setErrorMessage(formatError(error));
+    }
+  }
+
+  async function handleSelectArtifact(artifactId: number) {
+    if (!activeTask) {
+      return;
+    }
+
+    setSelectedArtifactId(artifactId);
+
+    try {
+      await setActiveArtifactSelection(activeTask.id, artifactId);
+      await loadArtifactRevisionState(activeTask.id, artifactId);
+      await refreshSuggestions(activeTask.id);
+      setSessionModeState(await getSessionModeState(activeTask.id));
+    } catch (error) {
+      setErrorMessage(formatError(error));
+    }
+  }
+
+  async function handleSendTextMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const message = chatInput.trim();
+    if (!message || !activeTask) {
+      return;
+    }
+
+    clearTypingSignal();
+    setChatInput("");
+    await submitRoutedMessage(activeTask.id, message, "text");
+  }
+
+  async function submitRoutedMessage(taskId: number, message: string, source: "text" | "voice") {
+    const { intent, slots } = await classifyMessageIntentWithFallback(taskId, message);
+    setLastRoutedIntent(intent);
+
+    if (intent === "unknown") {
+      setErrorMessage(
+        "Jeff needs clarification: do you want an answer, a revision, a bounded subtask, or suggestions?"
+      );
+      updateTrayStatus("idle");
+      return;
+    }
+
+    const routedIntent: RoutedIntent = intent;
+
+    try {
+      if (routedIntent === "revision") {
+        await submitMessage(taskId, message, source);
+        await autoCreateRevisionFromIntent(taskId, message, source, slots);
+      } else if (routedIntent === "subtask") {
+        await submitMessage(taskId, message, source);
+        await autoCreateSubtaskFromIntent(taskId, message, source, slots);
+      } else if (routedIntent === "suggestion") {
+        await submitMessage(taskId, message, source);
+        await handleRefreshSuggestions();
+      } else {
+        await submitMessage(taskId, message, source);
+      }
+    } catch (error) {
+      setOperationError("Conversation routing failed", error);
+      return;
+    }
+
+    // phase 15: fire drift detection after send (non-blocking, 1s delay)
+    window.setTimeout(() => {
+      void checkTaskDrift(taskId, message)
+        .then((result: DriftFlagDto) => {
+          if (result.is_drifting && result.confidence > 0.6) {
+            setDriftNotice(result.flag_reason || "Your current writing may be drifting from the task goal.");
+          }
+        })
+        .catch(() => undefined);
+    }, 1000);
+  }
+
+  async function autoCreateRevisionFromIntent(
+    taskId: number,
+    message: string,
+    source: "text" | "voice",
+    slots?: IntentSlotsDto | null
+  ) {
+    const targetArtifactId =
+      selectedArtifactId ?? pickNextEditableArtifactId(artifacts, sessionModeState?.active_artifact_id ?? null);
+
+    if (!targetArtifactId) {
+      setErrorMessage(
+        "Jeff understood this as a revision request but no editable artifact is selected. Open full workspace to choose one."
+      );
+      return;
+    }
+
+    const instruction = buildRevisionInstruction(message, slots);
+    const hasExplicitSelection = artifactSelectionStart !== artifactSelectionEnd;
+    const selectedRange = hasExplicitSelection ? currentRevisionTarget() : null;
+    const resolvedTarget = deriveRevisionTargetFromDescription(
+      artifactContent?.content ?? null,
+      slots?.target_description ?? null,
+      selectedRange
+    );
+
+    const result = await proposeArtifactRevision(
+      taskId,
+      targetArtifactId,
+      resolvedTarget,
+      normalizeRevisionInstruction(instruction),
+      source === "voice" ? "voice" : "typed"
+    );
+
+    setRetrievalDebugMeta({
+      decisionEventType: "assistant_revision_proposal",
+      decisionReason: "conversation_route_revision",
+      confidence: result.confidence
+    });
+    setRetrievalDebugChunks(result.retrieved_chunks);
+    setRevisionDebug({
+      activeArtifactId: result.active_artifact_id,
+      selectedStart: result.used_start_offset,
+      selectedEnd: result.used_end_offset,
+      selectionSource: result.selection_source,
+      confidence: result.confidence,
+      groundingNotes: result.grounding_notes,
+      contextSource: result.context_source,
+      instructionSource: source === "voice" ? "voice" : "typed",
+      retrievedChunks: result.retrieved_chunks
+    });
+
+    setSuggestionActionMessage("I tightened that section and queued a revision proposal. You can apply it inline below.");
+    setSelectedArtifactId(targetArtifactId);
+    await setActiveArtifactSelection(taskId, targetArtifactId);
+    await loadArtifactRevisionState(taskId, targetArtifactId);
+    await refreshActionCenterState(taskId);
+  }
+
+  async function autoCreateSubtaskFromIntent(
+    taskId: number,
+    message: string,
+    source: "text" | "voice",
+    slots?: IntentSlotsDto | null
+  ) {
+    const executionType = slots?.draft_type
+      ? inferSubtaskExecutionTypeFromDraftType(slots.draft_type)
+      : inferSubtaskExecutionType(message);
+    const description = slots?.instruction ?? message;
+    // phase 16: use chain executor so intent-routed subtasks get multi-step planning
+    const created = await startSubtaskChain(
+      taskId,
+      deriveSubtaskTitle(description),
+      description,
+      executionType,
+      source === "voice" ? "voice" : "text"
+    );
+    updateSubtaskDebugFromSubtask(created);
+    setSuggestionActionMessage("I started a chain subtask in parallel. Step progress and any file proposals appear below.");
+    await refreshActionCenterState(taskId);
+    const messageList = await listMessages(taskId);
+    setMessages(messageList);
+  }
+
+  async function submitMessage(taskId: number, message: string, source: "text" | "voice") {
+    setErrorMessage(null);
+    await interruptCurrentInteraction("user_barge_in");
+    updateTrayStatus("working");
+
+    if (isStreamingEnabled()) {
+      await submitMessageStreaming(taskId, message, source);
+      return;
+    }
+
+    // non-streaming fallback: used in tests and when VITE_JEFF_STREAMING=0.
+    const requestId = ++sendRequestIdRef.current;
+
+    try {
+      const result = await sendMessage(taskId, message, source);
+      if (requestId !== sendRequestIdRef.current) {
+        return;
+      }
+
+      const messageList = await listMessages(taskId);
+      setMessages(messageList);
+      await refreshActionCenterState(taskId);
+      setRetrievalDebugChunks(result.retrieved_chunks);
+      setRetrievalDebugMeta({
+        decisionEventType: "assistant_answer",
+        decisionReason: "direct_user_request",
+        confidence: result.retrieved_chunks[0]?.similarity_score ?? null
+      });
+      await refreshCoworkingStatus();
+
+      if (result.cancelled) {
+        updateTrayStatus("idle");
+        return;
+      }
+
+      if (result.assistant_response.trim().length > 0) {
+        await startSpeechPlayback(result.assistant_response, requestId);
+      } else {
+        updateTrayStatus("idle");
+      }
+    } catch (error) {
+      if (requestId === sendRequestIdRef.current) {
+        setOperationError("Message request failed", error);
+      }
+      await refreshCoworkingStatus();
+      updateTrayStatus("idle");
+    }
+  }
+
+  async function submitMessageStreaming(
+    taskId: number,
+    message: string,
+    source: "text" | "voice"
+  ) {
+    // reset the tts queue for this new turn before the backend starts emitting.
+    stopStreamingTtsPlayback();
+    streamTtsNextPhraseRef.current = 1;
+
+    try {
+      const turnId = await sendMessageStreaming(taskId, message, source);
+      streamingTurnIdRef.current = turnId;
+      ttsActiveTurnIdRef.current = turnId;
+      setStreamingTurnId(turnId);
+      setStreamingText((prev) => ({ ...prev, [turnId]: "" }));
+      updateTrayStatus("working");
+      await refreshCoworkingStatus();
+    } catch (error) {
+      streamingTurnIdRef.current = null;
+      ttsActiveTurnIdRef.current = null;
+      setStreamingTurnId(null);
+      setOperationError("Streaming message request failed", error);
+      updateTrayStatus("idle");
+      await refreshCoworkingStatus();
+    }
+  }
+
+  async function runProactiveEvaluation(taskId: number) {
+    const evaluation = await evaluateProactiveNudge(taskId);
+    setCoworkingStatus(evaluation.status);
+    setRetrievalDebugMeta({
+      decisionEventType: evaluation.decision_event_type,
+      decisionReason: evaluation.decision_reason,
+      confidence: evaluation.nudge?.confidence ?? null
+    });
+
+    if (!evaluation.nudge) {
+      return;
+    }
+
+    await interruptCurrentInteraction("jeff_barge_in");
+
+    const requestId = ++sendRequestIdRef.current;
+    const updatedMessages = await listMessages(taskId);
+    setMessages(updatedMessages);
+    await refreshActionCenterState(taskId);
+    setRetrievalDebugChunks(evaluation.nudge.retrieved_chunks);
+
+    await startSpeechPlayback(evaluation.nudge.message, requestId);
+  }
+
+  async function runSuggestionEvaluation(taskId: number) {
+    const evaluation: SuggestionEvaluationDto = await evaluateNextSuggestions(taskId, selectedArtifactId);
+
+    setSessionModeState(evaluation.mode_state);
+    setSuggestions(evaluation.suggestions);
+    setFlowDebug({
+      decisionReason: evaluation.decision_reason,
+      suppressionState: evaluation.suppression_state,
+      noOp: evaluation.no_op,
+      evidenceScore: evaluation.evidence_score,
+      modeReason: evaluation.mode_state.mode_reason,
+      retrievedChunks: evaluation.retrieved_chunks
+    });
+  }
+
+  function currentRevisionTarget(): { start_offset: number; end_offset: number } | null {
+    if (!artifactContent?.is_editable) {
+      return null;
+    }
+
+    const start = Math.max(0, Math.min(artifactSelectionStart, artifactSelectionEnd));
+    const end = Math.max(start, Math.max(artifactSelectionStart, artifactSelectionEnd));
+
+    return {
+      start_offset: start,
+      end_offset: end
+    };
+  }
+
+  function setActionPending(actionKey: string, pending: boolean) {
+    setPendingActionKeys((current) => {
+      if (pending) {
+        return { ...current, [actionKey]: true };
+      }
+
+      const next = { ...current };
+      delete next[actionKey];
+      return next;
+    });
+  }
+
+  function isActionPending(actionKey: string): boolean {
+    return Boolean(pendingActionKeys[actionKey]);
+  }
+
+  function setOperationError(prefix: string, error: unknown) {
+    setErrorMessage(`${prefix}: ${formatError(error)}`);
+  }
+
+  async function handleAcceptSuggestion(suggestion: SuggestionDto) {
+    if (!activeTask) {
+      return;
+    }
+
+    const actionKey = `suggestion-accept-${suggestion.suggestion_id}`;
+    if (isActionPending(actionKey)) {
+      return;
+    }
+
+    setActionPending(actionKey, true);
+    setErrorMessage(null);
+
+    try {
+      const result: SuggestionAcceptanceDto = await acceptSuggestion(
+        activeTask.id,
+        suggestion.suggestion_id,
+        selectedArtifactId,
+        currentRevisionTarget()
+      );
+
+      if (result.revision_result) {
+        setRetrievalDebugMeta({
+          decisionEventType: "assistant_revision_proposal",
+          decisionReason: `suggestion_accept_${result.suggestion.suggestion_type}`,
+          confidence: result.revision_result.confidence
+        });
+        setRetrievalDebugChunks(result.revision_result.retrieved_chunks);
+        setRevisionDebug({
+          activeArtifactId: result.revision_result.active_artifact_id,
+          selectedStart: result.revision_result.used_start_offset,
+          selectedEnd: result.revision_result.used_end_offset,
+          selectionSource: result.revision_result.selection_source,
+          confidence: result.revision_result.confidence,
+          groundingNotes: result.revision_result.grounding_notes,
+          contextSource: result.revision_result.context_source,
+          instructionSource: "system",
+          retrievedChunks: result.revision_result.retrieved_chunks
+        });
+
+        if (selectedArtifactId) {
+          await loadArtifactRevisionState(activeTask.id, selectedArtifactId);
+        }
+      }
+
+      if (result.subtask) {
+        updateSubtaskDebugFromSubtask(result.subtask);
+      }
+
+      const messageList = await listMessages(activeTask.id);
+      setMessages(messageList);
+      await refreshActionCenterState(activeTask.id);
+      setSessionModeState(await getSessionModeState(activeTask.id));
+
+      if (result.followup_message && result.followup_message.trim().length > 0) {
+        const requestId = ++sendRequestIdRef.current;
+        await startSpeechPlayback(result.followup_message, requestId);
+      }
+
+      setSuggestionActionMessage(formatSuggestionActionMessage(result));
+      setSuggestionExplainById((current) => {
+        const next = { ...current };
+        delete next[suggestion.suggestion_id];
+        return next;
+      });
+
+      await refreshCoworkingStatus();
+    } catch (error) {
+      setOperationError("Failed to accept suggestion", error);
+    } finally {
+      setActionPending(actionKey, false);
+    }
+  }
+
+  async function handleDismissSuggestion(suggestionId: number) {
+    if (!activeTask) {
+      return;
+    }
+
+    const actionKey = `suggestion-dismiss-${suggestionId}`;
+    if (isActionPending(actionKey)) {
+      return;
+    }
+    setActionPending(actionKey, true);
+    setErrorMessage(null);
+
+    try {
+      const dismissed = await dismissSuggestion(activeTask.id, suggestionId);
+      await refreshActionCenterState(activeTask.id);
+      setSessionModeState(await getSessionModeState(activeTask.id));
+      setSuggestionActionMessage(`Dismissed suggestion: ${dismissed.title}`);
+      setSuggestionExplainById((current) => {
+        const next = { ...current };
+        delete next[suggestionId];
+        return next;
+      });
+    } catch (error) {
+      setOperationError("Failed to dismiss suggestion", error);
+    } finally {
+      setActionPending(actionKey, false);
+    }
+  }
+
+  async function handleExplainSuggestion(suggestionId: number) {
+    if (!activeTask) {
+      return;
+    }
+
+    setErrorMessage(null);
+
+    try {
+      const explanation = await explainSuggestion(activeTask.id, suggestionId);
+      setSuggestionExplainById((current) => ({
+        ...current,
+        [suggestionId]: explanation
+      }));
+    } catch (error) {
+      setOperationError("Failed to explain suggestion", error);
+    }
+  }
+
+  async function handleRefreshSuggestions() {
+    if (!activeTask || suggestionEvaluationInFlightRef.current) {
+      return;
+    }
+
+    setErrorMessage(null);
+    suggestionEvaluationInFlightRef.current = true;
+
+    try {
+      await runSuggestionEvaluation(activeTask.id);
+      await refreshActionCenterState(activeTask.id);
+    } catch (error) {
+      setOperationError("Failed to refresh suggestions", error);
+    } finally {
+      suggestionEvaluationInFlightRef.current = false;
+    }
+  }
+
+  // phase 13: workspace watcher and clipboard handlers
+
+  async function handleStartWatcher(folderPath: string) {
+    if (!activeTask) return;
+    try {
+      const status = await startWorkspaceWatcher(activeTask.id, folderPath);
+      setWatcherStatus(status);
+      activeWatcherTaskIdRef.current = activeTask.id;
+    } catch (error) {
+      setOperationError("Failed to start workspace watcher", error);
+    }
+  }
+
+  async function handleStopWatcher() {
+    if (!activeTask) return;
+    try {
+      const status = await stopWorkspaceWatcher(activeTask.id);
+      setWatcherStatus(status);
+      if (activeWatcherTaskIdRef.current === activeTask.id) {
+        activeWatcherTaskIdRef.current = null;
+      }
+    } catch (error) {
+      setOperationError("Failed to stop workspace watcher", error);
+    }
+  }
+
+  async function handleToggleClipboardCapture() {
+    if (!activeTask) return;
+    const next = !clipboardCaptureEnabled;
+    try {
+      await setClipboardCapture(activeTask.id, next);
+      setClipboardCaptureEnabled(next);
+    } catch (error) {
+      setOperationError("Failed to update clipboard capture setting", error);
+    }
+  }
+
+  async function handleRefreshRecentlyLearned() {
+    if (!activeTask) return;
+    try {
+      const items = await listRecentlyLearned(activeTask.id, 10);
+      setRecentlyLearned(items);
+    } catch {
+      // non-fatal
+    }
+  }
+
+  // phase 15: proactive initiation handlers
+
+  function dismissReorientationBanner() {
+    if (reorientationDismissTimerRef.current !== null) {
+      window.clearTimeout(reorientationDismissTimerRef.current);
+      reorientationDismissTimerRef.current = null;
+    }
+    setReorientationBanner(null);
+  }
+
+  function dismissDriftNotice() {
+    setDriftNotice(null);
+    if (activeTask) {
+      void dismissProactiveTrigger(activeTask.id, "drift").catch(() => undefined);
+    }
+  }
+
+  async function handleToggleQuietMode() {
+    const next = !quietMode;
+    try {
+      await setQuietMode(next);
+      setQuietModeState(next);
+    } catch {
+      // non-fatal
+    }
+  }
+
+  async function handleDismissSpeculativeSubtask() {
+    if (activeTask && speculativeSubtask) {
+      void dismissProactiveTrigger(activeTask.id, "stuck").catch(() => undefined);
+    }
+    setSpeculativeSubtask(null);
+  }
+
+  async function handleCancelSpeculativeSubtask() {
+    if (speculativeSubtask) {
+      try {
+        await cancelSubtask(speculativeSubtask.subtask_id);
+      } catch {
+        // non-fatal
+      }
+    }
+    setSpeculativeSubtask(null);
+  }
+
+  async function handleProposeRevision(instructionSource: "typed" | "voice", voiceInstruction?: string) {
+    if (!activeTask || !selectedArtifactId) {
+      setErrorMessage("Select an editable artifact before requesting revision.");
+      return;
+    }
+
+    const instruction = (voiceInstruction ?? revisionInstruction).trim();
+    if (!instruction) {
+      return;
+    }
+
+    await interruptCurrentInteraction("user_barge_in");
+
+    try {
+      const result = await proposeArtifactRevision(
+        activeTask.id,
+        selectedArtifactId,
+        {
+          start_offset: artifactSelectionStart,
+          end_offset: artifactSelectionEnd
+        },
+        instruction,
+        instructionSource
+      );
+
+      setRetrievalDebugMeta({
+        decisionEventType: "assistant_revision_proposal",
+        decisionReason: `revision_${result.selection_source}`,
+        confidence: result.confidence
+      });
+      setRetrievalDebugChunks(result.retrieved_chunks);
+
+      setRevisionDebug({
+        activeArtifactId: result.active_artifact_id,
+        selectedStart: result.used_start_offset,
+        selectedEnd: result.used_end_offset,
+        selectionSource: result.selection_source,
+        confidence: result.confidence,
+        groundingNotes: result.grounding_notes,
+        contextSource: result.context_source,
+        instructionSource,
+        retrievedChunks: result.retrieved_chunks
+      });
+
+      if (instructionSource === "typed") {
+        setRevisionInstruction("");
+      }
+
+      await loadArtifactRevisionState(activeTask.id, selectedArtifactId);
+      await refreshActionCenterState(activeTask.id);
+      const messageList = await listMessages(activeTask.id);
+      setMessages(messageList);
+      await refreshCoworkingStatus();
+    } catch (error) {
+      setOperationError("Failed to create revision proposal", error);
+      await refreshCoworkingStatus();
+    }
+  }
+
+  async function handleApplyRevision(revisionId: number) {
+    if (!activeTask || !selectedArtifactId) {
+      return;
+    }
+
+    try {
+      const result = await applyRevision(revisionId);
+      setArtifactContent(result.artifact_content);
+      await loadArtifactRevisionState(activeTask.id, selectedArtifactId);
+      await refreshActionCenterState(activeTask.id);
+      const messageList = await listMessages(activeTask.id);
+      setMessages(messageList);
+
+      setRevisionDebug((current) => ({
+        ...current,
+        activeArtifactId: selectedArtifactId,
+        confidence: result.revision.retrieval_confidence,
+        groundingNotes:
+          result.revision.grounding_notes ?? "Applied revision with stored grounding details.",
+        contextSource: "direct_instruction"
+      }));
+    } catch (error) {
+      setOperationError("Failed to apply revision", error);
+    }
+  }
+
+  async function handleRejectRevision(revisionId: number) {
+    if (!activeTask || !selectedArtifactId) {
+      return;
+    }
+
+    try {
+      await rejectRevision(revisionId);
+      await loadArtifactRevisionState(activeTask.id, selectedArtifactId);
+      await refreshActionCenterState(activeTask.id);
+      const messageList = await listMessages(activeTask.id);
+      setMessages(messageList);
+    } catch (error) {
+      setOperationError("Failed to reject revision", error);
+    }
+  }
+
+  async function handleRevertVersion(versionId: number) {
+    if (!activeTask || !selectedArtifactId) {
+      return;
+    }
+
+    try {
+      const restored = await revertArtifactToVersion(versionId);
+      setArtifactContent(restored);
+      await loadArtifactRevisionState(activeTask.id, selectedArtifactId);
+      await refreshActionCenterState(activeTask.id);
+      const messageList = await listMessages(activeTask.id);
+      setMessages(messageList);
+    } catch (error) {
+      setOperationError("Failed to revert version", error);
+    }
+  }
+
+  async function handleCreateSubtask(
+    instructionSource: "text" | "voice" | "system",
+    voiceInstruction?: string,
+    executionTypeOverride?: ExecutionType
+  ) {
+    if (!activeTask) {
+      setErrorMessage("Select an active task before creating a subtask.");
+      return;
+    }
+
+    const description = (voiceInstruction ?? subtaskInstruction).trim();
+    if (!description) {
+      return;
+    }
+
+    const executionType = executionTypeOverride ?? subtaskExecutionType;
+    const title = deriveSubtaskTitle(description);
+
+    try {
+      const created = await startSubtaskChain(
+        activeTask.id,
+        title,
+        description,
+        executionType,
+        instructionSource
+      );
+
+      if (instructionSource === "text") {
+        setSubtaskInstruction("");
+      }
+
+      setSubtaskSuggestion(null);
+      updateSubtaskDebugFromSubtask(created);
+      await refreshActionCenterState(activeTask.id);
+      const messageList = await listMessages(activeTask.id);
+      setMessages(messageList);
+      await refreshCoworkingStatus();
+    } catch (error) {
+      setOperationError("Failed to create subtask", error);
+    }
+  }
+
+  async function handleCancelSubtask(subtaskId: number) {
+    if (!activeTask) {
+      return;
+    }
+
+    try {
+      const cancelled = await cancelSubtask(subtaskId);
+      updateSubtaskDebugFromSubtask(cancelled);
+      await refreshActionCenterState(activeTask.id);
+      const messageList = await listMessages(activeTask.id);
+      setMessages(messageList);
+    } catch (error) {
+      setOperationError("Failed to cancel subtask", error);
+    }
+  }
+
+  async function handleAcceptSubtaskResult(subtaskId: number) {
+    if (!activeTask) {
+      return;
+    }
+
+    try {
+      const updated = await acceptSubtaskResult(subtaskId);
+      updateSubtaskDebugFromSubtask(updated);
+      await refreshActionCenterState(activeTask.id);
+    } catch (error) {
+      setOperationError("Failed to accept subtask result", error);
+    }
+  }
+
+  async function handleRejectSubtaskResult(subtaskId: number) {
+    if (!activeTask) {
+      return;
+    }
+
+    try {
+      const updated = await rejectSubtaskResult(subtaskId);
+      updateSubtaskDebugFromSubtask(updated);
+      await refreshActionCenterState(activeTask.id);
+    } catch (error) {
+      setOperationError("Failed to reject subtask result", error);
+    }
+  }
+
+  // phase 16: file write proposal handlers
+
+  async function handleApproveFileWrite(proposalId: number) {
+    if (!activeTask) return;
+    try {
+      const entry = await approveSubtaskFileWrite(activeTask.id, proposalId);
+      setWriteAuditLog((prev) => [entry, ...prev]);
+      const updated = await listFileWriteProposals(activeTask.id);
+      setFileWriteProposals(updated);
+      await refreshActionCenterState(activeTask.id);
+    } catch (error) {
+      setOperationError("Failed to approve file write", error);
+    }
+  }
+
+  async function handleRejectFileWrite(proposalId: number) {
+    if (!activeTask) return;
+    try {
+      const entry = await rejectSubtaskFileWrite(activeTask.id, proposalId);
+      setWriteAuditLog((prev) => [entry, ...prev]);
+      const updated = await listFileWriteProposals(activeTask.id);
+      setFileWriteProposals(updated);
+    } catch (error) {
+      setOperationError("Failed to reject file write", error);
+    }
+  }
+
+  async function handleSuggestSubtask() {
+    if (!activeTask) {
+      return;
+    }
+
+    try {
+      const suggestion = await suggestSubtask(activeTask.id);
+      setSubtaskSuggestion(suggestion);
+      if (suggestion) {
+        const parsed = parseSubtaskSnapshot(suggestion.parent_context_snapshot);
+        setSubtaskDebug({
+          selectedSubtaskId: null,
+          executionType: suggestion.execution_type,
+          instructionSource: suggestion.instruction_source,
+          contextSnapshot: suggestion.parent_context_snapshot,
+          retrievedChunks: parsed?.retrieved_chunks ?? suggestion.retrieved_chunks
+        });
+      }
+    } catch (error) {
+      setOperationError("Failed to load subtask suggestion", error);
+    }
+  }
+
+  async function handleAcceptSuggestedSubtask() {
+    if (!subtaskSuggestion) {
+      return;
+    }
+
+    const suggestedType = normalizeExecutionType(subtaskSuggestion.execution_type);
+    await handleCreateSubtask(
+      "system",
+      subtaskSuggestion.description,
+      suggestedType
+    );
+  }
+
+  async function handleRefineSubtask(subtaskId: number) {
+    if (!activeTask) {
+      return;
+    }
+
+    const instruction = (subtaskRefinementInputById[subtaskId] ?? "").trim();
+    if (!instruction) {
+      return;
+    }
+
+    try {
+      const refined = await refineSubtask(subtaskId, instruction, "text");
+      setSubtaskRefinementInputById((current) => ({ ...current, [subtaskId]: "" }));
+      updateSubtaskDebugFromSubtask(refined);
+      await refreshActionCenterState(activeTask.id);
+      const messageList = await listMessages(activeTask.id);
+      setMessages(messageList);
+    } catch (error) {
+      setOperationError("Failed to refine subtask", error);
+    }
+  }
+
+  async function handleConvertSubtaskToRevision(subtaskId: number) {
+    if (!activeTask || !selectedArtifactId) {
+      setErrorMessage("Select an editable artifact before converting subtask output.");
+      return;
+    }
+
+    try {
+      const result = await convertSubtaskToRevision(
+        activeTask.id,
+        subtaskId,
+        selectedArtifactId,
+        {
+          start_offset: artifactSelectionStart,
+          end_offset: artifactSelectionEnd
+        }
+      );
+
+      setRetrievalDebugMeta({
+        decisionEventType: "assistant_revision_proposal",
+        decisionReason: `subtask_to_revision_${result.selection_source}`,
+        confidence: result.confidence
+      });
+      setRetrievalDebugChunks(result.retrieved_chunks);
+      setRevisionDebug({
+        activeArtifactId: result.active_artifact_id,
+        selectedStart: result.used_start_offset,
+        selectedEnd: result.used_end_offset,
+        selectionSource: result.selection_source,
+        confidence: result.confidence,
+        groundingNotes: result.grounding_notes,
+        contextSource: "subtask_result",
+        instructionSource: "system",
+        retrievedChunks: result.retrieved_chunks
+      });
+
+      await loadArtifactRevisionState(activeTask.id, selectedArtifactId);
+      await refreshActionCenterState(activeTask.id);
+      const messageList = await listMessages(activeTask.id);
+      setMessages(messageList);
+      await refreshCoworkingStatus();
+    } catch (error) {
+      setOperationError("Failed to convert subtask result into revision", error);
+    }
+  }
+
+  function updateSubtaskDebugFromSubtask(subtask: SubTaskDto) {
+    const parsed = parseSubtaskSnapshot(subtask.parent_context_snapshot);
+    setSubtaskDebug({
+      selectedSubtaskId: subtask.subtask_id,
+      executionType: subtask.execution_type,
+      instructionSource: subtask.instruction_source,
+      contextSnapshot: subtask.parent_context_snapshot,
+      retrievedChunks: parsed?.retrieved_chunks ?? []
+    });
+  }
+
+  async function startRecording(purpose: RecordingPurpose) {
+    if (recording || !activeTask) {
+      return;
+    }
+
+    setErrorMessage(null);
+
+    try {
+      await interruptCurrentInteraction("user_barge_in");
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      recordingPurposeRef.current = purpose;
+      setRecordingPurpose(purpose);
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        void finalizeVoiceInput();
+      };
+
+      recorder.start();
+      setRecording(true);
+      const status = await setUserSpeaking(true);
+      setCoworkingStatus(status);
+      updateTrayStatus("listening");
+
+      // partial stt: best-effort early routing before whisper finalizes.
+      // only for chat purpose; revision/subtask need full transcription.
+      if (purpose === "chat" && activeTask) {
+        tryStartPartialStt(activeTask.id);
+      }
+    } catch (error) {
+      stopMicrophoneStream();
+      setRecording(false);
+      setOperationError("Failed to start microphone recording", error);
+      await refreshCoworkingStatus();
+    }
+  }
+
+  async function stopRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) {
+      return;
+    }
+
+    if (recorder.state !== "inactive") {
+      recorder.stop();
+    }
+
+    setRecording(false);
+    updateTrayStatus("working");
+    try {
+      const status = await setUserSpeaking(false);
+      setCoworkingStatus(status);
+    } catch {
+      // ignore status update failure
+    }
+  }
+
+  async function finalizeVoiceInput() {
+    stopPartialStt();
+
+    const chunks = audioChunksRef.current;
+    audioChunksRef.current = [];
+
+    // if partial stt already routed the message, skip whisper entirely.
+    if (partialSttSentRef.current) {
+      partialSttSentRef.current = false;
+      stopMicrophoneStream();
+      mediaRecorderRef.current = null;
+      recordingPurposeRef.current = "chat";
+      setRecordingPurpose("chat");
+      await refreshCoworkingStatus();
+      return;
+    }
+
+    const active = activeTask;
+    if (!active || chunks.length === 0) {
+      stopMicrophoneStream();
+      await refreshCoworkingStatus();
+      return;
+    }
+
+    try {
+      const mimeType = chunks[0].type || "audio/webm";
+      const blob = new Blob(chunks, { type: mimeType });
+      const audioBase64 = await blobToBase64(blob);
+
+      const transcription = await transcribeAudio(audioBase64, mimeType);
+      const transcriptText = transcription.text.trim();
+
+      if (transcriptText.length > 0) {
+        if (recordingPurposeRef.current === "revision") {
+          await handleProposeRevision("voice", transcriptText);
+        } else if (recordingPurposeRef.current === "subtask") {
+          await handleCreateSubtask("voice", transcriptText);
+        } else if (recordingPurposeRef.current === "cancel_subtask") {
+          const target = activeSubtasks[0];
+          if (target) {
+            await handleCancelSubtask(target.subtask_id);
+          } else {
+            setErrorMessage("No running subtask to cancel.");
+          }
+        } else {
+          await submitRoutedMessage(active.id, transcriptText, "voice");
+        }
+      }
+    } catch (error) {
+      setOperationError("Voice transcription failed", error);
+    } finally {
+      stopMicrophoneStream();
+      mediaRecorderRef.current = null;
+      recordingPurposeRef.current = "chat";
+      setRecordingPurpose("chat");
+      await refreshCoworkingStatus();
+    }
+  }
+
+  async function interruptCurrentInteraction(
+    reason: "user_barge_in" | "jeff_barge_in" | "explicit" | "error" = "explicit"
+  ) {
+    stopSpeechPlayback();
+    stopStreamingTtsPlayback();
+    stopPartialStt();
+
+    // cancel any in-flight streaming llm turn on the backend.
+    const activeTurnId = streamingTurnIdRef.current;
+    if (activeTurnId) {
+      void cancelStreamingTurn(activeTurnId, reason).catch(() => undefined);
+      // streamingTurnId is cleared by the incoming EVENT_TURN_CANCELLED;
+      // no need to reset it here to avoid a race with the next turn.
+    }
+
+    await cancelInteraction().catch(() => 0);
+    await refreshCoworkingStatus();
+  }
+
+  async function startSpeechPlayback(text: string, requestId: number) {
+    try {
+      const speech = await synthesizeSpeech(text);
+      if (requestId !== sendRequestIdRef.current) {
+        return;
+      }
+
+      stopSpeechPlayback();
+
+      const blob = base64ToBlob(speech.audio_base64, speech.mime_type);
+      const objectUrl = URL.createObjectURL(blob);
+      ttsObjectUrlRef.current = objectUrl;
+
+      const audio = new Audio(objectUrl);
+      ttsAudioRef.current = audio;
+
+      const speakingStatus = await setAssistantSpeaking(true);
+      setCoworkingStatus(speakingStatus);
+      updateTrayStatus("working");
+
+      audio.onended = () => {
+        void setAssistantSpeaking(false)
+          .then((status) => setCoworkingStatus(status))
+          .catch(() => undefined);
+        updateTrayStatus("idle");
+      };
+
+      audio.onerror = () => {
+        void setAssistantSpeaking(false)
+          .then((status) => setCoworkingStatus(status))
+          .catch(() => undefined);
+        setErrorMessage("Failed to play synthesized speech.");
+        updateTrayStatus("idle");
+      };
+
+      await audio.play();
+    } catch (error) {
+      setOperationError("Text-to-speech failed (response text still available in chat)", error);
+      await refreshCoworkingStatus();
+      updateTrayStatus("idle");
+    }
+  }
+
+  function stopSpeechPlayback() {
+    if (ttsAudioRef.current) {
+      const isJsDomRuntime =
+        typeof navigator !== "undefined" &&
+        navigator.userAgent.toLowerCase().includes("jsdom");
+
+      if (!isJsDomRuntime && typeof ttsAudioRef.current.pause === "function") {
+        try {
+          ttsAudioRef.current.pause();
+        } catch {
+          // jsdom does not implement media pause fully
+        }
+      }
+      ttsAudioRef.current.currentTime = 0;
+      ttsAudioRef.current = null;
+    }
+
+    if (ttsObjectUrlRef.current) {
+      if (typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(ttsObjectUrlRef.current);
+      }
+      ttsObjectUrlRef.current = null;
+    }
+
+    void setAssistantSpeaking(false)
+      .then((status) => setCoworkingStatus(status))
+      .catch(() => undefined);
+    updateTrayStatus("idle");
+  }
+
+  // attempt to play the next queued streaming tts phrase in phrase_id order.
+  // called each time a new chunk arrives and each time a phrase finishes.
+  function scheduleStreamTtsPlayback() {
+    if (streamTtsCurrentRef.current !== null) {
+      // a phrase is already playing; it will call this on end.
+      return;
+    }
+    const next = streamTtsQueueRef.current.get(streamTtsNextPhraseRef.current);
+    if (!next) {
+      // next phrase not yet in queue; will be called again when it arrives.
+      return;
+    }
+    streamTtsQueueRef.current.delete(streamTtsNextPhraseRef.current);
+    streamTtsNextPhraseRef.current += 1;
+    const { audio, url } = next;
+    streamTtsCurrentRef.current = audio;
+
+    audio.onended = () => {
+      URL.revokeObjectURL(url);
+      streamTtsCurrentRef.current = null;
+      // clear ttsActiveTurnIdRef only after all queued phrases have played.
+      if (streamTtsQueueRef.current.size === 0) {
+        ttsActiveTurnIdRef.current = null;
+        void setAssistantSpeaking(false)
+          .then((status) => setCoworkingStatus(status))
+          .catch(() => undefined);
+        updateTrayStatus("idle");
+      }
+      scheduleStreamTtsPlayback();
+    };
+    audio.onerror = () => {
+      URL.revokeObjectURL(url);
+      streamTtsCurrentRef.current = null;
+      if (streamTtsQueueRef.current.size === 0) {
+        ttsActiveTurnIdRef.current = null;
+        void setAssistantSpeaking(false)
+          .then((status) => setCoworkingStatus(status))
+          .catch(() => undefined);
+        updateTrayStatus("idle");
+      }
+      scheduleStreamTtsPlayback();
+    };
+
+    void setAssistantSpeaking(true)
+      .then((status) => setCoworkingStatus(status))
+      .catch(() => undefined);
+    updateTrayStatus("working");
+
+    void audio.play().catch(() => {
+      streamTtsCurrentRef.current = null;
+      if (streamTtsQueueRef.current.size === 0) {
+        ttsActiveTurnIdRef.current = null;
+        void setAssistantSpeaking(false)
+          .then((status) => setCoworkingStatus(status))
+          .catch(() => undefined);
+        updateTrayStatus("idle");
+      }
+    });
+  }
+
+  // immediately stop all streaming tts playback and drain the queue.
+  // called on barge-in and before any new streaming turn starts.
+  function stopStreamingTtsPlayback() {
+    if (streamTtsCurrentRef.current) {
+      try {
+        streamTtsCurrentRef.current.pause();
+      } catch {
+        // ignore
+      }
+      streamTtsCurrentRef.current = null;
+    }
+    for (const { audio, url } of streamTtsQueueRef.current.values()) {
+      try {
+        audio.pause();
+      } catch {
+        // ignore
+      }
+      if (typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(url);
+      }
+    }
+    streamTtsQueueRef.current.clear();
+    streamTtsNextPhraseRef.current = 1;
+    ttsActiveTurnIdRef.current = null;
+
+    void setAssistantSpeaking(false)
+      .then((status) => setCoworkingStatus(status))
+      .catch(() => undefined);
+    updateTrayStatus("idle");
+  }
+
+  // try to start web speech api recognition for partial transcripts.
+  // on interim result with confidence >= 0.7, submits early and stops recording.
+  // falls back gracefully if the api is not available.
+  function tryStartPartialStt(taskId: number) {
+    const win = window as unknown as Record<string, unknown>;
+    const SpeechRecognitionCtor = (win["SpeechRecognition"] ?? win["webkitSpeechRecognition"]) as
+      | (new () => PartialSpeechRecognition)
+      | undefined;
+
+    if (!SpeechRecognitionCtor) return;
+
+    partialSttSentRef.current = false;
+    let recognition: PartialSpeechRecognition;
+    try {
+      recognition = new SpeechRecognitionCtor();
+    } catch {
+      return;
+    }
+
+    recognition.interimResults = true;
+    recognition.continuous = false;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      if (partialSttSentRef.current) return;
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (
+          !result.isFinal &&
+          result[0] &&
+          result[0].confidence >= 0.7 &&
+          result[0].transcript.trim().length >= 5
+        ) {
+          partialSttSentRef.current = true;
+          const text = result[0].transcript.trim();
+          // stop the recorder — finalizeVoiceInput checks partialSttSentRef
+          // and skips whisper since we already routed.
+          void stopRecording();
+          void submitRoutedMessage(taskId, text, "voice");
+          break;
+        }
+      }
+    };
+
+    recognition.onerror = () => {
+      speechRecognitionRef.current = null;
+    };
+    recognition.onend = () => {
+      speechRecognitionRef.current = null;
+    };
+
+    try {
+      recognition.start();
+      speechRecognitionRef.current = recognition;
+    } catch {
+      speechRecognitionRef.current = null;
+    }
+  }
+
+  function stopPartialStt() {
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch {
+        // ignore
+      }
+      speechRecognitionRef.current = null;
+    }
+  }
+
+  function stopMicrophoneStream() {
+    if (mediaStreamRef.current) {
+      for (const track of mediaStreamRef.current.getTracks()) {
+        track.stop();
+      }
+      mediaStreamRef.current = null;
+    }
+  }
+
+  function clearTypingSignal() {
+    if (typingTimeoutRef.current !== null) {
+      window.clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+
+    void setUserTyping(false)
+      .then((status) => setCoworkingStatus(status))
+      .catch(() => undefined);
+  }
+
+  function handleChatInputChange(value: string) {
+    setChatInput(value);
+
+    if (!activeTask) {
+      return;
+    }
+
+    if (typingTimeoutRef.current !== null) {
+      window.clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+
+    void setUserTyping(true)
+      .then((status) => setCoworkingStatus(status))
+      .catch(() => undefined);
+
+    typingTimeoutRef.current = window.setTimeout(() => {
+      void setUserTyping(false)
+        .then((status) => setCoworkingStatus(status))
+        .catch(() => undefined);
+      typingTimeoutRef.current = null;
+    }, 1200);
+  }
+
+  function handleArtifactSelection() {
+    const textarea = artifactTextareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    setArtifactSelectionStart(textarea.selectionStart);
+    setArtifactSelectionEnd(textarea.selectionEnd);
+  }
+
+  async function handleProactiveToggle(enabled: boolean) {
+    try {
+      const status = await setProactiveMode(enabled);
+      setCoworkingStatus(status);
+    } catch (error) {
+      setOperationError("Failed to toggle proactive mode", error);
+    }
+  }
+
+  const statusLabel = formatStatusLabel(coworkingStatus?.state ?? "idle");
+  const parsedSubtaskSnapshot = parseSubtaskSnapshot(subtaskDebug.contextSnapshot);
+
+  return (
+    <main className="shell">
+      <header className="header-row">
+        <div>
+          <h1>Jeff</h1>
+          <p className="subtitle">Phase 10 shell: companion-first conversation with workspace tools on demand.</p>
+        </div>
+        {viewMode === "workspace" ? (
+          <div className="row-actions">
+            <button
+              onClick={() => setFullWorkspaceVisible((current) => !current)}
+              data-testid="toggle-full-workspace"
+            >
+              {fullWorkspaceVisible ? "Companion View" : "Open Full Workspace"}
+            </button>
+            <button onClick={() => setViewMode("home")}>Back to Home</button>
+          </div>
+        ) : null}
+      </header>
+
+      <section className="panel status-panel" data-testid="status-indicator">
+        <h2>Status</h2>
+        <p>
+          <strong>{statusLabel}</strong>
+          {coworkingStatus?.state === "speaking" ? " • Jeff is speaking" : ""}
+        </p>
+      </section>
+
+      {viewMode === "home" ? (
+        <section className="panel" data-testid="home-resume-screen">
+          <h2>Resume</h2>
+          {loading ? <p>Loading task state...</p> : null}
+          {!loading ? <p data-testid="resume-active-task">Last active task: {activeTaskLabel}</p> : null}
+
+          <div className="row-actions">
+            <button onClick={() => void handleContinueTask()} disabled={!activeTask} data-testid="continue-task-button">
+              Continue Task
+            </button>
+          </div>
+
+          <h3>Create Task</h3>
+          <form onSubmit={handleCreateTask} className="task-form">
+            <input
+              aria-label="Task title"
+              placeholder="history storymap"
+              value={newTaskTitle}
+              onChange={(event) => setNewTaskTitle(event.target.value)}
+            />
+            <button type="submit" disabled={newTaskTitle.trim().length === 0}>
+              Create Task
+            </button>
+          </form>
+
+          <h3>Tasks</h3>
+          {tasks.length === 0 ? <p>No tasks yet.</p> : null}
+          <ul className="task-list">
+            {tasks.map((task) => (
+              <li key={task.id} className="task-row">
+                <div>
+                  <strong>{task.title}</strong>
+                  <p className="task-meta">slug: {task.slug}</p>
+                </div>
+                <div className="task-actions">
+                  {task.is_active ? <span className="active-pill">Active</span> : null}
+                  <button onClick={() => void handleSetActiveTask(task.id)} disabled={task.is_active}>
+                    Set Active
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {viewMode === "workspace" && activeTask ? (
+        <section
+          className={fullWorkspaceVisible ? "workspace-grid" : "workspace-grid companion-grid"}
+          data-testid="workspace-screen"
+        >
+          {fullWorkspaceVisible ? (
+            <div className="panel">
+            <h2>Task Workspace</h2>
+            <p data-testid="workspace-task-title">Task: {activeTask.title}</p>
+            <p data-testid="active-task-summary">{taskSummary ? taskSummary.summary_text : "Summary unavailable."}</p>
+            <p data-testid="active-task-workspace">
+              {workspaceInfo ? workspaceInfo.workspace_path : "Workspace unavailable."}
+            </p>
+
+            <h3>Artifacts</h3>
+            <form onSubmit={handleImportArtifact} className="task-form">
+              <input
+                aria-label="Artifact file path"
+                placeholder="/absolute/path/to/notes.md"
+                value={artifactPathInput}
+                onChange={(event) => setArtifactPathInput(event.target.value)}
+              />
+              <button type="submit" disabled={artifactPathInput.trim().length === 0}>
+                Import File
+              </button>
+            </form>
+
+            {artifacts.length === 0 ? <p data-testid="artifacts-empty">No artifacts imported yet.</p> : null}
+            {artifacts.length > 0 ? (
+              <ul data-testid="artifacts-list" className="artifact-list">
+                {artifacts.map((artifact) => {
+                  const selected = artifact.id === selectedArtifactId;
+                  const editable = isEditableArtifact(artifact);
+
+                  return (
+                    <li key={artifact.id} className={selected ? "artifact-item selected" : "artifact-item"}>
+                      <button type="button" onClick={() => void handleSelectArtifact(artifact.id)}>
+                        {artifact.file_name} ({artifact.chunk_count} chunks)
+                        {editable ? "" : " [read-only]"}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
+
+            <h3>SubTasks</h3>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleCreateSubtask("text");
+              }}
+              className="task-form"
+              data-testid="subtask-create-form"
+            >
+              <input
+                aria-label="Subtask instruction"
+                placeholder="draft a better intro"
+                value={subtaskInstruction}
+                onChange={(event) => setSubtaskInstruction(event.target.value)}
+                data-testid="subtask-instruction-input"
+              />
+              <select
+                value={subtaskExecutionType}
+                onChange={(event) => setSubtaskExecutionType(event.target.value as ExecutionType)}
+                data-testid="subtask-execution-type"
+              >
+                <option value="draft_generation">Draft generation</option>
+                <option value="expansion">Expansion</option>
+                <option value="synthesis">Synthesis</option>
+                <option value="targeted_research_synthesis">Targeted research synthesis</option>
+              </select>
+              <button type="submit" disabled={subtaskInstruction.trim().length === 0}>
+                Create SubTask
+              </button>
+              <button
+                type="button"
+                onClick={() => void startRecording("subtask")}
+                disabled={recording}
+                data-testid="voice-subtask-button"
+              >
+                Voice SubTask
+              </button>
+              <button
+                type="button"
+                onClick={() => void startRecording("cancel_subtask")}
+                disabled={recording || activeSubtasks.length === 0}
+                data-testid="voice-cancel-subtask-button"
+              >
+                Voice Cancel Running
+              </button>
+            </form>
+
+            <div className="row-actions">
+              <button type="button" onClick={() => void handleSuggestSubtask()} data-testid="subtask-suggest-button">
+                Get Jeff Suggestion
+              </button>
+            </div>
+
+            {subtaskSuggestion ? (
+              <div className="subtask-suggestion" data-testid="subtask-suggestion-card">
+                <p>
+                  <strong>{subtaskSuggestion.title}</strong> ({subtaskSuggestion.execution_type})
+                </p>
+                <p>{subtaskSuggestion.description}</p>
+                <p>{subtaskSuggestion.reason}</p>
+                <div className="row-actions">
+                  <button type="button" onClick={() => void handleAcceptSuggestedSubtask()}>
+                    Accept Suggestion
+                  </button>
+                  <button type="button" onClick={() => setSubtaskSuggestion(null)}>
+                    Ignore
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            <h3>Active SubTasks</h3>
+            {activeSubtasks.length === 0 ? (
+              <p data-testid="active-subtasks-empty">No active subtasks.</p>
+            ) : (
+              <ul data-testid="active-subtasks-list" className="subtask-list">
+                {activeSubtasks.map((subtask) => {
+                  const steps = subtaskStepsById[subtask.subtask_id] ?? [];
+                  return (
+                    <li key={subtask.subtask_id} className="subtask-item">
+                      <p>
+                        <strong>#{subtask.subtask_id}</strong> {subtask.title}
+                      </p>
+                      <p>
+                        {subtask.status} • {subtask.execution_type} • source {subtask.instruction_source}
+                      </p>
+                      {steps.length > 0 ? (
+                        <ul className="subtask-step-list" data-testid={`subtask-steps-${subtask.subtask_id}`}>
+                          {steps.map((step) => (
+                            <li key={step.id} className={`subtask-step subtask-step--${step.status}`} data-testid="subtask-step-item">
+                              <span>{step.step_index + 1}. [{step.step_type}] {step.description.slice(0, 60)}</span>
+                              <span> — {step.status}</span>
+                              {step.error_message ? <span> — {step.error_message}</span> : null}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      <div className="row-actions">
+                        <button type="button" onClick={() => void handleCancelSubtask(subtask.subtask_id)}>
+                          Cancel
+                        </button>
+                        <button type="button" onClick={() => updateSubtaskDebugFromSubtask(subtask)}>
+                          Inspect
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            <h3>Completed SubTasks</h3>
+            {completedSubtasks.length === 0 ? (
+              <p data-testid="completed-subtasks-empty">No completed subtasks yet.</p>
+            ) : (
+              <ul data-testid="completed-subtasks-list" className="subtask-list">
+                {completedSubtasks.map((subtask) => (
+                  <li key={subtask.subtask_id} className="subtask-item">
+                    <p>
+                      <strong>#{subtask.subtask_id}</strong> {subtask.title}
+                    </p>
+                    <p>
+                      {subtask.status} • review {subtask.result_review_status} • {subtask.execution_type}
+                    </p>
+                    {subtask.result_summary ? <p>{subtask.result_summary}</p> : null}
+                    {subtask.result_payload ? <pre>{subtask.result_payload}</pre> : null}
+                    {subtask.error_message ? <p>Error: {subtask.error_message}</p> : null}
+                    <div className="row-actions">
+                      <button type="button" onClick={() => void handleAcceptSubtaskResult(subtask.subtask_id)} disabled={subtask.status !== "completed"}>
+                        Accept Result
+                      </button>
+                      <button type="button" onClick={() => void handleRejectSubtaskResult(subtask.subtask_id)} disabled={subtask.status !== "completed"}>
+                        Reject Result
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleConvertSubtaskToRevision(subtask.subtask_id)}
+                        disabled={subtask.status !== "completed" || !artifactContent?.is_editable}
+                      >
+                        Convert to Revision
+                      </button>
+                      <button type="button" onClick={() => updateSubtaskDebugFromSubtask(subtask)}>
+                        Inspect
+                      </button>
+                    </div>
+                    {subtask.status === "completed" ? (
+                      <form
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void handleRefineSubtask(subtask.subtask_id);
+                        }}
+                        className="task-form"
+                      >
+                        <input
+                          aria-label={`Refine subtask ${subtask.subtask_id}`}
+                          value={subtaskRefinementInputById[subtask.subtask_id] ?? ""}
+                          onChange={(event) =>
+                            setSubtaskRefinementInputById((current) => ({
+                              ...current,
+                              [subtask.subtask_id]: event.target.value
+                            }))
+                          }
+                          placeholder="refine this output"
+                          data-testid={`refine-subtask-input-${subtask.subtask_id}`}
+                        />
+                        <button
+                          type="submit"
+                          disabled={(subtaskRefinementInputById[subtask.subtask_id] ?? "").trim().length === 0}
+                        >
+                          Refine
+                        </button>
+                      </form>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {fileWriteProposals.length > 0 ? (
+              <>
+                <h3>Pending File Writes</h3>
+                <ul data-testid="file-write-proposals-list" className="subtask-list">
+                  {fileWriteProposals.map((proposal) => (
+                    <li key={proposal.id} className="subtask-item" data-testid="file-write-proposal-item">
+                      <p>
+                        <strong>{proposal.proposed_path}</strong> — subtask #{proposal.subtask_id}
+                      </p>
+                      <pre>{proposal.proposed_content.slice(0, 400)}{proposal.proposed_content.length > 400 ? "\n..." : ""}</pre>
+                      <div className="row-actions">
+                        <button type="button" onClick={() => void handleApproveFileWrite(proposal.id)} data-testid="workspace-file-write-approve">
+                          Approve &amp; write
+                        </button>
+                        <button type="button" onClick={() => void handleRejectFileWrite(proposal.id)} data-testid="workspace-file-write-reject">
+                          Reject
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+
+            {writeAuditLog.length > 0 ? (
+              <>
+                <h3>File Write Audit Log</h3>
+                <ul data-testid="write-audit-log-list" className="subtask-list">
+                  {writeAuditLog.map((entry) => (
+                    <li key={entry.id} data-testid="write-audit-log-item">
+                      [{entry.action}] {entry.proposed_path} — subtask #{entry.subtask_id} at {entry.resolved_at}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+
+            <h3>Artifact Editor</h3>
+            {!artifactContent ? <p data-testid="artifact-editor-empty">Select an editable artifact.</p> : null}
+            {artifactContent && !artifactContent.is_editable ? (
+              <p data-testid="artifact-editor-readonly">This artifact is not editable in Phase 6 (.md/.txt only).</p>
+            ) : null}
+            {artifactContent && artifactContent.is_editable ? (
+              <div className="editor-panel" data-testid="artifact-editor-panel">
+                <p data-testid="active-artifact-id">Active artifact id: {artifactContent.artifact_id}</p>
+                <textarea
+                  ref={artifactTextareaRef}
+                  className="artifact-editor"
+                  value={artifactContent.content}
+                  readOnly
+                  onSelect={handleArtifactSelection}
+                />
+                <p data-testid="artifact-selection-range">
+                  Selection: {artifactSelectionStart}..{artifactSelectionEnd}
+                </p>
+              </div>
+            ) : null}
+
+            <h3>Revision Request</h3>
+            <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void handleProposeRevision("typed");
+                }}
+                className="task-form"
+              >
+              <input
+                aria-label="Revision instruction"
+                placeholder="make this more analytical"
+                value={revisionInstruction}
+                onChange={(event) => setRevisionInstruction(event.target.value)}
+                data-testid="revision-instruction-input"
+              />
+              <button type="submit" disabled={revisionInstruction.trim().length === 0 || !artifactContent?.is_editable}>
+                Propose Revision
+              </button>
+              <button
+                type="button"
+                onClick={() => void startRecording("revision")}
+                disabled={!artifactContent?.is_editable || recording}
+                data-testid="voice-revision-button"
+              >
+                Voice Revision
+              </button>
+            </form>
+
+            <h3>Revision Review</h3>
+            {pendingRevisions.length === 0 ? (
+              <p data-testid="pending-revisions-empty">No pending revisions.</p>
+            ) : (
+              <ul data-testid="pending-revisions-list" className="revision-list">
+                {pendingRevisions.map((revision) => (
+                  <li key={revision.revision_id} className="revision-item">
+                    <p>
+                      <strong>Revision #{revision.revision_id}</strong> • {revision.status}
+                    </p>
+                    <p>Instruction: {revision.instruction_text}</p>
+                    <p>Target: {revision.target_description}</p>
+                    <p>Original:</p>
+                    <pre>{revision.original_text}</pre>
+                    <p>Proposed:</p>
+                    <pre>{revision.proposed_text}</pre>
+                    <div className="row-actions">
+                      <button type="button" onClick={() => void handleApplyRevision(revision.revision_id)}>
+                        Accept
+                      </button>
+                      <button type="button" onClick={() => void handleRejectRevision(revision.revision_id)}>
+                        Reject
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <h3>Version History</h3>
+            {artifactVersions.length === 0 ? (
+              <p data-testid="artifact-versions-empty">No saved versions yet.</p>
+            ) : (
+              <ul data-testid="artifact-versions-list" className="version-list">
+                {artifactVersions.map((version) => (
+                  <li key={version.version_id} className="version-item">
+                    <p>
+                      <strong>Version #{version.version_id}</strong> • {version.version_reason}
+                    </p>
+                    <p>{version.content_preview}</p>
+                    <button type="button" onClick={() => void handleRevertVersion(version.version_id)}>
+                      Revert
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <h3>Open Resources</h3>
+            {openResources.length === 0 ? (
+              <p data-testid="open-resources-empty">No open resources.</p>
+            ) : (
+              <ul>
+                {openResources.map((resource) => (
+                  <li key={resource.id}>{resource.label}</li>
+                ))}
+              </ul>
+            )}
+            </div>
+          ) : null}
+
+          <aside className="panel side-panel" data-testid="companion-view">
+            <h2>Chat</h2>
+
+            {!fullWorkspaceVisible ? (
+              <section className="settings-panel companion-header" data-testid="companion-context-header">
+                <div className="row-actions">
+                  <p>
+                    <strong>Task:</strong> {activeTask.title}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void handleToggleQuietMode()}
+                    data-testid="quiet-mode-toggle"
+                    title={quietMode ? "Quiet mode on — click to disable" : "Quiet mode off — click to enable"}
+                  >
+                    {quietMode ? "[Q]" : "[q]"}
+                  </button>
+                </div>
+                <p>{buildCompanionGreeting(activeTask, sessionModeState, artifacts)}</p>
+                <p data-testid="companion-route-hint">Last routed intent: {lastRoutedIntent}</p>
+              </section>
+            ) : null}
+
+            {reorientationBanner ? (
+              <div className="companion-card" data-testid="reorientation-banner">
+                <p>{reorientationBanner}</p>
+                <button type="button" onClick={dismissReorientationBanner} data-testid="reorientation-dismiss">
+                  Dismiss
+                </button>
+              </div>
+            ) : null}
+
+            {driftNotice ? (
+              <div className="companion-card" data-testid="drift-flag-notice">
+                <p>Heads up: {driftNotice}</p>
+                <button type="button" onClick={dismissDriftNotice} data-testid="drift-notice-dismiss">
+                  Got it
+                </button>
+              </div>
+            ) : null}
+
+            <section
+              className="settings-panel recently-learned-panel"
+              data-testid="recently-learned-panel"
+            >
+              <div className="row-actions">
+                <button
+                  type="button"
+                  onClick={() => setRecentlyLearnedOpen((open) => !open)}
+                  data-testid="recently-learned-toggle"
+                >
+                  {recentlyLearnedOpen ? "Hide" : "Show"} recently learned
+                  {recentlyLearned.length > 0 ? ` (${recentlyLearned.length})` : ""}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleRefreshRecentlyLearned()}
+                  data-testid="recently-learned-refresh"
+                >
+                  Refresh
+                </button>
+              </div>
+
+              {recentlyLearnedOpen ? (
+                <>
+                  <div className="row-actions">
+                    <p className="task-meta">
+                      Watcher:{" "}
+                      {watcherStatus?.is_watching
+                        ? `watching ${watcherStatus.watched_path}`
+                        : "not watching"}
+                    </p>
+                    {watcherStatus?.is_watching ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleStopWatcher()}
+                        data-testid="stop-watcher-button"
+                      >
+                        Stop watcher
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          workspaceInfo
+                            ? void handleStartWatcher(workspaceInfo.workspace_path)
+                            : undefined
+                        }
+                        data-testid="start-watcher-button"
+                        disabled={!workspaceInfo}
+                      >
+                        Start watcher
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="row-actions">
+                    <label data-testid="clipboard-capture-label">
+                      <input
+                        type="checkbox"
+                        checked={clipboardCaptureEnabled}
+                        onChange={() => void handleToggleClipboardCapture()}
+                        data-testid="clipboard-capture-toggle"
+                      />
+                      Capture clipboard (off by default)
+                    </label>
+                  </div>
+
+                  {recentlyLearned.length === 0 ? (
+                    <p data-testid="recently-learned-empty">Nothing learned yet.</p>
+                  ) : (
+                    <ul
+                      className="compact-list"
+                      data-testid="recently-learned-list"
+                    >
+                      {recentlyLearned.map((item) => (
+                        <li key={item.id}>
+                          <span className="task-meta">{item.source}</span>{" "}
+                          <strong>{item.display_label}</strong>
+                          {item.preview_text ? (
+                            <span className="task-meta"> — {item.preview_text.slice(0, 80)}</span>
+                          ) : null}
+                          <span className="task-meta"> {item.ingested_at}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              ) : null}
+            </section>
+
+            {fullWorkspaceVisible ? (
+              <section className="settings-panel" data-testid="action-center-panel">
+              <h3>Action Center</h3>
+              <p data-testid="action-center-summary">
+                Pending revisions {taskPendingRevisions.length} • Active subtasks {activeSubtasks.length} • Review subtasks{" "}
+                {completedSubtasksAwaitingReview.length} • Suggestions {pendingSuggestions.length}
+              </p>
+
+              <div className="action-center-grid">
+                <div>
+                  <p className="task-meta">Pending revisions</p>
+                  {taskPendingRevisions.length === 0 ? (
+                    <p data-testid="action-center-revisions-empty">none</p>
+                  ) : (
+                    <ul data-testid="action-center-revisions-list" className="compact-list">
+                      {taskPendingRevisions.slice(0, 5).map((revision) => (
+                        <li key={`action-revision-${revision.revision_id}`}>
+                          #{revision.revision_id} • artifact {revision.artifact_id}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                <div>
+                  <p className="task-meta">Active subtasks</p>
+                  {activeSubtasks.length === 0 ? (
+                    <p data-testid="action-center-active-subtasks-empty">none</p>
+                  ) : (
+                    <ul data-testid="action-center-active-subtasks-list" className="compact-list">
+                      {activeSubtasks.slice(0, 5).map((subtask) => (
+                        <li key={`action-active-subtask-${subtask.subtask_id}`}>
+                          #{subtask.subtask_id} • {subtask.status}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                <div>
+                  <p className="task-meta">Results awaiting review</p>
+                  {completedSubtasksAwaitingReview.length === 0 ? (
+                    <p data-testid="action-center-review-subtasks-empty">none</p>
+                  ) : (
+                    <ul data-testid="action-center-review-subtasks-list" className="compact-list">
+                      {completedSubtasksAwaitingReview.slice(0, 5).map((subtask) => (
+                        <li key={`action-review-subtask-${subtask.subtask_id}`}>
+                          #{subtask.subtask_id} • {subtask.title}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                <div>
+                  <p className="task-meta">Pending suggestions</p>
+                  {pendingSuggestions.length === 0 ? (
+                    <p data-testid="action-center-suggestions-empty">none</p>
+                  ) : (
+                    <ul data-testid="action-center-suggestions-list" className="compact-list">
+                      {pendingSuggestions.slice(0, 5).map((suggestion) => (
+                        <li key={`action-suggestion-${suggestion.suggestion_id}`}>
+                          {suggestion.title}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+              </section>
+            ) : null}
+
+            {!fullWorkspaceVisible ? (
+              <section className="settings-panel" data-testid="companion-inline-actions">
+                <h3>Jeff Actions</h3>
+
+                {topPendingSuggestion ? (
+                  <div className="companion-card" data-testid="companion-suggestion-card">
+                    <p>
+                      You might want to: <strong>{topPendingSuggestion.title}</strong>
+                    </p>
+                    <p>{topPendingSuggestion.description}</p>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        onClick={() => void handleAcceptSuggestion(topPendingSuggestion)}
+                        data-testid="companion-suggestion-accept"
+                      >
+                        Yes
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDismissSuggestion(topPendingSuggestion.suggestion_id)}
+                        data-testid="companion-suggestion-dismiss"
+                      >
+                        Not now
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleExplainSuggestion(topPendingSuggestion.suggestion_id)}
+                      >
+                        Tell me more
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p data-testid="companion-suggestion-empty">No pending suggestion right now.</p>
+                )}
+
+                {pendingRevisions.slice(0, 1).map((revision) => (
+                  <div key={`companion-revision-${revision.revision_id}`} className="companion-card" data-testid="companion-revision-card">
+                    <p>I tightened your section. Want to apply revision #{revision.revision_id}?</p>
+                    <div className="row-actions">
+                      <button type="button" onClick={() => void handleApplyRevision(revision.revision_id)} data-testid="companion-revision-apply">
+                        Apply
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedCompanionRevisionId((current) =>
+                            current === revision.revision_id ? null : revision.revision_id
+                          )
+                        }
+                        data-testid="companion-revision-diff"
+                      >
+                        See diff
+                      </button>
+                      <button type="button" onClick={() => void handleRejectRevision(revision.revision_id)} data-testid="companion-revision-ignore">
+                        Ignore
+                      </button>
+                    </div>
+                    {expandedCompanionRevisionId === revision.revision_id ? (
+                      <pre data-testid="companion-revision-diff-content">
+                        Original: {revision.original_text}
+
+                        Proposed: {revision.proposed_text}
+                      </pre>
+                    ) : null}
+                  </div>
+                ))}
+
+                {completedSubtasksAwaitingReview.slice(0, 1).map((subtask) => (
+                  <div key={`companion-subtask-${subtask.subtask_id}`} className="companion-card" data-testid="companion-subtask-card">
+                    <p>
+                      I drafted "{subtask.title}". Want to review result #{subtask.subtask_id}?
+                    </p>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedCompanionSubtaskId((current) =>
+                            current === subtask.subtask_id ? null : subtask.subtask_id
+                          )
+                        }
+                        data-testid="companion-subtask-view"
+                      >
+                        View result
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleConvertSubtaskToRevision(subtask.subtask_id)}
+                        disabled={!artifactContent?.is_editable}
+                        data-testid="companion-subtask-convert"
+                      >
+                        Convert to edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleRejectSubtaskResult(subtask.subtask_id)}
+                        data-testid="companion-subtask-ignore"
+                      >
+                        Ignore
+                      </button>
+                    </div>
+                    {expandedCompanionSubtaskId === subtask.subtask_id ? (
+                      <pre data-testid="companion-subtask-result">{subtask.result_payload ?? subtask.result_summary ?? "No result yet."}</pre>
+                    ) : null}
+                  </div>
+                ))}
+
+                {speculativeSubtask ? (
+                  <div className="companion-card" data-testid="speculative-subtask-card">
+                    <p>I started a background subtask: <strong>{speculativeSubtask.title}</strong></p>
+                    <p>{speculativeSubtask.description}</p>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedCompanionSubtaskId((current) =>
+                            current === speculativeSubtask.subtask_id ? null : speculativeSubtask.subtask_id
+                          )
+                        }
+                        data-testid="speculative-subtask-view"
+                      >
+                        View
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleCancelSpeculativeSubtask()}
+                        data-testid="speculative-subtask-cancel"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDismissSpeculativeSubtask()}
+                        data-testid="speculative-subtask-dismiss"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {fileWriteProposals.map((proposal) => (
+                  <div key={proposal.id} className="companion-card" data-testid="file-write-proposal-card">
+                    <p>
+                      A chain subtask wants to write a file:{" "}
+                      <strong>{proposal.proposed_path}</strong>
+                    </p>
+                    <pre data-testid="file-write-proposal-preview">
+                      {proposal.proposed_content.slice(0, 300)}
+                      {proposal.proposed_content.length > 300 ? "\n..." : ""}
+                    </pre>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        onClick={() => void handleApproveFileWrite(proposal.id)}
+                        data-testid="file-write-approve-button"
+                      >
+                        Approve &amp; write
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleRejectFileWrite(proposal.id)}
+                        data-testid="file-write-reject-button"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </section>
+            ) : null}
+
+            {fullWorkspaceVisible ? (
+              <section className="settings-panel" data-testid="next-suggestions-panel">
+              <div className="row-actions">
+                <h3>Next Suggestions</h3>
+                <button type="button" onClick={() => void handleRefreshSuggestions()} data-testid="suggestions-refresh-button">
+                  Refresh
+                </button>
+              </div>
+              <p data-testid="session-mode-label">
+                Mode: {formatModeLabel(sessionModeState?.current_mode ?? "quiet_observing")}
+              </p>
+              <p data-testid="session-mode-reason">
+                {sessionModeState?.mode_reason ?? "Mode reason unavailable."}
+              </p>
+              {suggestionActionMessage ? (
+                <p data-testid="suggestion-action-message">{suggestionActionMessage}</p>
+              ) : null}
+              {suggestions.length === 0 ? (
+                <p data-testid="suggestions-empty">No suggestions right now.</p>
+              ) : (
+                <ul data-testid="suggestions-list" className="revision-list">
+                  {suggestions.map((suggestion) => (
+                    <li key={suggestion.suggestion_id} className="revision-item">
+                      <p>
+                        <strong>{suggestion.title}</strong> ({suggestion.suggestion_type})
+                      </p>
+                      <p>{suggestion.description}</p>
+                      <p className="task-meta">Reason: {suggestion.source_reason}</p>
+                      <div className="row-actions">
+                        <button
+                          type="button"
+                          onClick={() => void handleAcceptSuggestion(suggestion)}
+                          disabled={isActionPending(`suggestion-accept-${suggestion.suggestion_id}`)}
+                          data-testid={`suggestion-accept-${suggestion.suggestion_id}`}
+                        >
+                          Accept
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDismissSuggestion(suggestion.suggestion_id)}
+                          disabled={isActionPending(`suggestion-dismiss-${suggestion.suggestion_id}`)}
+                          data-testid={`suggestion-dismiss-${suggestion.suggestion_id}`}
+                        >
+                          Dismiss
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleExplainSuggestion(suggestion.suggestion_id)}
+                          data-testid={`suggestion-explain-${suggestion.suggestion_id}`}
+                        >
+                          Tell me more
+                        </button>
+                      </div>
+                      {suggestionExplainById[suggestion.suggestion_id] ? (
+                        <pre data-testid={`suggestion-explain-text-${suggestion.suggestion_id}`}>
+                          {suggestionExplainById[suggestion.suggestion_id]}
+                        </pre>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              </section>
+            ) : null}
+
+            <section className="settings-panel" data-testid="proactive-settings">
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={coworkingStatus?.proactive_mode ?? false}
+                  onChange={(event) => void handleProactiveToggle(event.target.checked)}
+                  data-testid="proactive-toggle"
+                />
+                Proactive mode
+              </label>
+              <p>Pause threshold: {coworkingStatus?.pause_threshold_seconds ?? 0}s</p>
+              <p>Cooldown remaining: {coworkingStatus?.cooldown_remaining_seconds ?? 0}s</p>
+              <p data-testid="coworking-decision-reason">Decision: {retrievalDebugMeta.decisionReason}</p>
+            </section>
+
+            {fullWorkspaceVisible ? (
+              <section className="settings-panel" data-testid="runtime-inspector-panel">
+              <h3>Runtime Inspector</h3>
+              <p>Active task: {activeTask.id} ({activeTask.title})</p>
+              <p>Current mode: {formatModeLabel(sessionModeState?.current_mode ?? "quiet_observing")}</p>
+              <p>Coworking state: {coworkingStatus?.state ?? "idle"}</p>
+              <p>Proactive mode: {coworkingStatus?.proactive_mode ? "on" : "off"}</p>
+              <p>Listening: {coworkingStatus?.user_speaking ? "yes" : "no"}</p>
+              <p>Typing: {coworkingStatus?.user_typing ? "yes" : "no"}</p>
+              <p>Speaking: {coworkingStatus?.state === "speaking" ? "yes" : "no"}</p>
+              <p>Active artifact: {selectedArtifactId ?? sessionModeState?.active_artifact_id ?? "none"}</p>
+              <p>Last nudge/decision reason: {retrievalDebugMeta.decisionReason}</p>
+              <p>Pending revisions: {taskPendingRevisions.length}</p>
+              <p>Pending suggestions: {pendingSuggestions.length}</p>
+              <p>Active subtasks: {activeSubtasks.length}</p>
+              <p>Last engine decision: {sessionModeState?.last_engine_decision ?? "n/a"}</p>
+
+              <h4 className="compact-heading">Recent Events</h4>
+              {recentEvents.length === 0 ? (
+                <p data-testid="runtime-events-empty">No recent events.</p>
+              ) : (
+                <ul data-testid="runtime-events-list" className="compact-list">
+                  {recentEvents.map((event) => (
+                    <li key={`event-${event.id}`}>
+                      <span className="event-type">{event.event_type}</span>
+                      <span className="event-summary">{summarizeEventPayload(event)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              </section>
+            ) : null}
+
+            <div className="chat-controls">
+              <button
+                type="button"
+                onClick={() => {
+                  if (recording) {
+                    void stopRecording();
+                  } else {
+                    void startRecording("chat");
+                  }
+                }}
+                data-testid="record-toggle"
+              >
+                {recording ? "Stop Recording" : "Start Recording"}
+              </button>
+              <p data-testid="recording-indicator">{recording ? `Recording (${recordingPurpose})` : "Not recording"}</p>
+            </div>
+
+            <div className="chat-history" data-testid="chat-history">
+              {messages.length === 0 && !streamingTurnId ? <p>No messages yet.</p> : null}
+              {messages.map((message) => (
+                <div key={message.id} className={`chat-bubble chat-${message.role} kind-${message.message_kind}`}>
+                  <p className="chat-role">{message.role}</p>
+                  <p className="chat-source">source: {message.message_source}</p>
+                  {message.message_kind === "assistant_nudge" ? <p className="nudge-label">Nudge</p> : null}
+                  {message.message_kind === "assistant_answer" ? <p className="answer-label">Answer</p> : null}
+                  {message.message_kind === "assistant_revision_proposal" ? (
+                    <p className="revision-label">Revision Proposal</p>
+                  ) : null}
+                  {message.message_kind === "assistant_revision_status" ? (
+                    <p className="revision-status-label">Revision Status</p>
+                  ) : null}
+                  {message.message_kind === "assistant_interrupted" ? (
+                    <p className="interrupted-label">interrupted</p>
+                  ) : null}
+                  <p>{message.content}</p>
+                </div>
+              ))}
+              {streamingTurnId && (streamingText[streamingTurnId] ?? "").length > 0 ? (
+                <div
+                  className="chat-bubble chat-assistant kind-assistant_partial"
+                  data-testid="streaming-message"
+                >
+                  <p className="chat-role">assistant</p>
+                  <p className="streaming-indicator">streaming</p>
+                  <p>{streamingText[streamingTurnId]}</p>
+                </div>
+              ) : streamingTurnId ? (
+                <div className="chat-bubble chat-assistant kind-assistant_partial" data-testid="streaming-message">
+                  <p className="chat-role">assistant</p>
+                  <p className="streaming-indicator">thinking...</p>
+                </div>
+              ) : null}
+            </div>
+
+            <form onSubmit={handleSendTextMessage} className="task-form">
+              <input
+                aria-label="Chat input"
+                placeholder="what are the requirements"
+                value={chatInput}
+                onChange={(event) => handleChatInputChange(event.target.value)}
+                onBlur={() => clearTypingSignal()}
+              />
+              <button type="submit" disabled={chatInput.trim().length === 0}>
+                Send
+              </button>
+            </form>
+
+            {fullWorkspaceVisible ? (
+              <>
+                <h3>Retrieval Debug</h3>
+                <p>
+                  Event: {retrievalDebugMeta.decisionEventType} | Reason: {retrievalDebugMeta.decisionReason}
+                  {retrievalDebugMeta.confidence !== null ? ` | Confidence: ${retrievalDebugMeta.confidence.toFixed(3)}` : ""}
+                </p>
+                {retrievalDebugChunks.length === 0 ? (
+                  <p data-testid="retrieval-debug-empty">No retrieval debug data yet.</p>
+                ) : (
+                  <ul data-testid="retrieval-debug-list" className="retrieval-list">
+                    {retrievalDebugChunks.map((chunk) => (
+                      <li key={chunk.chunk_id}>
+                        <p className="chunk-source">
+                          {chunk.artifact_file_name} • score {chunk.similarity_score.toFixed(3)} • chunk #{chunk.position_index}
+                        </p>
+                        <p>{chunk.chunk_text.slice(0, 320)}</p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                <h3>Revision Debug</h3>
+                <div className="revision-debug" data-testid="revision-debug-panel">
+              <p>Active artifact: {revisionDebug.activeArtifactId ?? "none"}</p>
+              <p>
+                Selection used: {revisionDebug.selectedStart ?? "-"}..{revisionDebug.selectedEnd ?? "-"} ({revisionDebug.selectionSource})
+              </p>
+              <p>Instruction source: {revisionDebug.instructionSource}</p>
+              <p>Context source: {revisionDebug.contextSource}</p>
+              <p>
+                Confidence:{" "}
+                {revisionDebug.confidence !== null ? revisionDebug.confidence.toFixed(3) : "n/a"}
+              </p>
+              <p>Grounding notes: {revisionDebug.groundingNotes}</p>
+              {revisionDebug.retrievedChunks.length > 0 ? (
+                <ul data-testid="revision-debug-chunks" className="retrieval-list">
+                  {revisionDebug.retrievedChunks.map((chunk) => (
+                    <li key={`revision-debug-${chunk.chunk_id}`}>
+                      <p className="chunk-source">
+                        {chunk.artifact_file_name} • score {chunk.similarity_score.toFixed(3)} • chunk #{chunk.position_index}
+                      </p>
+                      <p>{chunk.chunk_text.slice(0, 220)}</p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>No revision grounding chunks yet.</p>
+              )}
+                </div>
+
+                <h3>SubTask Debug</h3>
+                <div className="revision-debug" data-testid="subtask-debug-panel">
+              <p>Selected subtask: {subtaskDebug.selectedSubtaskId ?? "none"}</p>
+              <p>Execution type: {subtaskDebug.executionType}</p>
+              <p>Instruction source: {subtaskDebug.instructionSource}</p>
+              <p>
+                Snapshot instruction:{" "}
+                {parsedSubtaskSnapshot?.instruction ? parsedSubtaskSnapshot.instruction : "n/a"}
+              </p>
+              <p>
+                Snapshot summary:{" "}
+                {parsedSubtaskSnapshot?.task_summary ? parsedSubtaskSnapshot.task_summary : "n/a"}
+              </p>
+              {(subtaskDebug.retrievedChunks.length > 0
+                ? subtaskDebug.retrievedChunks
+                : parsedSubtaskSnapshot?.retrieved_chunks ?? []
+              ).length > 0 ? (
+                <ul data-testid="subtask-debug-chunks" className="retrieval-list">
+                  {(subtaskDebug.retrievedChunks.length > 0
+                    ? subtaskDebug.retrievedChunks
+                    : parsedSubtaskSnapshot?.retrieved_chunks ?? []
+                  ).map((chunk) => (
+                    <li key={`subtask-debug-${chunk.chunk_id}`}>
+                      <p className="chunk-source">
+                        {chunk.artifact_file_name} • score {chunk.similarity_score.toFixed(3)} • chunk #
+                        {chunk.position_index}
+                      </p>
+                      <p>{chunk.chunk_text.slice(0, 220)}</p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>No subtask grounding chunks yet.</p>
+              )}
+                </div>
+
+                <h3>Flow Debug</h3>
+                <div className="revision-debug" data-testid="flow-debug-panel">
+              <p data-testid="flow-mode">Current mode: {formatModeLabel(sessionModeState?.current_mode ?? "quiet_observing")}</p>
+              <p>Mode reason: {flowDebug.modeReason}</p>
+              <p>Engine decision: {flowDebug.decisionReason}</p>
+              <p>Suppression: {flowDebug.suppressionState}</p>
+              <p>No-op decision: {flowDebug.noOp ? "yes" : "no"}</p>
+              <p>
+                Evidence score: {flowDebug.evidenceScore !== null ? flowDebug.evidenceScore.toFixed(3) : "n/a"}
+              </p>
+              <p>Active artifact: {sessionModeState?.active_artifact_id ?? selectedArtifactId ?? "none"}</p>
+              <p>Waiting on user decision: {sessionModeState?.waiting_on_user_decision ? "yes" : "no"}</p>
+              <p>Top suggestion: {pendingSuggestions[0]?.title ?? "none"}</p>
+              {flowDebug.retrievedChunks.length > 0 ? (
+                <ul data-testid="flow-debug-chunks" className="retrieval-list">
+                  {flowDebug.retrievedChunks.map((chunk) => (
+                    <li key={`flow-debug-${chunk.chunk_id}`}>
+                      <p className="chunk-source">
+                        {chunk.artifact_file_name} • score {chunk.similarity_score.toFixed(3)} • chunk #{chunk.position_index}
+                      </p>
+                      <p>{chunk.chunk_text.slice(0, 220)}</p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>No flow retrieval support captured yet.</p>
+              )}
+                </div>
+              </>
+            ) : null}
+          </aside>
+        </section>
+      ) : null}
+
+      {errorMessage ? (
+        <p role="alert" className="error">
+          {errorMessage}
+        </p>
+      ) : null}
+    </main>
+  );
+}
+
+async function classifyMessageIntentWithFallback(
+  taskId: number,
+  message: string
+): Promise<{ intent: RoutedIntent; slots: IntentSlotsDto | null }> {
+  const INTENT_CLASSIFIER_TIMEOUT_MS = 300;
+  try {
+    const result = await Promise.race([
+      classifyMessageIntent(taskId, message),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`intent_classifier_timeout_${INTENT_CLASSIFIER_TIMEOUT_MS}ms`)),
+          INTENT_CLASSIFIER_TIMEOUT_MS
+        )
+      ),
+    ]);
+    return { intent: result.intent as RoutedIntent, slots: result.slots };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(`[jeff] intent_classifier_fallback: ${reason}`);
+    return { intent: inferMessageIntentKeyword(message), slots: null };
+  }
+}
+
+function inferMessageIntentKeyword(message: string): RoutedIntent {
+  const lower = message.toLowerCase();
+  const trimmed = lower.trim();
+
+  if (
+    trimmed === "ok" ||
+    trimmed === "okay" ||
+    trimmed === "hmm" ||
+    trimmed === "yes please" ||
+    trimmed === "..." ||
+    trimmed === "no that's not right"
+  ) {
+    return "unknown";
+  }
+
+  if (
+    containsIntentPhrase(lower, [
+      "fix ",
+      "revise",
+      "tighten",
+      "rewrite",
+      "improve this",
+      "edit this",
+      "fix this intro",
+      "make this more analytical"
+    ])
+  ) {
+    return "revision";
+  }
+
+  if (
+    containsIntentPhrase(lower, [
+      "draft ",
+      "write ",
+      "expand this",
+      "synthesize",
+      "build me a paragraph",
+      "draft better intro"
+    ])
+  ) {
+    return "subtask";
+  }
+
+  if (
+    containsIntentPhrase(lower, [
+      "what should i do next",
+      "what next",
+      "next step",
+      "i'm stuck",
+      "suggest next",
+      "where should i focus"
+    ])
+  ) {
+    return "suggestion";
+  }
+
+  return "answer";
+}
+
+function inferSubtaskExecutionTypeFromDraftType(draftType: string): ExecutionType {
+  const lower = draftType.toLowerCase();
+  if (lower.includes("expand") || lower.includes("expansion")) {
+    return "expansion";
+  }
+  if (lower.includes("synth") || lower.includes("summary")) {
+    return "synthesis";
+  }
+  if (lower.includes("research")) {
+    return "targeted_research_synthesis";
+  }
+  return "draft_generation";
+}
+
+function inferSubtaskExecutionType(message: string): ExecutionType {
+  const lower = message.toLowerCase();
+  if (lower.includes("expand")) {
+    return "expansion";
+  }
+  if (lower.includes("synth")) {
+    return "synthesis";
+  }
+  if (lower.includes("research")) {
+    return "targeted_research_synthesis";
+  }
+  return "draft_generation";
+}
+
+function normalizeRevisionInstruction(message: string): string {
+  const trimmed = message.trim();
+  if (trimmed.length === 0) {
+    return "tighten this section and connect it to evidence requirements";
+  }
+  if (trimmed.length < 18) {
+    return `${trimmed}. Tighten argument and connect to rubric evidence requirements.`;
+  }
+  return trimmed;
+}
+
+function buildRevisionInstruction(message: string, slots?: IntentSlotsDto | null): string {
+  const instruction = slots?.instruction?.trim() || message.trim();
+  const targetDescription = slots?.target_description?.trim();
+  if (!targetDescription) {
+    return instruction;
+  }
+
+  const lowerInstruction = instruction.toLowerCase();
+  if (lowerInstruction.includes(targetDescription.toLowerCase())) {
+    return instruction;
+  }
+  return `${targetDescription}: ${instruction}`;
+}
+
+function deriveRevisionTargetFromDescription(
+  content: string | null,
+  targetDescription: string | null,
+  fallback: RevisionTargetDto | null
+): RevisionTargetDto | null {
+  if (!content || !targetDescription) {
+    return fallback;
+  }
+
+  const cleanTarget = targetDescription.trim();
+  if (!cleanTarget) {
+    return fallback;
+  }
+
+  const paragraphIndex = parseParagraphOrdinal(cleanTarget);
+  if (paragraphIndex !== null) {
+    const paragraphRange = rangeForParagraph(content, paragraphIndex);
+    if (paragraphRange) {
+      return paragraphRange;
+    }
+  }
+
+  const lowerContent = content.toLowerCase();
+  const lowerTarget = cleanTarget.toLowerCase();
+  const foundAt = lowerContent.indexOf(lowerTarget);
+  if (foundAt < 0) {
+    return fallback;
+  }
+
+  return expandRangeToParagraph(content, foundAt, foundAt + cleanTarget.length);
+}
+
+function parseParagraphOrdinal(targetDescription: string): number | null {
+  const normalized = targetDescription.toLowerCase();
+  const numeric = normalized.match(/(\d+)(?:st|nd|rd|th)?\s+paragraph/);
+  if (numeric) {
+    const parsed = Number.parseInt(numeric[1], 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed - 1;
+    }
+  }
+
+  const words = [
+    "first",
+    "second",
+    "third",
+    "fourth",
+    "fifth",
+    "sixth",
+    "seventh",
+    "eighth",
+    "ninth",
+    "tenth"
+  ];
+  for (let index = 0; index < words.length; index += 1) {
+    if (normalized.includes(`${words[index]} paragraph`)) {
+      return index;
+    }
+  }
+  return null;
+}
+
+function rangeForParagraph(content: string, paragraphIndex: number): RevisionTargetDto | null {
+  if (paragraphIndex < 0) {
+    return null;
+  }
+
+  const paragraphRegex = /\S[\s\S]*?(?=\n\s*\n|$)/g;
+  const ranges: Array<{ start: number; end: number }> = [];
+  let match = paragraphRegex.exec(content);
+  while (match) {
+    ranges.push({ start: match.index, end: match.index + match[0].length });
+    match = paragraphRegex.exec(content);
+  }
+
+  const range = ranges[paragraphIndex];
+  if (!range || range.end <= range.start) {
+    return null;
+  }
+
+  return {
+    start_offset: range.start,
+    end_offset: range.end
+  };
+}
+
+function expandRangeToParagraph(content: string, start: number, end: number): RevisionTargetDto {
+  const normalizedStart = Math.max(0, Math.min(start, content.length));
+  const normalizedEnd = Math.max(normalizedStart, Math.min(end, content.length));
+
+  const before = content.lastIndexOf("\n\n", normalizedStart);
+  const after = content.indexOf("\n\n", normalizedEnd);
+  const paragraphStart = before === -1 ? 0 : before + 2;
+  const paragraphEnd = after === -1 ? content.length : after;
+
+  if (paragraphEnd <= paragraphStart) {
+    return {
+      start_offset: normalizedStart,
+      end_offset: Math.max(normalizedStart + 1, normalizedEnd)
+    };
+  }
+
+  return {
+    start_offset: paragraphStart,
+    end_offset: paragraphEnd
+  };
+}
+
+function normalizeFsPath(path: string | null | undefined): string {
+  return (path ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/+$/, "");
+}
+
+function containsIntentPhrase(input: string, phrases: string[]): boolean {
+  return phrases.some((phrase) => input.includes(phrase));
+}
+
+function isEditableArtifact(artifact: ArtifactDto): boolean {
+  const extension = artifact.file_extension.toLowerCase();
+  return extension === "md" || extension === "txt";
+}
+
+function deriveSubtaskTitle(instruction: string): string {
+  const cleaned = instruction.trim().replace(/\s+/g, " ");
+  if (!cleaned) {
+    return "Subtask";
+  }
+
+  if (cleaned.length <= 64) {
+    return cleaned;
+  }
+
+  return `${cleaned.slice(0, 61)}...`;
+}
+
+function normalizeExecutionType(value: string): ExecutionType {
+  switch (value) {
+    case "draft_generation":
+    case "expansion":
+    case "synthesis":
+    case "targeted_research_synthesis":
+      return value;
+    default:
+      return "draft_generation";
+  }
+}
+
+function parseSubtaskSnapshot(snapshot: string): {
+  task_summary: string;
+  instruction: string;
+  execution_type: string;
+  recent_messages: string[];
+  retrieved_chunks: RetrievedChunkDto[];
+} | null {
+  try {
+    const parsed = JSON.parse(snapshot) as {
+      task_summary?: string;
+      instruction?: string;
+      execution_type?: string;
+      recent_messages?: string[];
+      retrieved_chunks?: RetrievedChunkDto[];
+    };
+
+    return {
+      task_summary: parsed.task_summary ?? "",
+      instruction: parsed.instruction ?? "",
+      execution_type: parsed.execution_type ?? "",
+      recent_messages: Array.isArray(parsed.recent_messages) ? parsed.recent_messages : [],
+      retrieved_chunks: Array.isArray(parsed.retrieved_chunks) ? parsed.retrieved_chunks : []
+    };
+  } catch {
+    return null;
+  }
+}
+
+function pickNextEditableArtifactId(artifacts: ArtifactDto[], currentArtifactId: number | null): number | null {
+  if (currentArtifactId !== null && artifacts.some((artifact) => artifact.id === currentArtifactId && isEditableArtifact(artifact))) {
+    return currentArtifactId;
+  }
+
+  const firstEditable = artifacts.find((artifact) => isEditableArtifact(artifact));
+  return firstEditable ? firstEditable.id : null;
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+function base64ToBlob(base64: string, mimeType: string): Blob {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return new Blob([bytes], { type: mimeType });
+}
+
+function formatStatusLabel(state: string): string {
+  if (state === "silent_observing" || state === "awaiting_user") {
+    return "OBSERVING";
+  }
+
+  return state.replace(/_/g, " ").toUpperCase();
+}
+
+function formatModeLabel(mode: string): string {
+  return mode.replace(/_/g, " ").toUpperCase();
+}
+
+function formatSuggestionActionMessage(result: SuggestionAcceptanceDto): string {
+  if (result.action_type === "revision_proposal_created" || result.action_type === "routed_to_revision_proposal") {
+    return `Accepted suggestion: ${result.suggestion.title}. Revision proposal created for review.`;
+  }
+
+  if (result.action_type === "subtask_started") {
+    return `Accepted suggestion: ${result.suggestion.title}. Bounded subtask started in parallel.`;
+  }
+
+  if (result.action_type === "followup_asked") {
+    return `Accepted suggestion: ${result.suggestion.title}. Jeff asked a focused follow-up.`;
+  }
+
+  if (result.action_type === "routed_to_focused_answer") {
+    return `Accepted suggestion: ${result.suggestion.title}. Returned a focused grounded answer.`;
+  }
+
+  return `Accepted suggestion: ${result.suggestion.title}.`;
+}
+
+function summarizeEventPayload(event: EventLogEntryDto): string {
+  const raw = event.payload_json?.trim();
+  if (!raw) {
+    return event.created_at;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const preferredKeys = [
+      "decision_reason",
+      "message_kind",
+      "suggestion_id",
+      "subtask_id",
+      "revision_id",
+      "status",
+      "reason",
+      "artifact_id"
+    ];
+
+    for (const key of preferredKeys) {
+      const value = parsed[key];
+      if (typeof value === "string" && value.trim().length > 0) {
+        return `${key}=${value}`;
+      }
+      if (typeof value === "number") {
+        return `${key}=${value}`;
+      }
+    }
+  } catch {
+    // keep raw fallback below
+  }
+
+  return raw.length > 72 ? `${raw.slice(0, 69)}...` : raw;
+}
+
+function buildCompanionGreeting(
+  task: TaskDto,
+  modeState: SessionModeStateDto | null,
+  artifacts: ArtifactDto[]
+): string {
+  const selectedArtifact = modeState?.active_artifact_id
+    ? artifacts.find((artifact) => artifact.id === modeState.active_artifact_id)
+    : undefined;
+  const artifactHint = selectedArtifact ? ` on ${selectedArtifact.file_name}` : "";
+  const modeHint = modeState ? formatModeLabel(modeState.current_mode).toLowerCase() : "writing";
+  return `You were ${modeHint}${artifactHint}. Want to continue or shift focus?`;
+}
+
+function formatError(error: unknown): string {
+  if (typeof error === "string") {
+    return error;
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return "Unexpected error";
+}
+
+export default App;
