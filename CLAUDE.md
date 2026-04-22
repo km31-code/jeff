@@ -3,7 +3,7 @@
 ## Always do first, every session
 1. Read docs/VISION.md in full. This is the product definition. 
    All technical decisions must serve it.
-2. Read docs/PHASES.md. Know which phase is current.
+2. Read docs/PHASES.md and docs/PHASES_NEXT.md. Know which phase is current.
 3. Read docs/ARCHITECTURE.md for the current layering.
 
 ## Workflow rules (non-negotiable)
@@ -18,6 +18,7 @@
   rather than deleting features or doing large rewrites, unless 
   the current phase plan explicitly calls for a rewrite.
 - Do not expand backend capability beyond the current phase's scope.
+- After each completed milestone or high-risk file edit, commit and push to `origin` immediately so the latest state is always recoverable.
 
 ## Code style
 - No emojis anywhere. Not in UI copy, not in comments, not in commit 
