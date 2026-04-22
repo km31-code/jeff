@@ -1,3 +1,4 @@
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -26,13 +27,23 @@ import {
   showWorkspace
 } from "./ambientClient";
 import {
-  cancelStreamingTurn,
+  ApiKeyValidationDto,
   ChatMessageDto,
+  OnboardingStatusDto,
   TaskDto,
+  cancelStreamingTurn,
+  clearPreferredWorkspaceFolder,
+  completeOnboarding,
+  createTask,
   getActiveTask,
+  getOnboardingStatus,
   listMessages,
   sendMessage,
-  sendMessageStreaming
+  sendMessageStreaming,
+  setActiveTask,
+  setPreferredWorkspaceFolder,
+  storeOpenAiApiKey,
+  validateOpenAiApiKey
 } from "./tauriClient";
 
 // phase 11 overlay: ambient presence window. collapsed is a compact status
@@ -40,6 +51,7 @@ import {
 // full workspace — it is the always-there companion surface.
 
 type PendingNotificationContext = { kind: string | null; id: number | null };
+type OnboardingStep = 1 | 2 | 3 | 4;
 
 function describeStatus(status: TrayStatus): string {
   switch (status) {
@@ -69,6 +81,31 @@ function navigatorIsApple(): boolean {
   return /Mac|iPhone|iPad/i.test(navigator.platform || "");
 }
 
+function deriveTaskTitleFromPrompt(prompt: string): string {
+  const cleaned = prompt
+    .replace(/\s+/g, " ")
+    .replace(/[^a-zA-Z0-9\-_' ]/g, "")
+    .trim();
+  if (!cleaned) {
+    return "New task";
+  }
+  return cleaned.slice(0, 64);
+}
+
+function isApiKeyIssue(message: string | null): boolean {
+  if (!message) {
+    return false;
+  }
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("openai_api_key is not configured") ||
+    lower.includes("api key") ||
+    lower.includes("status 401") ||
+    lower.includes("invalid_api_key") ||
+    lower.includes("unauthorized")
+  );
+}
+
 export default function Overlay(): JSX.Element {
   const [ambient, setAmbient] = useState<AmbientStateDto | null>(null);
   const [mode, setMode] = useState<OverlayMode>("collapsed");
@@ -82,9 +119,21 @@ export default function Overlay(): JSX.Element {
     useState<PendingNotificationContext | null>(null);
   const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
   const [streamingText, setStreamingText] = useState("");
+
+  const [onboardingStatus, setOnboardingStatus] =
+    useState<OnboardingStatusDto | null>(null);
+  const [onboardingVisible, setOnboardingVisible] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(1);
+  const [onboardingBusy, setOnboardingBusy] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [apiKeyValidation, setApiKeyValidation] =
+    useState<ApiKeyValidationDto | null>(null);
+  const [workspaceFolder, setWorkspaceFolder] = useState<string | null>(null);
+
   const activeTaskRef = useRef<TaskDto | null>(null);
   const streamingTurnIdRef = useRef<string | null>(null);
   const pendingExpandRef = useRef(false);
+  const onboardingSnoozedRef = useRef(false);
 
   const refreshAmbient = useCallback(async () => {
     try {
@@ -120,12 +169,48 @@ export default function Overlay(): JSX.Element {
     }
   }, [refreshMessages]);
 
+  const openOnboardingWizard = useCallback(
+    async (step: OnboardingStep) => {
+      setOnboardingVisible(true);
+      setOnboardingStep(step);
+      setMode("expanded");
+      try {
+        await setOverlayMode("expanded");
+      } catch {
+        // no-op: local mode state already forces expanded rendering
+      }
+    },
+    []
+  );
+
+  const refreshOnboarding = useCallback(
+    async (openIfIncomplete: boolean) => {
+      try {
+        const status = await getOnboardingStatus();
+        setOnboardingStatus(status);
+        setWorkspaceFolder(status.preferred_workspace_folder ?? null);
+
+        if (
+          openIfIncomplete &&
+          !status.onboarding_complete &&
+          !onboardingSnoozedRef.current
+        ) {
+          await openOnboardingWizard(1);
+        }
+      } catch (error) {
+        setErrorMessage(String(error));
+      }
+    },
+    [openOnboardingWizard]
+  );
+
   // initial load + notification permission probing.
   useEffect(() => {
     refreshAmbient();
     refreshActiveTask();
+    void refreshOnboarding(true);
     probeNotificationPermission();
-  }, [refreshAmbient, refreshActiveTask]);
+  }, [refreshActiveTask, refreshAmbient, refreshOnboarding]);
 
   useEffect(() => {
     activeTaskRef.current = activeTask;
@@ -169,7 +254,16 @@ export default function Overlay(): JSX.Element {
 
     unsubscribers.push(
       listen("ambient://overlay-shown", () => {
-        refreshActiveTask();
+        onboardingSnoozedRef.current = false;
+        void refreshActiveTask();
+        void refreshOnboarding(true);
+      })
+    );
+
+    unsubscribers.push(
+      listen("ambient://open-onboarding", () => {
+        onboardingSnoozedRef.current = false;
+        void openOnboardingWizard(1);
       })
     );
 
@@ -178,7 +272,7 @@ export default function Overlay(): JSX.Element {
         p.then((unlisten) => unlisten()).catch(() => undefined)
       );
     };
-  }, [refreshActiveTask]);
+  }, [openOnboardingWizard, refreshActiveTask, refreshOnboarding]);
 
   useEffect(() => {
     if (!isStreamingEnabled()) {
@@ -300,40 +394,39 @@ export default function Overlay(): JSX.Element {
       event.preventDefault();
       const trimmed = input.trim();
       if (!trimmed || sending) return;
-      if (!activeTask) {
-        setErrorMessage("No active task. Open the full workspace to pick one.");
-        return;
-      }
 
       setSending(true);
       setErrorMessage(null);
-      await setTrayStatus("working").catch(() => undefined);
 
-      if (isStreamingEnabled()) {
-        try {
+      try {
+        let task = activeTask;
+        if (!task) {
+          const created = await createTask(deriveTaskTitleFromPrompt(trimmed));
+          task = await setActiveTask(created.id).catch(() => created);
+          setActiveTaskState(task);
+          activeTaskRef.current = task;
+        }
+
+        await setTrayStatus("working").catch(() => undefined);
+
+        if (isStreamingEnabled()) {
           if (streamingTurnIdRef.current) {
             await cancelStreamingTurn(streamingTurnIdRef.current, "user_barge_in").catch(
               () => undefined
             );
           }
-          const turnId = await sendMessageStreaming(activeTask.id, trimmed, "text");
+          const turnId = await sendMessageStreaming(task.id, trimmed, "text");
           streamingTurnIdRef.current = turnId;
           setStreamingTurnId(turnId);
           setStreamingText("");
           setInput("");
-          return;
-        } catch (error) {
-          setErrorMessage(String(error));
-          await setTrayStatus("idle").catch(() => undefined);
-          setSending(false);
+          await refreshMessages(task.id);
           return;
         }
-      }
 
-      try {
-        await sendMessage(activeTask.id, trimmed, "text");
+        await sendMessage(task.id, trimmed, "text");
         setInput("");
-        await refreshMessages(activeTask.id);
+        await refreshMessages(task.id);
       } catch (error) {
         setErrorMessage(String(error));
       } finally {
@@ -356,6 +449,120 @@ export default function Overlay(): JSX.Element {
     }
     setNotificationContext(null);
   }, [notificationContext]);
+
+  const handleOnboardingCancel = useCallback(() => {
+    onboardingSnoozedRef.current = true;
+    setOnboardingVisible(false);
+    setApiKeyValidation(null);
+  }, []);
+
+  const handleOnboardingStepOneContinue = useCallback(() => {
+    setOnboardingStep(2);
+  }, []);
+
+  const handleOnboardingValidateApiKey = useCallback(async () => {
+    const trimmed = apiKeyInput.trim();
+
+    if (!trimmed && onboardingStatus?.has_stored_api_key) {
+      setApiKeyValidation({
+        is_valid: true,
+        message: "Using existing stored API key."
+      });
+      setOnboardingStep(3);
+      return;
+    }
+
+    setOnboardingBusy(true);
+    setApiKeyValidation(null);
+    try {
+      const validation = await validateOpenAiApiKey(trimmed);
+      setApiKeyValidation(validation);
+      if (!validation.is_valid) {
+        return;
+      }
+
+      await storeOpenAiApiKey(trimmed);
+      await refreshOnboarding(false);
+      setOnboardingStep(3);
+    } catch (error) {
+      setApiKeyValidation({
+        is_valid: false,
+        message: String(error)
+      });
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [apiKeyInput, onboardingStatus?.has_stored_api_key, refreshOnboarding]);
+
+  const handleChooseWorkspaceFolder = useCallback(async () => {
+    setOnboardingBusy(true);
+    setErrorMessage(null);
+    try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "Choose your first workspace folder"
+      });
+
+      const folderPath =
+        typeof selected === "string"
+          ? selected
+          : Array.isArray(selected) && typeof selected[0] === "string"
+            ? selected[0]
+            : null;
+
+      if (!folderPath) {
+        return;
+      }
+
+      await setPreferredWorkspaceFolder(folderPath);
+      setWorkspaceFolder(folderPath);
+      await refreshOnboarding(false);
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [refreshOnboarding]);
+
+  const handleSkipWorkspaceFolder = useCallback(async () => {
+    setOnboardingBusy(true);
+    try {
+      await clearPreferredWorkspaceFolder();
+      setWorkspaceFolder(null);
+      await refreshOnboarding(false);
+      setOnboardingStep(4);
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [refreshOnboarding]);
+
+  const handleWorkspaceStepContinue = useCallback(() => {
+    setOnboardingStep(4);
+  }, []);
+
+  const handleFinishOnboarding = useCallback(async () => {
+    setOnboardingBusy(true);
+    try {
+      await completeOnboarding();
+      await refreshOnboarding(false);
+      setOnboardingVisible(false);
+      onboardingSnoozedRef.current = false;
+      setOnboardingStep(1);
+      setApiKeyValidation(null);
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [refreshOnboarding]);
+
+  const handleFixApiKey = useCallback(() => {
+    onboardingSnoozedRef.current = false;
+    void openOnboardingWizard(2);
+  }, [openOnboardingWizard]);
 
   const hotkeyLabel = useMemo(
     () => (ambient ? formatHotkey(ambient.hotkey) : ""),
@@ -455,52 +662,214 @@ export default function Overlay(): JSX.Element {
             </div>
           ) : null}
 
-          <div className="overlay-messages" data-testid="overlay-messages">
-            {messages.length === 0 ? (
-              <div className="overlay-empty">No recent messages.</div>
-            ) : (
-              messages.map((message) => (
-                <div
-                  key={message.id}
-                  className={`overlay-message overlay-message-${message.role}`}
-                >
-                  <div className="overlay-message-role">{message.role}</div>
-                  <div className="overlay-message-body">{message.content}</div>
-                </div>
-              ))
-            )}
-            {streamingTurnId ? (
-              <div className="overlay-message overlay-message-assistant">
-                <div className="overlay-message-role">assistant</div>
-                <div className="overlay-message-body">
-                  {streamingText.length > 0 ? streamingText : "thinking..."}
-                </div>
+          {onboardingVisible ? (
+            <section className="overlay-onboarding" data-testid="overlay-onboarding">
+              <div className="overlay-onboarding-meta" data-testid="overlay-onboarding-step-count">
+                Step {onboardingStep} of 4
               </div>
-            ) : null}
-          </div>
 
-          <form className="overlay-input-row" onSubmit={handleSubmit}>
-            <input
-              className="overlay-input"
-              data-testid="overlay-input"
-              type="text"
-              placeholder="Say something to Jeff"
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              disabled={sending}
-            />
-            <button
-              type="submit"
-              className="overlay-send"
-              disabled={sending || input.trim().length === 0}
-            >
-              {sending ? "…" : "send"}
-            </button>
-          </form>
+              {onboardingStep === 1 ? (
+                <div data-testid="onboarding-step-1" className="overlay-onboarding-step">
+                  <h3>What Jeff is</h3>
+                  <p>
+                    Jeff is your task-focused coworker in a companion window.
+                    It keeps context from your task and helps you move work forward.
+                    You stay in control of every write and every decision.
+                  </p>
+                  <div className="overlay-onboarding-actions">
+                    <button
+                      type="button"
+                      onClick={handleOnboardingStepOneContinue}
+                      data-testid="onboarding-continue-step-1"
+                    >
+                      Continue
+                    </button>
+                    <button type="button" onClick={handleOnboardingCancel}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
-          {errorMessage ? (
-            <div className="overlay-error">{errorMessage}</div>
-          ) : null}
+              {onboardingStep === 2 ? (
+                <div data-testid="onboarding-step-2" className="overlay-onboarding-step">
+                  <h3>API key setup</h3>
+                  <p>
+                    Add your OpenAI API key. Jeff validates it and stores it in macOS Keychain.
+                  </p>
+                  <input
+                    type="password"
+                    className="overlay-input"
+                    value={apiKeyInput}
+                    onChange={(event) => setApiKeyInput(event.target.value)}
+                    placeholder="sk-..."
+                    data-testid="onboarding-api-key-input"
+                    disabled={onboardingBusy}
+                  />
+                  {onboardingStatus?.has_stored_api_key ? (
+                    <p className="overlay-meta">A key is already available from {onboardingStatus.api_key_source}.</p>
+                  ) : null}
+                  {apiKeyValidation ? (
+                    <p
+                      className={apiKeyValidation.is_valid ? "overlay-meta" : "overlay-error"}
+                      data-testid="onboarding-api-key-validation"
+                    >
+                      {apiKeyValidation.message}
+                    </p>
+                  ) : null}
+                  <div className="overlay-onboarding-actions">
+                    <button
+                      type="button"
+                      onClick={() => void handleOnboardingValidateApiKey()}
+                      disabled={onboardingBusy}
+                      data-testid="onboarding-continue-step-2"
+                    >
+                      {onboardingBusy ? "Validating..." : "Validate and continue"}
+                    </button>
+                    <button type="button" onClick={handleOnboardingCancel} disabled={onboardingBusy}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {onboardingStep === 3 ? (
+                <div data-testid="onboarding-step-3" className="overlay-onboarding-step">
+                  <h3>Workspace folder</h3>
+                  <p>
+                    Pick a first folder for Jeff to watch, or skip for now.
+                  </p>
+                  <p className="overlay-meta" data-testid="onboarding-workspace-selection">
+                    {workspaceFolder ? `Selected: ${workspaceFolder}` : "No folder selected yet."}
+                  </p>
+                  <div className="overlay-onboarding-actions">
+                    <button
+                      type="button"
+                      onClick={() => void handleChooseWorkspaceFolder()}
+                      disabled={onboardingBusy}
+                      data-testid="onboarding-choose-folder"
+                    >
+                      Choose folder
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleWorkspaceStepContinue}
+                      disabled={onboardingBusy}
+                      data-testid="onboarding-continue-step-3"
+                    >
+                      Continue
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSkipWorkspaceFolder()}
+                      disabled={onboardingBusy}
+                      data-testid="onboarding-skip-folder"
+                    >
+                      Skip for now
+                    </button>
+                  </div>
+                  <div className="overlay-onboarding-actions">
+                    <button type="button" onClick={handleOnboardingCancel} disabled={onboardingBusy}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {onboardingStep === 4 ? (
+                <div data-testid="onboarding-step-4" className="overlay-onboarding-step">
+                  <h3>Ready</h3>
+                  <p>
+                    You are ready to use Jeff. Press {hotkeyLabel || "Cmd/Ctrl Shift J"} any time to summon it.
+                  </p>
+                  <div className="overlay-onboarding-actions">
+                    <button
+                      type="button"
+                      onClick={() => void handleFinishOnboarding()}
+                      disabled={onboardingBusy}
+                      data-testid="onboarding-complete"
+                    >
+                      Start with your first message
+                    </button>
+                    <button type="button" onClick={handleOnboardingCancel} disabled={onboardingBusy}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </section>
+          ) : (
+            <>
+              {!activeTask ? (
+                <div className="overlay-banner overlay-banner-info" data-testid="overlay-no-active-task">
+                  Tell me what you're working on.
+                </div>
+              ) : null}
+
+              <div className="overlay-messages" data-testid="overlay-messages">
+                {messages.length === 0 ? (
+                  <div className="overlay-empty">No recent messages.</div>
+                ) : (
+                  messages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`overlay-message overlay-message-${message.role}`}
+                    >
+                      <div className="overlay-message-role">{message.role}</div>
+                      <div className="overlay-message-body">{message.content}</div>
+                    </div>
+                  ))
+                )}
+                {streamingTurnId ? (
+                  <div className="overlay-message overlay-message-assistant">
+                    <div className="overlay-message-role">assistant</div>
+                    <div className="overlay-message-body">
+                      {streamingText.length > 0 ? streamingText : "thinking..."}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <form className="overlay-input-row" onSubmit={handleSubmit}>
+                <input
+                  className="overlay-input"
+                  data-testid="overlay-input"
+                  type="text"
+                  placeholder={
+                    activeTask
+                      ? "Say something to Jeff"
+                      : "Tell me what you're working on"
+                  }
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  disabled={sending}
+                />
+                <button
+                  type="submit"
+                  className="overlay-send"
+                  disabled={sending || input.trim().length === 0}
+                >
+                  {sending ? "…" : activeTask ? "send" : "start"}
+                </button>
+              </form>
+
+              {errorMessage ? (
+                <div className="overlay-error">
+                  {errorMessage}
+                  {isApiKeyIssue(errorMessage) ? (
+                    <button
+                      type="button"
+                      className="overlay-inline-action"
+                      onClick={handleFixApiKey}
+                      data-testid="overlay-fix-api-key"
+                    >
+                      Update API key
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
       ) : (
         <div className="overlay-collapsed-body">

@@ -223,6 +223,12 @@ function setupInvokeMock(options?: { failCommands?: Record<string, string> }) {
     is_watching: false,
     watched_path: null as string | null
   };
+  let onboardingStatus = {
+    onboarding_complete: true,
+    has_stored_api_key: true,
+    api_key_source: "keychain",
+    preferred_workspace_folder: "/tmp/jeff_data/tasks/history-storymap"
+  };
   let clipboardCaptureEnabled = false;
   const recentlyLearned: Array<{
     id: number;
@@ -431,6 +437,10 @@ function setupInvokeMock(options?: { failCommands?: Record<string, string> }) {
 
     if (command === "get_active_task") {
       return tasks.find((task) => task.is_active) ?? null;
+    }
+
+    if (command === "get_onboarding_status") {
+      return { ...onboardingStatus };
     }
 
     if (command === "get_task_summary") {
@@ -1108,6 +1118,10 @@ function setupInvokeMock(options?: { failCommands?: Record<string, string> }) {
         single_instance: true,
         quiet_mode: false
       };
+    }
+
+    if (command === "ambient_open_onboarding") {
+      return null;
     }
 
     if (command === "propose_artifact_revision") {

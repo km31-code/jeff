@@ -22,13 +22,16 @@ pub trait EmbeddingsProvider: Send + Sync {
 }
 
 pub trait ClassifierProvider: Send + Sync {
-    fn classify(&self, text: &str, api_key: &str) -> std::result::Result<IntentClassificationDto, String>;
+    fn classify(
+        &self,
+        text: &str,
+        api_key: &str,
+    ) -> std::result::Result<IntentClassificationDto, String>;
 }
 
 #[derive(Clone)]
 pub struct OpenAiReasoningProvider {
     client: Client,
-    api_key: Option<String>,
     model: String,
 }
 
@@ -36,7 +39,6 @@ impl OpenAiReasoningProvider {
     pub fn from_env() -> Self {
         Self {
             client: Client::new(),
-            api_key: read_openai_api_key_from_env(),
             model: "gpt-4o-mini".to_string(),
         }
     }
@@ -44,15 +46,12 @@ impl OpenAiReasoningProvider {
 
 impl ReasoningModelProvider for OpenAiReasoningProvider {
     fn generate_response(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        let api_key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| anyhow!("OPENAI_API_KEY is not configured"))?;
+        let api_key = crate::secrets::resolve_openai_api_key_required()?;
 
         let response = self
             .client
             .post("https://api.openai.com/v1/chat/completions")
-            .bearer_auth(api_key)
+            .bearer_auth(&api_key)
             .json(&serde_json::json!({
                 "model": self.model,
                 "temperature": 0,
@@ -100,7 +99,6 @@ impl ReasoningModelProvider for OpenAiReasoningProvider {
 #[derive(Clone)]
 pub struct OpenAiSttProvider {
     client: Client,
-    api_key: Option<String>,
     model: String,
 }
 
@@ -108,7 +106,6 @@ impl OpenAiSttProvider {
     pub fn from_env() -> Self {
         Self {
             client: Client::new(),
-            api_key: read_openai_api_key_from_env(),
             model: "whisper-1".to_string(),
         }
     }
@@ -116,10 +113,7 @@ impl OpenAiSttProvider {
 
 impl SpeechToTextProvider for OpenAiSttProvider {
     fn transcribe(&self, audio_bytes: &[u8], mime_type: &str) -> Result<String> {
-        let api_key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| anyhow!("OPENAI_API_KEY is not configured"))?;
+        let api_key = crate::secrets::resolve_openai_api_key_required()?;
 
         if audio_bytes.is_empty() {
             return Err(anyhow!("audio payload is empty"));
@@ -140,7 +134,7 @@ impl SpeechToTextProvider for OpenAiSttProvider {
         let response = self
             .client
             .post("https://api.openai.com/v1/audio/transcriptions")
-            .bearer_auth(api_key)
+            .bearer_auth(&api_key)
             .multipart(form)
             .send()
             .context("failed to call OpenAI transcription API")?;
@@ -173,7 +167,6 @@ impl SpeechToTextProvider for OpenAiSttProvider {
 #[derive(Clone)]
 pub struct OpenAiTtsProvider {
     client: Client,
-    api_key: Option<String>,
     model: String,
     voice: String,
 }
@@ -182,7 +175,6 @@ impl OpenAiTtsProvider {
     pub fn from_env() -> Self {
         Self {
             client: Client::new(),
-            api_key: read_openai_api_key_from_env(),
             model: "gpt-4o-mini-tts".to_string(),
             voice: "alloy".to_string(),
         }
@@ -191,10 +183,7 @@ impl OpenAiTtsProvider {
 
 impl TextToSpeechProvider for OpenAiTtsProvider {
     fn synthesize(&self, text: &str) -> Result<Vec<u8>> {
-        let api_key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| anyhow!("OPENAI_API_KEY is not configured"))?;
+        let api_key = crate::secrets::resolve_openai_api_key_required()?;
 
         let clean_text = text.trim();
         if clean_text.is_empty() {
@@ -204,7 +193,7 @@ impl TextToSpeechProvider for OpenAiTtsProvider {
         let response = self
             .client
             .post("https://api.openai.com/v1/audio/speech")
-            .bearer_auth(api_key)
+            .bearer_auth(&api_key)
             .json(&serde_json::json!({
                 "model": self.model,
                 "voice": self.voice,
@@ -242,7 +231,6 @@ impl TextToSpeechProvider for OpenAiTtsProvider {
 #[derive(Clone)]
 pub struct OpenAiEmbeddingsProvider {
     client: Client,
-    api_key: Option<String>,
     model: String,
 }
 
@@ -250,7 +238,6 @@ impl OpenAiEmbeddingsProvider {
     pub fn from_env() -> Self {
         Self {
             client: Client::new(),
-            api_key: read_openai_api_key_from_env(),
             model: "text-embedding-3-small".to_string(),
         }
     }
@@ -258,10 +245,7 @@ impl OpenAiEmbeddingsProvider {
 
 impl EmbeddingsProvider for OpenAiEmbeddingsProvider {
     fn embed_text(&self, input: &str) -> Result<Vec<f32>> {
-        let api_key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| anyhow!("OPENAI_API_KEY is not configured"))?;
+        let api_key = crate::secrets::resolve_openai_api_key_required()?;
 
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -271,7 +255,7 @@ impl EmbeddingsProvider for OpenAiEmbeddingsProvider {
         let response = self
             .client
             .post("https://api.openai.com/v1/embeddings")
-            .bearer_auth(api_key)
+            .bearer_auth(&api_key)
             .json(&serde_json::json!({
                 "model": self.model,
                 "input": trimmed
@@ -325,7 +309,11 @@ impl OpenAiClassifierProvider {
 }
 
 impl ClassifierProvider for OpenAiClassifierProvider {
-    fn classify(&self, text: &str, api_key: &str) -> std::result::Result<IntentClassificationDto, String> {
+    fn classify(
+        &self,
+        text: &str,
+        api_key: &str,
+    ) -> std::result::Result<IntentClassificationDto, String> {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return Ok(IntentClassificationDto {
@@ -339,7 +327,9 @@ impl ClassifierProvider for OpenAiClassifierProvider {
             .timeout(Duration::from_millis(crate::classifier::REQUEST_TIMEOUT_MS))
             .connect_timeout(Duration::from_millis(crate::classifier::REQUEST_TIMEOUT_MS))
             .build()
-            .map_err(|err| format!("failed to build HTTP client for intent classification: {err}"))?;
+            .map_err(|err| {
+                format!("failed to build HTTP client for intent classification: {err}")
+            })?;
 
         let response = client
             .post("https://api.openai.com/v1/chat/completions")
@@ -360,7 +350,9 @@ impl ClassifierProvider for OpenAiClassifierProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().unwrap_or_else(|_| "<unreadable>".to_string());
+            let body = response
+                .text()
+                .unwrap_or_else(|_| "<unreadable>".to_string());
             return Err(format!(
                 "intent classifier request failed with status {}: {}",
                 status, body
@@ -380,13 +372,6 @@ impl ClassifierProvider for OpenAiClassifierProvider {
 
         crate::classifier::parse_classification(&content).map_err(|err| err.to_string())
     }
-}
-
-fn read_openai_api_key_from_env() -> Option<String> {
-    std::env::var("OPENAI_API_KEY")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn extension_from_mime_type(mime_type: &str) -> &'static str {

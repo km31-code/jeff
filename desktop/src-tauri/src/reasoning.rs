@@ -32,17 +32,12 @@ impl ReasoningProvider for OpenAiReasoningProvider {
 // which path they use. shares api_key and model config with the original.
 #[derive(Clone)]
 pub struct OpenAiStreamingReasoningProvider {
-    api_key: Option<String>,
     model: String,
 }
 
 impl OpenAiStreamingReasoningProvider {
     pub fn from_env() -> Self {
         Self {
-            api_key: std::env::var("OPENAI_API_KEY")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
             model: "gpt-4o-mini".to_string(),
         }
     }
@@ -56,10 +51,7 @@ impl OpenAiStreamingReasoningProvider {
         user_prompt: &str,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<mpsc::Receiver<Result<String>>> {
-        let api_key = self
-            .api_key
-            .clone()
-            .ok_or_else(|| anyhow!("OPENAI_API_KEY is not configured"))?;
+        let api_key = crate::secrets::resolve_openai_api_key_required()?;
 
         let body = serde_json::json!({
             "model": self.model,

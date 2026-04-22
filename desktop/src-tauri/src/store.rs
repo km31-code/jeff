@@ -15,6 +15,10 @@ use crate::{
         SessionModeStateDto, SubTaskDto, SubTaskStepDto, SuggestionDto, TaskDto, TaskSummaryDto,
         WatchedFileRegistryEntry, WatchedFolderDto, WorkspaceInfoDto, WriteAuditEntryDto,
     },
+    onboarding::{
+        APP_SETTING_ONBOARDING_COMPLETE, APP_SETTING_ONBOARDING_LAST_COMPLETED_AT,
+        APP_SETTING_PREFERRED_WORKSPACE_FOLDER,
+    },
     workspace::slugify_title,
 };
 
@@ -2506,6 +2510,41 @@ impl TaskStore {
         }))
     }
 
+    pub fn get_onboarding_complete(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_ONBOARDING_COMPLETE)?
+            .unwrap_or(false))
+    }
+
+    pub fn set_onboarding_complete(&self, complete: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_ONBOARDING_COMPLETE,
+            if complete { "1" } else { "0" },
+        )?;
+
+        if complete {
+            self.set_app_setting(APP_SETTING_ONBOARDING_LAST_COMPLETED_AT, "1")?;
+        }
+
+        Ok(())
+    }
+
+    pub fn get_preferred_workspace_folder(&self) -> Result<Option<String>> {
+        Ok(self
+            .get_app_setting(APP_SETTING_PREFERRED_WORKSPACE_FOLDER)?
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty()))
+    }
+
+    pub fn set_preferred_workspace_folder(&self, folder: Option<&str>) -> Result<()> {
+        let Some(folder) = folder.map(str::trim).filter(|value| !value.is_empty()) else {
+            self.delete_app_setting(APP_SETTING_PREFERRED_WORKSPACE_FOLDER)?;
+            return Ok(());
+        };
+
+        self.set_app_setting(APP_SETTING_PREFERRED_WORKSPACE_FOLDER, folder)
+    }
+
     // ---------------------------------------------------------------------
     // event log
     // ---------------------------------------------------------------------
@@ -3311,6 +3350,28 @@ mod tests {
 
         let active_after = store.get_active_task().unwrap().unwrap();
         assert_eq!(active_after.id, second.id);
+    }
+
+    #[test]
+    fn onboarding_settings_round_trip() {
+        let (_dir, store) = new_test_store();
+
+        assert!(!store.get_onboarding_complete().unwrap());
+        assert!(store.get_preferred_workspace_folder().unwrap().is_none());
+
+        store.set_onboarding_complete(true).unwrap();
+        assert!(store.get_onboarding_complete().unwrap());
+
+        store
+            .set_preferred_workspace_folder(Some("/tmp/jeff/workspace"))
+            .unwrap();
+        assert_eq!(
+            store.get_preferred_workspace_folder().unwrap().as_deref(),
+            Some("/tmp/jeff/workspace")
+        );
+
+        store.set_preferred_workspace_folder(None).unwrap();
+        assert!(store.get_preferred_workspace_folder().unwrap().is_none());
     }
 
     #[test]

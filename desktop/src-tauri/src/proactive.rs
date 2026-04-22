@@ -428,7 +428,11 @@ mod tests {
     fn quiet_mode_suppresses_reorientation() {
         struct PanicReasoningProvider;
         impl ReasoningProvider for PanicReasoningProvider {
-            fn generate_response(&self, _system_prompt: &str, _user_prompt: &str) -> Result<String> {
+            fn generate_response(
+                &self,
+                _system_prompt: &str,
+                _user_prompt: &str,
+            ) -> Result<String> {
                 panic!("reasoning should not be called while quiet mode is enabled");
             }
         }

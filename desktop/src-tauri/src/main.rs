@@ -12,11 +12,13 @@ mod flow;
 mod latency;
 mod message_kind;
 mod models;
+mod onboarding;
 mod proactive;
 mod providers;
 mod reasoning;
 mod retrieval;
 mod revision;
+mod secrets;
 mod similarity;
 mod state;
 mod store;
@@ -48,6 +50,7 @@ fn main() {
             let _ = ambient::show_overlay(app);
         }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -117,6 +120,13 @@ fn main() {
             commands::list_tasks,
             commands::get_active_task,
             commands::set_active_task,
+            commands::get_onboarding_status,
+            commands::complete_onboarding,
+            commands::set_preferred_workspace_folder,
+            commands::clear_preferred_workspace_folder,
+            commands::validate_openai_api_key,
+            commands::store_openai_api_key,
+            commands::delete_openai_api_key,
             commands::get_task_workspace,
             commands::get_task_summary,
             commands::list_open_resources,
@@ -164,6 +174,7 @@ fn main() {
             ambient::ambient_show_overlay,
             ambient::ambient_hide_overlay,
             ambient::ambient_show_workspace,
+            ambient::ambient_open_onboarding,
             ambient::ambient_hide_workspace,
             ambient::ambient_set_overlay_mode,
             ambient::ambient_set_tray_status,

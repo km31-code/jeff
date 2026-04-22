@@ -299,6 +299,17 @@ pub fn show_workspace<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+pub fn open_onboarding_flow<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    show_overlay(app)?;
+    if let Some(state) = app.try_state::<AmbientState>() {
+        state.set_overlay_mode(OverlayMode::Expanded);
+        let _ = resize_overlay_for_mode(app, OverlayMode::Expanded);
+        let _ = app.emit("ambient://state-changed", &state.snapshot());
+    }
+    let _ = app.emit("ambient://open-onboarding", ());
+    Ok(())
+}
+
 pub fn hide_workspace<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         window.hide()?;
@@ -326,6 +337,11 @@ pub fn ambient_hide_overlay<R: Runtime>(app: AppHandle<R>) -> Result<(), String>
 #[tauri::command]
 pub fn ambient_show_workspace<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     show_workspace(&app).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn ambient_open_onboarding<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    open_onboarding_flow(&app).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -408,10 +424,20 @@ pub fn install_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let setup_item = MenuItem::with_id(app, "tray:setup", "Set up Jeff again", true, None::<&str>)?;
     let quiet_item = MenuItem::with_id(app, "tray:quiet", "Quiet Mode", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "tray:quit", "Quit Jeff", true, None::<&str>)?;
 
-    let menu = Menu::with_items(app, &[&show_item, &workspace_item, &quiet_item, &quit_item])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &show_item,
+            &workspace_item,
+            &setup_item,
+            &quiet_item,
+            &quit_item,
+        ],
+    )?;
 
     let icon: Image<'_> = app
         .default_window_icon()
@@ -430,6 +456,9 @@ pub fn install_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
             "tray:workspace" => {
                 let _ = show_workspace(app);
+            }
+            "tray:setup" => {
+                let _ = open_onboarding_flow(app);
             }
             "tray:quiet" => {
                 if let Some(state) = app.try_state::<AmbientState>() {

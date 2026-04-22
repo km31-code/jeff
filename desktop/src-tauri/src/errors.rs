@@ -12,13 +12,19 @@ impl Display for JeffError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             JeffError::ApiTimeout => {
-                write!(f, "Jeff couldn't reach OpenAI — check your network connection.")
+                write!(
+                    f,
+                    "Jeff couldn't reach OpenAI — check your network connection."
+                )
             }
             JeffError::InvalidApiKey => {
                 write!(f, "Your API key isn't working. Open settings to update it.")
             }
             JeffError::MissingOsPermission(permission) => {
-                write!(f, "Jeff needs {permission} to do this — open System Settings.")
+                write!(
+                    f,
+                    "Jeff needs {permission} to do this — open System Settings."
+                )
             }
             JeffError::DbLockContention => {
                 write!(f, "Jeff ran into a save conflict. Try again in a moment.")
@@ -102,7 +108,10 @@ fn infer_permission_label(lower: &str) -> Option<String> {
         return None;
     }
 
-    if lower.contains("accessibility") || lower.contains("axisprocesstrusted") || lower.contains("axuielement") {
+    if lower.contains("accessibility")
+        || lower.contains("axisprocesstrusted")
+        || lower.contains("axuielement")
+    {
         return Some("Accessibility permission".to_string());
     }
 

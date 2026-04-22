@@ -40,6 +40,10 @@ export function showWorkspace(): Promise<void> {
   return invoke("ambient_show_workspace");
 }
 
+export function openOnboarding(): Promise<void> {
+  return invoke("ambient_open_onboarding");
+}
+
 export function hideWorkspace(): Promise<void> {
   return invoke("ambient_hide_workspace");
 }

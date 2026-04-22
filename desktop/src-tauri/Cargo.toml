@@ -25,8 +25,10 @@ tauri = { version = "2.0.0", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
 notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
 arboard = "3"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 [dev-dependencies]
 tauri = { version = "2.0.0", features = ["test", "tray-icon", "image-png"] }

@@ -519,6 +519,47 @@ body.overlay-body {
   gap: 8px;
 }
 
+.overlay-onboarding {
+  border: 1px solid #d8e2f1;
+  border-radius: 8px;
+  background: #f8fbff;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.overlay-onboarding-meta {
+  font-size: 11px;
+  color: #4f5968;
+  font-weight: 600;
+}
+
+.overlay-onboarding-step {
+  display: grid;
+  gap: 8px;
+}
+
+.overlay-onboarding-step h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.overlay-onboarding-step p {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.overlay-onboarding-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.overlay-meta {
+  font-size: 11px;
+  color: #4f5968;
+}
+
 .overlay-task-row {
   display: flex;
   justify-content: space-between;
@@ -630,4 +671,15 @@ body.overlay-body {
 .overlay-error {
   font-size: 12px;
   color: #9a2a2a;
+  display: grid;
+  gap: 6px;
+}
+
+.overlay-inline-action {
+  justify-self: start;
+  border: 1px solid #2d8cff;
+  color: #1f5fab;
+  background: #eef5ff;
+  border-radius: 6px;
+  padding: 4px 8px;
 }

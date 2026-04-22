@@ -308,6 +308,52 @@ export interface EventLogEntryDto {
   created_at: string;
 }
 
+// phase 18: onboarding + secure key management
+
+export interface OnboardingStatusDto {
+  onboarding_complete: boolean;
+  has_stored_api_key: boolean;
+  api_key_source: "keychain" | "env" | "none" | string;
+  preferred_workspace_folder: string | null;
+}
+
+export interface ApiKeyValidationDto {
+  is_valid: boolean;
+  message: string;
+}
+
+export async function getOnboardingStatus(): Promise<OnboardingStatusDto> {
+  return invoke<OnboardingStatusDto>("get_onboarding_status");
+}
+
+export async function validateOpenAiApiKey(
+  apiKey: string
+): Promise<ApiKeyValidationDto> {
+  return invoke<ApiKeyValidationDto>("validate_openai_api_key", { apiKey });
+}
+
+export async function storeOpenAiApiKey(apiKey: string): Promise<void> {
+  return invoke<void>("store_openai_api_key", { apiKey });
+}
+
+export async function deleteOpenAiApiKey(): Promise<void> {
+  return invoke<void>("delete_openai_api_key");
+}
+
+export async function completeOnboarding(): Promise<void> {
+  return invoke<void>("complete_onboarding");
+}
+
+export async function setPreferredWorkspaceFolder(
+  folderPath: string
+): Promise<void> {
+  return invoke<void>("set_preferred_workspace_folder", { folderPath });
+}
+
+export async function clearPreferredWorkspaceFolder(): Promise<void> {
+  return invoke<void>("clear_preferred_workspace_folder");
+}
+
 export async function createTask(title: string): Promise<TaskDto> {
   return invoke<TaskDto>("create_task", { title });
 }

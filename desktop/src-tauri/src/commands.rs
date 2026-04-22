@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, time::Duration};
 
 use tauri::{AppHandle, Manager, Runtime, State};
 
@@ -12,15 +12,15 @@ use crate::{
     },
     message_kind::classify_user_message_kind,
     models::{
-        ArtifactContentDto, ArtifactDto, ArtifactVersionDto, ChatMessageDto, CoworkingStatusDto,
-        DriftFlagDto, EventLogEntryDto, FileWriteProposalDto, IntentClassificationDto, IntentLabel,
-        IntentSlotsDto, OpenResourceDto, ProactiveEvaluationDto, RecentlyLearnedItemDto,
-        ReorientationDto, RetrievedChunkDto, RevisionApplyResultDto, RevisionProposalDto,
-        RevisionProposalResultDto, RevisionTargetDto, SendMessageResponseDto, SessionModeStateDto,
-        SpeechSynthesisDto, SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto,
-        SuggestionAcceptanceDto, SuggestionDto, SuggestionEvaluationDto, TaskContextPackDto,
-        TaskDto, TaskSummaryDto, TranscriptionResultDto, WatcherStatusDto, WorkspaceInfoDto,
-        WriteAuditEntryDto,
+        ApiKeyValidationDto, ArtifactContentDto, ArtifactDto, ArtifactVersionDto, ChatMessageDto,
+        CoworkingStatusDto, DriftFlagDto, EventLogEntryDto, FileWriteProposalDto,
+        IntentClassificationDto, IntentLabel, IntentSlotsDto, OnboardingStatusDto, OpenResourceDto,
+        ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto,
+        RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto, RevisionTargetDto,
+        SendMessageResponseDto, SessionModeStateDto, SpeechSynthesisDto, SubTaskDto,
+        SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto,
+        SuggestionEvaluationDto, TaskContextPackDto, TaskDto, TaskSummaryDto,
+        TranscriptionResultDto, WatcherStatusDto, WorkspaceInfoDto, WriteAuditEntryDto,
     },
     retrieval::{
         auto_ingest_file_for_task, build_task_context_pack, import_artifact_for_task,
@@ -49,10 +49,7 @@ fn map_jeff_error<E: ToString>(error: E) -> String {
 
 #[tauri::command]
 pub fn create_task(state: State<'_, JeffState>, title: String) -> Result<TaskDto, String> {
-    state
-        .store
-        .create_task(&title)
-        .map_err(map_jeff_error)
+    state.store.create_task(&title).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -62,10 +59,7 @@ pub fn list_tasks(state: State<'_, JeffState>) -> Result<Vec<TaskDto>, String> {
 
 #[tauri::command]
 pub fn get_active_task(state: State<'_, JeffState>) -> Result<Option<TaskDto>, String> {
-    state
-        .store
-        .get_active_task()
-        .map_err(map_jeff_error)
+    state.store.get_active_task().map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -80,6 +74,126 @@ pub fn set_active_task(state: State<'_, JeffState>, task_id: i64) -> Result<Task
     }
 
     Ok(task)
+}
+
+// phase 18: onboarding + secure key setup -----------------------------------
+
+#[tauri::command]
+pub fn get_onboarding_status(state: State<'_, JeffState>) -> Result<OnboardingStatusDto, String> {
+    let onboarding_complete = state
+        .store
+        .get_onboarding_complete()
+        .map_err(map_jeff_error)?;
+    let preferred_workspace_folder = state
+        .store
+        .get_preferred_workspace_folder()
+        .map_err(map_jeff_error)?;
+
+    let resolved = crate::secrets::resolve_openai_api_key();
+
+    Ok(OnboardingStatusDto {
+        onboarding_complete,
+        has_stored_api_key: resolved.api_key.is_some(),
+        api_key_source: resolved.source.to_string(),
+        preferred_workspace_folder,
+    })
+}
+
+#[tauri::command]
+pub fn complete_onboarding(state: State<'_, JeffState>) -> Result<(), String> {
+    state
+        .store
+        .set_onboarding_complete(true)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn set_preferred_workspace_folder(
+    state: State<'_, JeffState>,
+    folder_path: String,
+) -> Result<(), String> {
+    let clean = folder_path.trim();
+    if clean.is_empty() {
+        return Err("folder_path cannot be empty".to_string());
+    }
+    state
+        .store
+        .set_preferred_workspace_folder(Some(clean))
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn clear_preferred_workspace_folder(state: State<'_, JeffState>) -> Result<(), String> {
+    state
+        .store
+        .set_preferred_workspace_folder(None)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn validate_openai_api_key(api_key: String) -> Result<ApiKeyValidationDto, String> {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return Ok(ApiKeyValidationDto {
+            is_valid: false,
+            message: "API key cannot be empty.".to_string(),
+        });
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .connect_timeout(Duration::from_secs(8))
+        .build()
+        .map_err(map_jeff_error)?;
+
+    let response = client
+        .get("https://api.openai.com/v1/models")
+        .bearer_auth(trimmed)
+        .send();
+
+    let response = match response {
+        Ok(resp) => resp,
+        Err(err) => {
+            let message = if err.is_timeout() {
+                crate::errors::JeffError::ApiTimeout.to_string()
+            } else {
+                format!("OpenAI key validation failed: {err}")
+            };
+            return Ok(ApiKeyValidationDto {
+                is_valid: false,
+                message,
+            });
+        }
+    };
+
+    if response.status().is_success() {
+        return Ok(ApiKeyValidationDto {
+            is_valid: true,
+            message: "API key validated successfully.".to_string(),
+        });
+    }
+
+    if response.status().as_u16() == 401 {
+        return Ok(ApiKeyValidationDto {
+            is_valid: false,
+            message: crate::errors::JeffError::InvalidApiKey.to_string(),
+        });
+    }
+
+    Ok(ApiKeyValidationDto {
+        is_valid: false,
+        message: format!("OpenAI rejected the key (status {}).", response.status()),
+    })
+}
+
+#[tauri::command]
+pub fn store_openai_api_key(api_key: String) -> Result<(), String> {
+    crate::secrets::store_openai_api_key(&api_key).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn delete_openai_api_key() -> Result<(), String> {
+    crate::secrets::delete_openai_api_key().map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -130,10 +244,7 @@ pub fn list_artifacts(
     state: State<'_, JeffState>,
     task_id: i64,
 ) -> Result<Vec<ArtifactDto>, String> {
-    state
-        .store
-        .list_artifacts(task_id)
-        .map_err(map_jeff_error)
+    state.store.list_artifacts(task_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -369,10 +480,7 @@ pub fn synthesize_speech(
     state: State<'_, JeffState>,
     text: String,
 ) -> Result<SpeechSynthesisDto, String> {
-    state
-        .voice
-        .synthesize_speech(&text)
-        .map_err(map_jeff_error)
+    state.voice.synthesize_speech(&text).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -516,8 +624,7 @@ pub fn list_pending_revisions(
     task_id: i64,
     artifact_id: i64,
 ) -> Result<Vec<RevisionProposalDto>, String> {
-    list_pending_revisions_for_artifact(&state.store, task_id, artifact_id)
-        .map_err(map_jeff_error)
+    list_pending_revisions_for_artifact(&state.store, task_id, artifact_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -553,8 +660,7 @@ pub fn list_artifact_versions(
     state: State<'_, JeffState>,
     artifact_id: i64,
 ) -> Result<Vec<ArtifactVersionDto>, String> {
-    list_artifact_versions_for_artifact(&state.store, artifact_id)
-        .map_err(map_jeff_error)
+    list_artifact_versions_for_artifact(&state.store, artifact_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -596,8 +702,7 @@ pub fn list_subtasks(state: State<'_, JeffState>, task_id: i64) -> Result<Vec<Su
 
 #[tauri::command]
 pub fn cancel_subtask(state: State<'_, JeffState>, subtask_id: i64) -> Result<SubTaskDto, String> {
-    cancel_subtask_by_id(&state.store, state.subtasks.as_ref(), subtask_id)
-        .map_err(map_jeff_error)
+    cancel_subtask_by_id(&state.store, state.subtasks.as_ref(), subtask_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -709,8 +814,7 @@ pub fn dismiss_suggestion(
     task_id: i64,
     suggestion_id: i64,
 ) -> Result<SuggestionDto, String> {
-    dismiss_suggestion_for_task(&state.store, task_id, suggestion_id)
-        .map_err(map_jeff_error)
+    dismiss_suggestion_for_task(&state.store, task_id, suggestion_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -719,8 +823,7 @@ pub fn explain_suggestion(
     task_id: i64,
     suggestion_id: i64,
 ) -> Result<String, String> {
-    explain_suggestion_for_task(&state.store, task_id, suggestion_id)
-        .map_err(map_jeff_error)
+    explain_suggestion_for_task(&state.store, task_id, suggestion_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -773,10 +876,7 @@ pub fn get_active_artifact_selection(
     task_id: i64,
 ) -> Result<Option<i64>, String> {
     let key = active_artifact_setting_key(task_id);
-    let raw = state
-        .store
-        .get_app_setting(&key)
-        .map_err(map_jeff_error)?;
+    let raw = state.store.get_app_setting(&key).map_err(map_jeff_error)?;
 
     let Some(value) = raw else {
         return Ok(None);
@@ -1042,8 +1142,7 @@ pub fn classify_message_intent(
         .get_task_summary(task_id)
         .map_err(map_jeff_error)?;
 
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .map_err(|_| "OPENAI_API_KEY is not configured".to_string())?;
+    let api_key = crate::secrets::resolve_openai_api_key_required().map_err(map_jeff_error)?;
     crate::classifier::classify_intent(trimmed, &api_key).map_err(map_jeff_error)
 }
 

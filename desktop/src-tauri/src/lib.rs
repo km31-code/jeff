@@ -4,4 +4,6 @@ pub mod classifier;
 pub mod errors;
 pub mod latency;
 pub mod models;
+pub mod onboarding;
 pub mod providers;
+pub mod secrets;

@@ -34,6 +34,7 @@ import {
   getActiveArtifactSelection,
   refineSubtask,
   getActiveTask,
+  getOnboardingStatus,
   getArtifactContent,
   getCoworkingStatus,
   getSessionModeState,
@@ -50,6 +51,7 @@ import {
   listSubtasks,
   listTaskPendingRevisions,
   listTasks,
+  OnboardingStatusDto,
   OpenResourceDto,
   proposeArtifactRevision,
   rejectRevision,
@@ -106,7 +108,12 @@ import {
   listWriteAuditLog,
   startSubtaskChain,
 } from "./tauriClient";
-import { setTrayStatus as setAmbientTrayStatus, setQuietMode, TrayStatus } from "./ambientClient";
+import {
+  openOnboarding,
+  setTrayStatus as setAmbientTrayStatus,
+  setQuietMode,
+  TrayStatus
+} from "./ambientClient";
 
 type ViewMode = "home" | "workspace";
 type RecordingPurpose = "chat" | "revision" | "subtask" | "cancel_subtask";
@@ -267,6 +274,8 @@ function App() {
   const [recordingPurpose, setRecordingPurpose] = useState<RecordingPurpose>("chat");
   const [coworkingStatus, setCoworkingStatus] = useState<CoworkingStatusDto | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatusDto | null>(null);
+  const [workspacePromptDismissed, setWorkspacePromptDismissed] = useState(false);
   const [pendingActionKeys, setPendingActionKeys] = useState<Record<string, boolean>>({});
   const [expandedCompanionRevisionId, setExpandedCompanionRevisionId] = useState<number | null>(null);
   const [expandedCompanionSubtaskId, setExpandedCompanionSubtaskId] = useState<number | null>(null);
@@ -658,15 +667,20 @@ function App() {
     setErrorMessage(null);
 
     try {
-      const [persistedTasks, persistedActiveTask, status] = await Promise.all([
+      const [persistedTasks, persistedActiveTask, status, onboarding] = await Promise.all([
         listTasks(),
         getActiveTask(),
-        getCoworkingStatus()
+        getCoworkingStatus(),
+        getOnboardingStatus()
       ]);
 
       setTasks(persistedTasks);
       setActiveTaskState(persistedActiveTask);
       setCoworkingStatus(status);
+      setOnboardingStatus(onboarding);
+      if (onboarding.preferred_workspace_folder) {
+        setWorkspacePromptDismissed(false);
+      }
 
       if (persistedActiveTask) {
         await loadWorkspaceState(persistedActiveTask.id);
@@ -900,6 +914,39 @@ function App() {
       await createTask(trimmedTitle);
       setNewTaskTitle("");
       await refreshShellState();
+    } catch (error) {
+      setErrorMessage(formatError(error));
+    }
+  }
+
+  async function handleStartTaskFromPrompt(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const prompt = chatInput.trim();
+    if (!prompt) {
+      return;
+    }
+
+    setErrorMessage(null);
+
+    try {
+      const created = await createTask(deriveTaskTitleFromPrompt(prompt));
+      const nextActiveTask = await setActiveTask(created.id);
+      setActiveTaskState(nextActiveTask);
+      setTasks(await listTasks());
+      await sendMessage(nextActiveTask.id, prompt, "text");
+      await loadWorkspaceState(nextActiveTask.id);
+      await refreshCoworkingStatus();
+      setChatInput("");
+      setFullWorkspaceVisible(false);
+      setViewMode("workspace");
+    } catch (error) {
+      setErrorMessage(formatError(error));
+    }
+  }
+
+  async function handleOpenOnboarding() {
+    try {
+      await openOnboarding();
     } catch (error) {
       setErrorMessage(formatError(error));
     }
@@ -2330,6 +2377,23 @@ function App() {
             </button>
           </div>
 
+          {!loading && !activeTask ? (
+            <section className="companion-card" data-testid="home-no-active-task-prompt">
+              <p>Tell me what you're working on.</p>
+              <form onSubmit={handleStartTaskFromPrompt} className="task-form">
+                <input
+                  aria-label="What are you working on?"
+                  placeholder="Draft my StoryMap thesis intro and tighten evidence links"
+                  value={chatInput}
+                  onChange={(event) => setChatInput(event.target.value)}
+                />
+                <button type="submit" disabled={chatInput.trim().length === 0}>
+                  Start
+                </button>
+              </form>
+            </section>
+          ) : null}
+
           <h3>Create Task</h3>
           <form onSubmit={handleCreateTask} className="task-form">
             <input
@@ -2756,6 +2820,26 @@ function App() {
                 <p>{buildCompanionGreeting(activeTask, sessionModeState, artifacts)}</p>
                 <p data-testid="companion-route-hint">Last routed intent: {lastRoutedIntent}</p>
               </section>
+            ) : null}
+
+            {!fullWorkspaceVisible &&
+            onboardingStatus &&
+            !onboardingStatus.preferred_workspace_folder &&
+            !workspacePromptDismissed ? (
+              <div className="companion-card" data-testid="companion-workspace-soft-prompt">
+                <p>
+                  Set a workspace folder to let Jeff learn from files automatically.
+                  Jeff still works fully without one.
+                </p>
+                <div className="row-actions">
+                  <button type="button" onClick={() => void handleOpenOnboarding()}>
+                    Choose folder
+                  </button>
+                  <button type="button" onClick={() => setWorkspacePromptDismissed(true)}>
+                    Skip for now
+                  </button>
+                </div>
+              </div>
             ) : null}
 
             {reorientationBanner ? (
@@ -3413,9 +3497,18 @@ function App() {
       ) : null}
 
       {errorMessage ? (
-        <p role="alert" className="error" data-testid="jeff-error-banner">
-          {errorMessage}
-        </p>
+        <div role="alert" className="error" data-testid="jeff-error-banner">
+          <p>{errorMessage}</p>
+          {isApiKeyErrorMessage(errorMessage) ? (
+            <button
+              type="button"
+              onClick={() => void handleOpenOnboarding()}
+              data-testid="jeff-error-fix-api-key"
+            >
+              Update API key
+            </button>
+          ) : null}
+        </div>
       ) : null}
     </main>
   );
@@ -3841,6 +3934,31 @@ function buildCompanionGreeting(
   const artifactHint = selectedArtifact ? ` on ${selectedArtifact.file_name}` : "";
   const modeHint = modeState ? formatModeLabel(modeState.current_mode).toLowerCase() : "writing";
   return `You were ${modeHint}${artifactHint}. Want to continue or shift focus?`;
+}
+
+function deriveTaskTitleFromPrompt(prompt: string): string {
+  const cleaned = prompt
+    .replace(/\s+/g, " ")
+    .replace(/[^a-zA-Z0-9\\-_' ]/g, "")
+    .trim();
+  if (!cleaned) {
+    return "New task";
+  }
+  return cleaned.slice(0, 64);
+}
+
+function isApiKeyErrorMessage(message: string | null): boolean {
+  if (!message) {
+    return false;
+  }
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("api key") ||
+    lower.includes("openai_api_key is not configured") ||
+    lower.includes("status 401") ||
+    lower.includes("unauthorized") ||
+    lower.includes("invalid_api_key")
+  );
 }
 
 function formatError(error: unknown): string {

@@ -6,7 +6,8 @@ use crate::models::{IntentClassificationDto, IntentLabel, IntentSlotsDto};
 pub(crate) const MODEL: &str = "gpt-4o-mini";
 pub(crate) const REQUEST_TIMEOUT_MS: u64 = 300;
 
-pub(crate) const SYSTEM_PROMPT: &str = "You are an intent classifier for a writing assistant called Jeff.\
+pub(crate) const SYSTEM_PROMPT: &str =
+    "You are an intent classifier for a writing assistant called Jeff.\
 \nGiven a user message, classify it into exactly one intent and extract structured slots.\
 \n\
 \nIntents:\

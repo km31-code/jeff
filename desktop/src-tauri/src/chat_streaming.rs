@@ -202,11 +202,8 @@ async fn run_llm_stream<R: Runtime + 'static>(
     let turn_id = token.turn_id.clone();
     let _active_turn = ActiveTurnGuard::new(registry, turn_id.clone());
 
-    // read api key once; tts synthesis is skipped silently if absent.
-    let tts_api_key: Option<String> = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    // read api key once via resolver; tts synthesis is skipped silently if absent.
+    let tts_api_key = crate::secrets::resolve_openai_api_key().api_key;
     let first_audio_reported: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let mut phrase_buf = String::new();
     let mut phrase_id: u32 = 0;

@@ -427,3 +427,19 @@ pub struct WriteAuditEntryDto {
     pub proposed_path: String,
     pub resolved_at: String,
 }
+
+// phase 18: onboarding and secure key setup
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OnboardingStatusDto {
+    pub onboarding_complete: bool,
+    pub has_stored_api_key: bool,
+    pub api_key_source: String,
+    pub preferred_workspace_folder: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiKeyValidationDto {
+    pub is_valid: bool,
+    pub message: String,
+}
