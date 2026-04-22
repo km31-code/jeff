@@ -135,7 +135,7 @@ companion view. No blank crashes, no generic "something went wrong" banners.
 
 ## M17.3: Latency budget assertions
 
-**Status:** pending
+**Status:** done
 
 **Goal:** Latency budgets are code-level constants. At least one budget (startup) is
 asserted by an offline Rust test. The classifier budget is asserted by the existing eval
@@ -344,6 +344,6 @@ phase11–16_check.sh as a regression gate.
 
 - [x] M17.1 done — phase17_check.sh verifies provider interfaces and OpenAI impls conform.
 - [x] M17.2 done — the 4 failure modes each produce a correct, specific UI message.
-- [ ] M17.3 done — all 4 latency budgets are measured and pass on a reference machine.
+- [x] M17.3 done — all 4 latency budgets are measured and pass on a reference machine.
 - [ ] M17.4 done — phase17_check.sh runs behavioral assertions for phase 11–16 and passes.
 - [ ] M17.5 done — `bash scripts/phase17_check.sh` exits 0 with all PASS lines.

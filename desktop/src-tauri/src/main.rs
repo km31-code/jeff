@@ -9,6 +9,7 @@ mod coworking;
 mod embedding;
 mod errors;
 mod flow;
+mod latency;
 mod message_kind;
 mod models;
 mod proactive;

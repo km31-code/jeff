@@ -3,6 +3,7 @@
 // run with: cargo test --manifest-path src-tauri/Cargo.toml --test intent_eval -- --nocapture
 
 use jeff_desktop::classifier::classify_intent;
+use jeff_desktop::latency;
 use serde::Deserialize;
 use std::time::Instant;
 
@@ -157,9 +158,10 @@ fn intent_classifier_accuracy_and_latency() {
     );
 
     assert!(
-        p50 < 150,
-        "intent classifier p50 latency {}ms exceeds the p50 < 150ms budget",
-        p50
+        p50 < latency::CLASSIFIER_BUDGET_MS as u128,
+        "intent classifier p50 latency {}ms exceeds the p50 < {}ms budget",
+        p50,
+        latency::CLASSIFIER_BUDGET_MS
     );
 
     assert!(
