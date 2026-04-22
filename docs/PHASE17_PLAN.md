@@ -76,7 +76,7 @@ later (e.g., a local model) is an adapter swap, not a rewrite.
 
 ## M17.2: Failure-mode handling
 
-**Status:** pending
+**Status:** done
 
 **Goal:** Each of the 4 failure scenarios produces a specific, actionable message in the
 companion view. No blank crashes, no generic "something went wrong" banners.
@@ -343,7 +343,7 @@ phase11–16_check.sh as a regression gate.
 ## Exit criteria (from PHASES_NEXT.md)
 
 - [x] M17.1 done — phase17_check.sh verifies provider interfaces and OpenAI impls conform.
-- [ ] M17.2 done — the 4 failure modes each produce a correct, specific UI message.
+- [x] M17.2 done — the 4 failure modes each produce a correct, specific UI message.
 - [ ] M17.3 done — all 4 latency budgets are measured and pass on a reference machine.
 - [ ] M17.4 done — phase17_check.sh runs behavioral assertions for phase 11–16 and passes.
 - [ ] M17.5 done — `bash scripts/phase17_check.sh` exits 0 with all PASS lines.

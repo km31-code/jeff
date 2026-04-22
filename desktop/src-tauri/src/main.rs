@@ -7,6 +7,7 @@ mod classifier;
 mod commands;
 mod coworking;
 mod embedding;
+mod errors;
 mod flow;
 mod message_kind;
 mod models;

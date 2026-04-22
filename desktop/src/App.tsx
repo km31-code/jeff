@@ -3413,7 +3413,7 @@ function App() {
       ) : null}
 
       {errorMessage ? (
-        <p role="alert" className="error">
+        <p role="alert" className="error" data-testid="jeff-error-banner">
           {errorMessage}
         </p>
       ) : null}
@@ -3845,14 +3845,86 @@ function buildCompanionGreeting(
 
 function formatError(error: unknown): string {
   if (typeof error === "string") {
-    return error;
+    return mapJeffErrorMessage(error);
   }
 
   if (error instanceof Error) {
-    return error.message;
+    return mapJeffErrorMessage(error.message);
   }
 
   return "Unexpected error";
+}
+
+function mapJeffErrorMessage(raw: string): string {
+  const API_TIMEOUT_MESSAGE = "Jeff couldn't reach OpenAI — check your network connection.";
+  const API_KEY_MESSAGE = "Your API key isn't working. Open settings to update it.";
+  const DB_LOCK_MESSAGE = "Jeff ran into a save conflict. Try again in a moment.";
+
+  const lower = raw.toLowerCase();
+
+  if (lower.includes("jeff couldn't reach openai")) {
+    return API_TIMEOUT_MESSAGE;
+  }
+
+  if (
+    lower.includes("openai_api_key is not configured") ||
+    lower.includes("status 401") ||
+    lower.includes("unauthorized") ||
+    lower.includes("invalid_api_key") ||
+    lower.includes("your api key isn't working")
+  ) {
+    return API_KEY_MESSAGE;
+  }
+
+  if (
+    lower.includes("database is locked") ||
+    lower.includes("sqlite_busy") ||
+    lower.includes("save conflict")
+  ) {
+    return DB_LOCK_MESSAGE;
+  }
+
+  if (lower.includes("jeff needs ") && lower.includes("system settings")) {
+    return raw;
+  }
+
+  if (
+    lower.includes("permission") ||
+    lower.includes("axisprocesstrusted") ||
+    lower.includes("axuielement") ||
+    lower.includes("not allowed") ||
+    lower.includes("not authorized") ||
+    lower.includes("denied")
+  ) {
+    const permission = inferPermissionLabel(lower);
+    return `Jeff needs ${permission} to do this — open System Settings.`;
+  }
+
+  return raw;
+}
+
+function inferPermissionLabel(lowerMessage: string): string {
+  if (
+    lowerMessage.includes("accessibility") ||
+    lowerMessage.includes("axisprocesstrusted") ||
+    lowerMessage.includes("axuielement")
+  ) {
+    return "Accessibility permission";
+  }
+
+  if (lowerMessage.includes("notification")) {
+    return "notification permission";
+  }
+
+  if (lowerMessage.includes("microphone") || lowerMessage.includes("record")) {
+    return "microphone permission";
+  }
+
+  if (lowerMessage.includes("calendar")) {
+    return "calendar permission";
+  }
+
+  return "required permission";
 }
 
 export default App;

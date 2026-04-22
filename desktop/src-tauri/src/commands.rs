@@ -43,17 +43,21 @@ use crate::{
     },
 };
 
+fn map_jeff_error<E: ToString>(error: E) -> String {
+    crate::errors::map_error_message(&error.to_string())
+}
+
 #[tauri::command]
 pub fn create_task(state: State<'_, JeffState>, title: String) -> Result<TaskDto, String> {
     state
         .store
         .create_task(&title)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
 pub fn list_tasks(state: State<'_, JeffState>) -> Result<Vec<TaskDto>, String> {
-    state.store.list_tasks().map_err(|error| error.to_string())
+    state.store.list_tasks().map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -61,7 +65,7 @@ pub fn get_active_task(state: State<'_, JeffState>) -> Result<Option<TaskDto>, S
     state
         .store
         .get_active_task()
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -69,7 +73,7 @@ pub fn set_active_task(state: State<'_, JeffState>, task_id: i64) -> Result<Task
     let task = state
         .store
         .set_active_task(task_id)
-        .map_err(|error| error.to_string())?;
+        .map_err(map_jeff_error)?;
 
     if let Err(err) = ensure_workspace_awareness_for_task(state.inner(), task_id) {
         eprintln!("[jeff watcher] failed to sync watcher for active task {task_id}: {err}");
@@ -86,7 +90,7 @@ pub fn get_task_workspace(
     state
         .store
         .get_task_workspace(task_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -97,7 +101,7 @@ pub fn get_task_summary(
     state
         .store
         .get_task_summary(task_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -108,7 +112,7 @@ pub fn list_open_resources(
     state
         .store
         .list_open_resources(task_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -118,7 +122,7 @@ pub fn import_artifact(
     file_path: String,
 ) -> Result<ArtifactDto, String> {
     import_artifact_for_task(&state.store, state.embeddings.as_ref(), task_id, &file_path)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -129,7 +133,7 @@ pub fn list_artifacts(
     state
         .store
         .list_artifacts(task_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -139,7 +143,7 @@ pub fn retrieve_context(
     query: String,
 ) -> Result<Vec<RetrievedChunkDto>, String> {
     retrieve_relevant_chunks(&state.store, state.embeddings.as_ref(), task_id, &query)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -149,7 +153,7 @@ pub fn build_context_pack(
     query: String,
 ) -> Result<TaskContextPackDto, String> {
     build_task_context_pack(&state.store, state.embeddings.as_ref(), task_id, &query)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -160,7 +164,7 @@ pub fn list_messages(
     state
         .store
         .list_chat_messages(task_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -171,7 +175,7 @@ pub fn send_message<R: Runtime>(
     message: String,
     source: Option<String>,
 ) -> Result<SendMessageResponseDto, String> {
-    let now = unix_now_seconds().map_err(|error| error.to_string())?;
+    let now = unix_now_seconds().map_err(map_jeff_error)?;
     let user_message_kind = classify_user_message_kind(&message);
     {
         let mut runtime = state
@@ -196,7 +200,7 @@ pub fn send_message<R: Runtime>(
 
     match response {
         Ok(value) => {
-            let now = unix_now_seconds().map_err(|error| error.to_string())?;
+            let now = unix_now_seconds().map_err(map_jeff_error)?;
             let mut runtime = state
                 .coworking
                 .lock()
@@ -215,7 +219,7 @@ pub fn send_message<R: Runtime>(
             }
             Ok(value)
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(map_jeff_error(error)),
     }
 }
 
@@ -319,7 +323,7 @@ pub async fn send_message_streaming<R: Runtime>(
     .await
     {
         state.interactions.remove(&turn_id);
-        return Err(err.to_string());
+        return Err(map_jeff_error(err));
     }
 
     Ok(turn_id)
@@ -357,7 +361,7 @@ pub fn transcribe_audio(
     state
         .voice
         .transcribe_audio_base64(&audio_base64, &mime_type)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -368,12 +372,12 @@ pub fn synthesize_speech(
     state
         .voice
         .synthesize_speech(&text)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
 pub fn get_coworking_status(state: State<'_, JeffState>) -> Result<CoworkingStatusDto, String> {
-    let now = unix_now_seconds().map_err(|error| error.to_string())?;
+    let now = unix_now_seconds().map_err(map_jeff_error)?;
     let mut runtime = state
         .coworking
         .lock()
@@ -386,7 +390,7 @@ pub fn set_proactive_mode(
     state: State<'_, JeffState>,
     enabled: bool,
 ) -> Result<CoworkingStatusDto, String> {
-    let now = unix_now_seconds().map_err(|error| error.to_string())?;
+    let now = unix_now_seconds().map_err(map_jeff_error)?;
     let mut runtime = state
         .coworking
         .lock()
@@ -395,7 +399,7 @@ pub fn set_proactive_mode(
     state
         .store
         .set_app_setting("proactive_mode", if enabled { "1" } else { "0" })
-        .map_err(|error| error.to_string())?;
+        .map_err(map_jeff_error)?;
     Ok(status)
 }
 
@@ -404,7 +408,7 @@ pub fn set_user_typing(
     state: State<'_, JeffState>,
     is_typing: bool,
 ) -> Result<CoworkingStatusDto, String> {
-    let now = unix_now_seconds().map_err(|error| error.to_string())?;
+    let now = unix_now_seconds().map_err(map_jeff_error)?;
     let mut runtime = state
         .coworking
         .lock()
@@ -417,7 +421,7 @@ pub fn set_user_speaking(
     state: State<'_, JeffState>,
     is_speaking: bool,
 ) -> Result<CoworkingStatusDto, String> {
-    let now = unix_now_seconds().map_err(|error| error.to_string())?;
+    let now = unix_now_seconds().map_err(map_jeff_error)?;
     let mut runtime = state
         .coworking
         .lock()
@@ -430,7 +434,7 @@ pub fn set_assistant_speaking(
     state: State<'_, JeffState>,
     is_speaking: bool,
 ) -> Result<CoworkingStatusDto, String> {
-    let now = unix_now_seconds().map_err(|error| error.to_string())?;
+    let now = unix_now_seconds().map_err(map_jeff_error)?;
     let mut runtime = state
         .coworking
         .lock()
@@ -444,7 +448,7 @@ pub fn evaluate_proactive_nudge<R: Runtime>(
     app: AppHandle<R>,
     task_id: i64,
 ) -> Result<ProactiveEvaluationDto, String> {
-    let now = unix_now_seconds().map_err(|error| error.to_string())?;
+    let now = unix_now_seconds().map_err(map_jeff_error)?;
     let evaluation = {
         let mut runtime = state
             .coworking
@@ -459,7 +463,7 @@ pub fn evaluate_proactive_nudge<R: Runtime>(
             task_id,
             now,
         )
-        .map_err(|error| error.to_string())?
+        .map_err(map_jeff_error)?
     };
 
     if let Some(nudge) = evaluation.nudge.as_ref() {
@@ -480,7 +484,7 @@ pub fn get_artifact_content(
     state: State<'_, JeffState>,
     artifact_id: i64,
 ) -> Result<ArtifactContentDto, String> {
-    get_artifact_content_for_edit(&state.store, artifact_id).map_err(|error| error.to_string())
+    get_artifact_content_for_edit(&state.store, artifact_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -503,7 +507,7 @@ pub fn propose_artifact_revision(
         &instruction,
         &source,
     )
-    .map_err(|error| error.to_string())
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -513,7 +517,7 @@ pub fn list_pending_revisions(
     artifact_id: i64,
 ) -> Result<Vec<RevisionProposalDto>, String> {
     list_pending_revisions_for_artifact(&state.store, task_id, artifact_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -524,7 +528,7 @@ pub fn list_task_pending_revisions(
     state
         .store
         .list_pending_revisions_for_task(task_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -533,7 +537,7 @@ pub fn apply_revision(
     revision_id: i64,
 ) -> Result<RevisionApplyResultDto, String> {
     apply_artifact_revision(&state.store, state.embeddings.as_ref(), revision_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -541,7 +545,7 @@ pub fn reject_revision(
     state: State<'_, JeffState>,
     revision_id: i64,
 ) -> Result<RevisionProposalDto, String> {
-    reject_artifact_revision(&state.store, revision_id).map_err(|error| error.to_string())
+    reject_artifact_revision(&state.store, revision_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -550,7 +554,7 @@ pub fn list_artifact_versions(
     artifact_id: i64,
 ) -> Result<Vec<ArtifactVersionDto>, String> {
     list_artifact_versions_for_artifact(&state.store, artifact_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -559,7 +563,7 @@ pub fn revert_artifact_to_version(
     version_id: i64,
 ) -> Result<ArtifactContentDto, String> {
     revert_artifact_by_version(&state.store, state.embeddings.as_ref(), version_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -582,18 +586,18 @@ pub fn create_subtask(
         &execution_type,
         &normalize_subtask_instruction_source(instruction_source),
     )
-    .map_err(|error| error.to_string())
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
 pub fn list_subtasks(state: State<'_, JeffState>, task_id: i64) -> Result<Vec<SubTaskDto>, String> {
-    list_subtasks_for_task(&state.store, task_id).map_err(|error| error.to_string())
+    list_subtasks_for_task(&state.store, task_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
 pub fn cancel_subtask(state: State<'_, JeffState>, subtask_id: i64) -> Result<SubTaskDto, String> {
     cancel_subtask_by_id(&state.store, state.subtasks.as_ref(), subtask_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -601,7 +605,7 @@ pub fn accept_subtask_result(
     state: State<'_, JeffState>,
     subtask_id: i64,
 ) -> Result<SubTaskDto, String> {
-    accept_subtask_result_by_id(&state.store, subtask_id).map_err(|error| error.to_string())
+    accept_subtask_result_by_id(&state.store, subtask_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -609,7 +613,7 @@ pub fn reject_subtask_result(
     state: State<'_, JeffState>,
     subtask_id: i64,
 ) -> Result<SubTaskDto, String> {
-    reject_subtask_result_by_id(&state.store, subtask_id).map_err(|error| error.to_string())
+    reject_subtask_result_by_id(&state.store, subtask_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -623,7 +627,7 @@ pub fn suggest_subtask(
         state.reasoning.as_ref(),
         task_id,
     )
-    .map_err(|error| error.to_string())
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -642,7 +646,7 @@ pub fn refine_subtask(
         &instruction,
         &normalize_subtask_instruction_source(instruction_source),
     )
-    .map_err(|error| error.to_string())
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -662,7 +666,7 @@ pub fn convert_subtask_to_revision(
         artifact_id,
         selection_or_range,
     )
-    .map_err(|error| error.to_string())
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -671,7 +675,7 @@ pub fn evaluate_next_suggestions(
     task_id: i64,
     active_artifact_id: Option<i64>,
 ) -> Result<SuggestionEvaluationDto, String> {
-    let now = unix_now_seconds().map_err(|error| error.to_string())?;
+    let now = unix_now_seconds().map_err(map_jeff_error)?;
     let mut runtime = state
         .coworking
         .lock()
@@ -685,7 +689,7 @@ pub fn evaluate_next_suggestions(
         active_artifact_id,
         &status,
     )
-    .map_err(|error| error.to_string())
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -696,7 +700,7 @@ pub fn list_suggestions(
     state
         .store
         .list_suggestions(task_id, false)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -706,7 +710,7 @@ pub fn dismiss_suggestion(
     suggestion_id: i64,
 ) -> Result<SuggestionDto, String> {
     dismiss_suggestion_for_task(&state.store, task_id, suggestion_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -716,7 +720,7 @@ pub fn explain_suggestion(
     suggestion_id: i64,
 ) -> Result<String, String> {
     explain_suggestion_for_task(&state.store, task_id, suggestion_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -737,7 +741,7 @@ pub fn accept_suggestion(
         active_artifact_id,
         selection_or_range,
     )
-    .map_err(|error| error.to_string())
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -748,7 +752,7 @@ pub fn get_session_mode_state(
     state
         .store
         .get_session_mode_state(task_id)
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -760,7 +764,7 @@ pub fn list_recent_events(
     state
         .store
         .list_recent_events(task_id, limit.unwrap_or(20))
-        .map_err(|error| error.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -772,7 +776,7 @@ pub fn get_active_artifact_selection(
     let raw = state
         .store
         .get_app_setting(&key)
-        .map_err(|error| error.to_string())?;
+        .map_err(map_jeff_error)?;
 
     let Some(value) = raw else {
         return Ok(None);
@@ -806,13 +810,13 @@ pub fn set_active_artifact_selection(
         state
             .store
             .set_app_setting(&key, &value.to_string())
-            .map_err(|error| error.to_string())?;
+            .map_err(map_jeff_error)?;
         Ok(Some(value))
     } else {
         state
             .store
             .delete_app_setting(&key)
-            .map_err(|error| error.to_string())?;
+            .map_err(map_jeff_error)?;
         Ok(None)
     }
 }
@@ -831,13 +835,13 @@ fn start_watcher_and_persist_folder(
         state.store.clone(),
         state.embeddings.clone(),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(map_jeff_error)?;
 
     if let Some(watched_path) = status.watched_path.as_deref() {
         state
             .store
             .set_watched_folder(task_id, watched_path)
-            .map_err(|e| e.to_string())?;
+            .map_err(map_jeff_error)?;
     }
 
     Ok(status)
@@ -850,7 +854,7 @@ fn sync_clipboard_poll_for_active_task(
     let enabled = state
         .store
         .get_clipboard_capture(task_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
 
     if enabled {
         crate::watcher::start_clipboard_poll(
@@ -875,12 +879,12 @@ pub fn ensure_workspace_awareness_for_task(
     let workspace_path = state
         .store
         .get_task_workspace_path(task_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
 
     let configured_path = state
         .store
         .get_watched_folder(task_id)
-        .map_err(|e| e.to_string())?
+        .map_err(map_jeff_error)?
         .map(|entry| entry.folder_path.trim().to_string())
         .filter(|path| !path.is_empty());
 
@@ -920,7 +924,7 @@ pub fn ensure_workspace_awareness_for_task(
 pub fn restore_workspace_awareness_for_active_task(
     state: &crate::state::JeffState,
 ) -> Result<(), String> {
-    let active_task = state.store.get_active_task().map_err(|e| e.to_string())?;
+    let active_task = state.store.get_active_task().map_err(map_jeff_error)?;
     if let Some(task) = active_task {
         ensure_workspace_awareness_for_task(state, task.id)?;
     } else {
@@ -954,7 +958,7 @@ pub fn stop_workspace_watcher(
     state
         .store
         .clear_watched_folder(task_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
 
     Ok(crate::watcher::stop_watcher(state.watcher.clone(), task_id))
 }
@@ -976,7 +980,7 @@ pub fn list_recently_learned(
     state
         .store
         .list_recently_learned(task_id, limit.unwrap_or(10))
-        .map_err(|e| e.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -988,12 +992,12 @@ pub fn set_clipboard_capture(
     state
         .store
         .set_clipboard_capture(task_id, enabled)
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
 
     let active_task_id = state
         .store
         .get_active_task()
-        .map_err(|e| e.to_string())?
+        .map_err(map_jeff_error)?
         .map(|task| task.id);
 
     if active_task_id == Some(task_id) {
@@ -1013,7 +1017,7 @@ pub fn get_clipboard_capture_setting(
     state
         .store
         .get_clipboard_capture(task_id)
-        .map_err(|e| e.to_string())
+        .map_err(map_jeff_error)
 }
 
 // phase 14: intent classification command ------------------------------------
@@ -1036,11 +1040,11 @@ pub fn classify_message_intent(
     state
         .store
         .get_task_summary(task_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
 
     let api_key = std::env::var("OPENAI_API_KEY")
         .map_err(|_| "OPENAI_API_KEY is not configured".to_string())?;
-    crate::classifier::classify_intent(trimmed, &api_key).map_err(|e| e.to_string())
+    crate::classifier::classify_intent(trimmed, &api_key).map_err(map_jeff_error)
 }
 
 // phase 15: proactive initiation commands
@@ -1059,7 +1063,7 @@ pub fn trigger_task_resume(
         });
     }
     crate::proactive::generate_reorientation(&state.store, state.reasoning.as_ref(), task_id)
-        .map_err(|e| e.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1084,7 +1088,7 @@ pub fn check_task_drift(
         task_id,
         &current_text,
     )
-    .map_err(|e| e.to_string())
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1103,7 +1107,7 @@ pub fn trigger_speculative_subtask(
         &state.subtasks,
         task_id,
     )
-    .map_err(|e| e.to_string())
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1116,7 +1120,7 @@ pub fn dismiss_proactive_trigger(
         .store
         .record_proactive_trigger(task_id, &trigger_type, true)
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1124,7 +1128,7 @@ pub fn record_task_focus(state: State<'_, JeffState>, task_id: i64) -> Result<()
     state
         .store
         .record_task_focus(task_id)
-        .map_err(|e| e.to_string())
+        .map_err(map_jeff_error)
 }
 
 // phase 16: richer parallel work commands ------------------------------------
@@ -1139,7 +1143,7 @@ pub fn list_subtask_steps(
     let subtask = state
         .store
         .get_subtask_by_id(subtask_id)
-        .map_err(|e| e.to_string())?
+        .map_err(map_jeff_error)?
         .ok_or_else(|| format!("subtask id={subtask_id} not found"))?;
     if subtask.task_id != task_id {
         return Err(format!(
@@ -1149,7 +1153,7 @@ pub fn list_subtask_steps(
     state
         .store
         .list_subtask_steps(subtask_id)
-        .map_err(|e| e.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1160,7 +1164,7 @@ pub fn list_file_write_proposals(
     state
         .store
         .list_pending_file_write_proposals(task_id)
-        .map_err(|e| e.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1172,7 +1176,7 @@ pub fn approve_subtask_file_write(
     let proposal = state
         .store
         .get_file_write_proposal_by_id(proposal_id)
-        .map_err(|e| e.to_string())?
+        .map_err(map_jeff_error)?
         .ok_or_else(|| format!("file write proposal id={proposal_id} not found"))?;
 
     if proposal.task_id != task_id {
@@ -1191,7 +1195,7 @@ pub fn approve_subtask_file_write(
     let parent_subtask = state
         .store
         .get_subtask_by_id(proposal.subtask_id)
-        .map_err(|e| e.to_string())?
+        .map_err(map_jeff_error)?
         .ok_or_else(|| {
             format!(
                 "parent subtask id={} for proposal id={} not found",
@@ -1226,7 +1230,7 @@ pub fn approve_subtask_file_write(
     let workspace_uncanonical = state
         .store
         .get_task_workspace_path(task_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
     fs::create_dir_all(&workspace_uncanonical).map_err(|e| {
         format!(
             "failed to create task workspace '{}': {e}",
@@ -1273,7 +1277,7 @@ pub fn approve_subtask_file_write(
     state
         .store
         .begin_file_write_proposal_apply(proposal_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
 
     if let Err(write_err) = fs::write(&dest, &proposal.proposed_content) {
         let rollback_err = state.store.rollback_file_write_proposal_apply(proposal_id);
@@ -1313,7 +1317,7 @@ pub fn approve_subtask_file_write(
             "approved",
             &proposal.proposed_path,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
 
     // ingest approved write so retrieval state is up to date.
     if let Err(err) = auto_ingest_file_for_task(
@@ -1332,7 +1336,7 @@ pub fn approve_subtask_file_write(
     let entries = state
         .store
         .list_write_audit_log(task_id, 1)
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
     entries
         .into_iter()
         .next()
@@ -1348,7 +1352,7 @@ pub fn reject_subtask_file_write(
     let proposal = state
         .store
         .get_file_write_proposal_by_id(proposal_id)
-        .map_err(|e| e.to_string())?
+        .map_err(map_jeff_error)?
         .ok_or_else(|| format!("file write proposal id={proposal_id} not found"))?;
 
     if proposal.task_id != task_id {
@@ -1366,7 +1370,7 @@ pub fn reject_subtask_file_write(
     state
         .store
         .resolve_file_write_proposal(proposal_id, "rejected")
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
 
     state
         .store
@@ -1377,12 +1381,12 @@ pub fn reject_subtask_file_write(
             "rejected",
             &proposal.proposed_path,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
 
     let entries = state
         .store
         .list_write_audit_log(task_id, 1)
-        .map_err(|e| e.to_string())?;
+        .map_err(map_jeff_error)?;
     entries
         .into_iter()
         .next()
@@ -1397,7 +1401,7 @@ pub fn list_write_audit_log(
     state
         .store
         .list_write_audit_log(task_id, 100)
-        .map_err(|e| e.to_string())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1421,7 +1425,7 @@ pub fn start_subtask_chain(
         &execution_type,
         &source,
     )
-    .map_err(|e| e.to_string())
+    .map_err(map_jeff_error)
 }
 
 #[cfg(test)]
