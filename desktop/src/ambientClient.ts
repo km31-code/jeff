@@ -44,6 +44,12 @@ export function openOnboarding(): Promise<void> {
   return invoke("ambient_open_onboarding");
 }
 
+// opens the onboarding wizard at a specific step. use step=2 when recovering
+// from an API key error so the user lands directly on key setup.
+export function openOnboardingAtStep(step: number): Promise<void> {
+  return invoke("ambient_open_onboarding_at_step", { step });
+}
+
 export function hideWorkspace(): Promise<void> {
   return invoke("ambient_hide_workspace");
 }

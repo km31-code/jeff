@@ -89,7 +89,6 @@ fn is_invalid_api_key(lower: &str) -> bool {
 fn is_db_lock_contention(lower: &str) -> bool {
     lower.contains("database is locked")
         || lower.contains("sqlite_busy")
-        || lower.contains("sqlite_busy")
         || lower.contains("sqlitedatabasebusy")
         || lower.contains("busy timeout")
 }

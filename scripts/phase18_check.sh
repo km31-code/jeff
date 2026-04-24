@@ -13,6 +13,7 @@ OVERLAY_TSX="$ROOT_DIR/desktop/src/Overlay.tsx"
 APP_TSX="$ROOT_DIR/desktop/src/App.tsx"
 AMBIENT_RS="$ROOT_DIR/desktop/src-tauri/src/ambient.rs"
 TAURI_CLIENT_TS="$ROOT_DIR/desktop/src/tauriClient.ts"
+AMBIENT_CLIENT_TS="$ROOT_DIR/desktop/src/ambientClient.ts"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 pass() { echo "PASS: $1"; }
@@ -26,7 +27,9 @@ for symbol in \
   clear_preferred_workspace_folder \
   validate_openai_api_key \
   store_openai_api_key \
-  delete_openai_api_key; do
+  delete_openai_api_key \
+  get_workspace_prompt_dismissed \
+  set_workspace_prompt_dismissed; do
   grep -q "fn ${symbol}" "$COMMANDS_RS" || fail "missing command function: ${symbol}"
   grep -q "commands::${symbol}" "$MAIN_RS" || fail "missing invoke registration: ${symbol}"
 done
@@ -35,7 +38,8 @@ pass "onboarding/key commands exist and are registered"
 for key in \
   APP_SETTING_ONBOARDING_COMPLETE \
   APP_SETTING_PREFERRED_WORKSPACE_FOLDER \
-  APP_SETTING_ONBOARDING_LAST_COMPLETED_AT; do
+  APP_SETTING_ONBOARDING_LAST_COMPLETED_AT \
+  APP_SETTING_WORKSPACE_PROMPT_DISMISSED; do
   grep -q "$key" "$ONBOARDING_RS" || fail "missing onboarding app-setting key constant: $key"
 done
 pass "onboarding app-setting key constants are present"
@@ -81,12 +85,24 @@ pass "workspace folder soft prompt is present"
 grep -q '"tray:setup"' "$AMBIENT_RS" || fail "ambient tray missing setup menu id"
 grep -q "Set up Jeff again" "$AMBIENT_RS" || fail "ambient tray missing setup label"
 grep -q "ambient://open-onboarding" "$AMBIENT_RS" || fail "ambient onboarding event bridge missing"
-pass "tray setup re-run onboarding flow is wired"
+grep -q "open_onboarding_flow_at_step" "$AMBIENT_RS" || fail "ambient.rs missing step-aware onboarding function"
+grep -q "fn ambient_open_onboarding_at_step" "$AMBIENT_RS" || fail "ambient.rs missing ambient_open_onboarding_at_step command"
+pass "tray setup re-run onboarding flow is wired with step support"
+
+# step-aware onboarding command is registered in main.rs
+grep -q "ambient_open_onboarding_at_step" "$MAIN_RS" || fail "main.rs missing ambient_open_onboarding_at_step registration"
+pass "step-aware onboarding command is registered"
 
 grep -q "getOnboardingStatus" "$TAURI_CLIENT_TS" || fail "tauriClient.ts missing onboarding status wrapper"
 grep -q "storeOpenAiApiKey" "$TAURI_CLIENT_TS" || fail "tauriClient.ts missing key store wrapper"
 grep -q "completeOnboarding" "$TAURI_CLIENT_TS" || fail "tauriClient.ts missing complete onboarding wrapper"
+grep -q "getWorkspacePromptDismissed" "$TAURI_CLIENT_TS" || fail "tauriClient.ts missing workspace prompt dismissed getter"
+grep -q "setWorkspacePromptDismissed" "$TAURI_CLIENT_TS" || fail "tauriClient.ts missing workspace prompt dismissed setter"
 pass "frontend IPC wrappers for onboarding are present"
+
+# step-aware onboarding IPC is present in ambientClient
+grep -q "openOnboardingAtStep" "$AMBIENT_CLIENT_TS" || fail "ambientClient.ts missing openOnboardingAtStep wrapper"
+pass "ambientClient.ts step-aware onboarding IPC wrapper is present"
 
 (
   cd "$ROOT_DIR/desktop"

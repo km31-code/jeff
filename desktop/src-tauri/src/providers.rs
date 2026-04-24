@@ -3,7 +3,7 @@ use reqwest::blocking::{multipart, Client};
 use serde::Deserialize;
 use std::time::Duration;
 
-use crate::models::IntentClassificationDto;
+use crate::models::{IntentClassificationDto, SpeechSynthesisDto, TranscriptionResultDto};
 
 pub trait SpeechToTextProvider: Send + Sync {
     fn transcribe(&self, audio_bytes: &[u8], mime_type: &str) -> Result<String>;
@@ -27,6 +27,18 @@ pub trait ClassifierProvider: Send + Sync {
         text: &str,
         api_key: &str,
     ) -> std::result::Result<IntentClassificationDto, String>;
+}
+
+// composite voice seam: transcription + synthesis behind a single injectable interface.
+// concrete implementation is OpenAiVoiceProvider in voice.rs; state.rs holds
+// Arc<dyn VoiceProvider> so the call path is provider-agnostic.
+pub trait VoiceProvider: Send + Sync {
+    fn transcribe_audio_base64(
+        &self,
+        audio_base64: &str,
+        mime_type: &str,
+    ) -> Result<TranscriptionResultDto>;
+    fn synthesize_speech(&self, text: &str) -> Result<SpeechSynthesisDto>;
 }
 
 #[derive(Clone)]

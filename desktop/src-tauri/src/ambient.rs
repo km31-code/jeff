@@ -300,13 +300,20 @@ pub fn show_workspace<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 }
 
 pub fn open_onboarding_flow<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    open_onboarding_flow_at_step(app, 1)
+}
+
+// opens the onboarding wizard at a specific step. step=1 is the normal entry
+// (first run or tray "Set up Jeff again"). step=2 jumps directly to API key
+// setup, used when the error recovery CTA is clicked in the full workspace.
+pub fn open_onboarding_flow_at_step<R: Runtime>(app: &AppHandle<R>, step: u8) -> tauri::Result<()> {
     show_overlay(app)?;
     if let Some(state) = app.try_state::<AmbientState>() {
         state.set_overlay_mode(OverlayMode::Expanded);
         let _ = resize_overlay_for_mode(app, OverlayMode::Expanded);
         let _ = app.emit("ambient://state-changed", &state.snapshot());
     }
-    let _ = app.emit("ambient://open-onboarding", ());
+    let _ = app.emit("ambient://open-onboarding", serde_json::json!({ "step": step }));
     Ok(())
 }
 
@@ -342,6 +349,14 @@ pub fn ambient_show_workspace<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
 #[tauri::command]
 pub fn ambient_open_onboarding<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     open_onboarding_flow(&app).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn ambient_open_onboarding_at_step<R: Runtime>(
+    app: AppHandle<R>,
+    step: u8,
+) -> Result<(), String> {
+    open_onboarding_flow_at_step(&app, step).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

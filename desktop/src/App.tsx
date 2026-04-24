@@ -35,6 +35,8 @@ import {
   refineSubtask,
   getActiveTask,
   getOnboardingStatus,
+  getWorkspacePromptDismissed,
+  setWorkspacePromptDismissed as persistWorkspacePromptDismissed,
   getArtifactContent,
   getCoworkingStatus,
   getSessionModeState,
@@ -110,6 +112,7 @@ import {
 } from "./tauriClient";
 import {
   openOnboarding,
+  openOnboardingAtStep,
   setTrayStatus as setAmbientTrayStatus,
   setQuietMode,
   TrayStatus
@@ -667,19 +670,24 @@ function App() {
     setErrorMessage(null);
 
     try {
-      const [persistedTasks, persistedActiveTask, status, onboarding] = await Promise.all([
-        listTasks(),
-        getActiveTask(),
-        getCoworkingStatus(),
-        getOnboardingStatus()
-      ]);
+      const [persistedTasks, persistedActiveTask, status, onboarding, promptDismissed] =
+        await Promise.all([
+          listTasks(),
+          getActiveTask(),
+          getCoworkingStatus(),
+          getOnboardingStatus(),
+          getWorkspacePromptDismissed()
+        ]);
 
       setTasks(persistedTasks);
       setActiveTaskState(persistedActiveTask);
       setCoworkingStatus(status);
       setOnboardingStatus(onboarding);
+      // reset the dismissal if the user later adds a folder
       if (onboarding.preferred_workspace_folder) {
         setWorkspacePromptDismissed(false);
+      } else {
+        setWorkspacePromptDismissed(promptDismissed);
       }
 
       if (persistedActiveTask) {
@@ -944,11 +952,24 @@ function App() {
     }
   }
 
-  async function handleOpenOnboarding() {
+  async function handleOpenOnboarding(step?: number) {
     try {
-      await openOnboarding();
+      if (step !== undefined) {
+        await openOnboardingAtStep(step);
+      } else {
+        await openOnboarding();
+      }
     } catch (error) {
       setErrorMessage(formatError(error));
+    }
+  }
+
+  async function handleDismissWorkspacePrompt() {
+    setWorkspacePromptDismissed(true);
+    try {
+      await persistWorkspacePromptDismissed(true);
+    } catch {
+      // persist failure is non-fatal; local state already hides the prompt.
     }
   }
 
@@ -2835,7 +2856,7 @@ function App() {
                   <button type="button" onClick={() => void handleOpenOnboarding()}>
                     Choose folder
                   </button>
-                  <button type="button" onClick={() => setWorkspacePromptDismissed(true)}>
+                  <button type="button" onClick={() => void handleDismissWorkspacePrompt()}>
                     Skip for now
                   </button>
                 </div>
@@ -3502,7 +3523,7 @@ function App() {
           {isApiKeyErrorMessage(errorMessage) ? (
             <button
               type="button"
-              onClick={() => void handleOpenOnboarding()}
+              onClick={() => void handleOpenOnboarding(2)}
               data-testid="jeff-error-fix-api-key"
             >
               Update API key

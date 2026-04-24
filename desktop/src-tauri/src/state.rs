@@ -4,9 +4,9 @@ use std::sync::{
 };
 
 use crate::{
-    coworking::CoworkingRuntime, embedding::EmbeddingProvider, reasoning::ReasoningProvider,
-    store::TaskStore, streaming::SharedRegistry, subtask::SubTaskRunner,
-    voice::OpenAiVoiceProvider, watcher::WatcherState,
+    coworking::CoworkingRuntime, embedding::EmbeddingProvider, providers::VoiceProvider,
+    reasoning::ReasoningProvider, store::TaskStore, streaming::SharedRegistry,
+    subtask::SubTaskRunner, watcher::WatcherState,
 };
 
 #[derive(Clone)]
@@ -14,7 +14,7 @@ pub struct JeffState {
     pub store: TaskStore,
     pub embeddings: Arc<dyn EmbeddingProvider>,
     pub reasoning: Arc<dyn ReasoningProvider>,
-    pub voice: Arc<OpenAiVoiceProvider>,
+    pub voice: Arc<dyn VoiceProvider>,
     pub interaction_epoch: Arc<AtomicU64>,
     pub coworking: Arc<Mutex<CoworkingRuntime>>,
     pub subtasks: Arc<SubTaskRunner>,
@@ -29,7 +29,7 @@ impl JeffState {
         store: TaskStore,
         embeddings: Arc<dyn EmbeddingProvider>,
         reasoning: Arc<dyn ReasoningProvider>,
-        voice: Arc<OpenAiVoiceProvider>,
+        voice: Arc<dyn VoiceProvider>,
     ) -> Self {
         let proactive_mode = store
             .get_app_setting_bool("proactive_mode")

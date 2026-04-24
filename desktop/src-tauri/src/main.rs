@@ -38,6 +38,7 @@ use store::TaskStore;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::ShortcutState;
 use voice::OpenAiVoiceProvider;
+use providers::VoiceProvider;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 fn main() {
@@ -72,7 +73,7 @@ fn main() {
                 .map_err(|error| format!("failed to initialize local task store: {error}"))?;
             let embeddings = Arc::new(default_embeddings_provider());
             let reasoning = Arc::new(OpenAiReasoningProvider::from_env());
-            let voice = Arc::new(OpenAiVoiceProvider::from_env());
+            let voice: Arc<dyn VoiceProvider> = Arc::new(OpenAiVoiceProvider::from_env());
 
             app.manage(JeffState::new(store, embeddings, reasoning, voice));
             app.manage(AmbientState::new());
@@ -127,6 +128,8 @@ fn main() {
             commands::validate_openai_api_key,
             commands::store_openai_api_key,
             commands::delete_openai_api_key,
+            commands::get_workspace_prompt_dismissed,
+            commands::set_workspace_prompt_dismissed,
             commands::get_task_workspace,
             commands::get_task_summary,
             commands::list_open_resources,
@@ -175,6 +178,7 @@ fn main() {
             ambient::ambient_hide_overlay,
             ambient::ambient_show_workspace,
             ambient::ambient_open_onboarding,
+            ambient::ambient_open_onboarding_at_step,
             ambient::ambient_hide_workspace,
             ambient::ambient_set_overlay_mode,
             ambient::ambient_set_tray_status,

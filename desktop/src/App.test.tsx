@@ -223,12 +223,18 @@ function setupInvokeMock(options?: { failCommands?: Record<string, string> }) {
     is_watching: false,
     watched_path: null as string | null
   };
-  let onboardingStatus = {
+  let onboardingStatus: {
+    onboarding_complete: boolean;
+    has_stored_api_key: boolean;
+    api_key_source: string;
+    preferred_workspace_folder: string | null;
+  } = {
     onboarding_complete: true,
     has_stored_api_key: true,
     api_key_source: "keychain",
     preferred_workspace_folder: "/tmp/jeff_data/tasks/history-storymap"
   };
+  let workspacePromptDismissed = false;
   let clipboardCaptureEnabled = false;
   const recentlyLearned: Array<{
     id: number;
@@ -441,6 +447,15 @@ function setupInvokeMock(options?: { failCommands?: Record<string, string> }) {
 
     if (command === "get_onboarding_status") {
       return { ...onboardingStatus };
+    }
+
+    if (command === "get_workspace_prompt_dismissed") {
+      return workspacePromptDismissed;
+    }
+
+    if (command === "set_workspace_prompt_dismissed") {
+      workspacePromptDismissed = Boolean(args?.dismissed);
+      return null;
     }
 
     if (command === "get_task_summary") {
@@ -1416,7 +1431,13 @@ function setupInvokeMock(options?: { failCommands?: Record<string, string> }) {
   return {
     getActiveStreamingTurnId: () => activeStreamingTurnId,
     finalizeStreamingTurn,
-    cancelStreamingTurn
+    cancelStreamingTurn,
+    setOnboardingStatus: (next: typeof onboardingStatus) => {
+      onboardingStatus = next;
+    },
+    setWorkspacePromptDismissed: (next: boolean) => {
+      workspacePromptDismissed = next;
+    }
   };
 }
 
@@ -1874,5 +1895,121 @@ describe("App", () => {
       expect(screen.queryByTestId("streaming-message")).not.toBeInTheDocument()
     );
     expect(await screen.findByTestId("chat-history")).toHaveTextContent("(interrupted)");
+  });
+
+  // phase 18 tests -----------------------------------------------------------
+
+  it("shows workspace soft prompt when onboarding is complete but no folder is set", async () => {
+    const mocks = setupInvokeMock();
+    mocks.setOnboardingStatus({
+      onboarding_complete: true,
+      has_stored_api_key: true,
+      api_key_source: "keychain",
+      preferred_workspace_folder: null
+    });
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    expect(await screen.findByTestId("companion-workspace-soft-prompt")).toBeInTheDocument();
+  });
+
+  it("hides workspace soft prompt when folder is configured", async () => {
+    setupInvokeMock();
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    expect(screen.queryByTestId("companion-workspace-soft-prompt")).not.toBeInTheDocument();
+  });
+
+  it("persists workspace prompt dismissal to backend when skip is clicked", async () => {
+    const mocks = setupInvokeMock();
+    mocks.setOnboardingStatus({
+      onboarding_complete: true,
+      has_stored_api_key: true,
+      api_key_source: "keychain",
+      preferred_workspace_folder: null
+    });
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    const prompt = await screen.findByTestId("companion-workspace-soft-prompt");
+    await userEvent.click(within(prompt).getByRole("button", { name: /skip for now/i }));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("companion-workspace-soft-prompt")).not.toBeInTheDocument()
+    );
+    expect(invokeMock).toHaveBeenCalledWith("set_workspace_prompt_dismissed", { dismissed: true });
+  });
+
+  it("shows API key error banner with Update API key CTA on auth failure", async () => {
+    setupInvokeMock({ failCommands: { send_message: "OPENAI_API_KEY is not configured" } });
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    const chatInput = screen.getByLabelText(/chat input/i);
+    await userEvent.type(chatInput, "hello");
+    await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    const banner = await screen.findByTestId("jeff-error-banner");
+    expect(banner).toHaveTextContent("API key");
+    expect(within(banner).getByTestId("jeff-error-fix-api-key")).toBeInTheDocument();
+  });
+
+  it("Update API key CTA calls openOnboardingAtStep(2) to land on key setup directly", async () => {
+    setupInvokeMock({ failCommands: { send_message: "OPENAI_API_KEY is not configured" } });
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    await userEvent.type(screen.getByLabelText(/chat input/i), "hello");
+    await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    const fixButton = await screen.findByTestId("jeff-error-fix-api-key");
+    await userEvent.click(fixButton);
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "ambient_open_onboarding_at_step",
+      expect.objectContaining({ step: 2 })
+    );
+  });
+
+  it("workspace soft prompt does not appear when prompt was previously dismissed", async () => {
+    const mocks = setupInvokeMock();
+    mocks.setOnboardingStatus({
+      onboarding_complete: true,
+      has_stored_api_key: true,
+      api_key_source: "keychain",
+      preferred_workspace_folder: null
+    });
+    mocks.setWorkspacePromptDismissed(true);
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    // wait for initial load to complete before asserting absence
+    await screen.findByTestId("companion-context-header");
+    expect(screen.queryByTestId("companion-workspace-soft-prompt")).not.toBeInTheDocument();
   });
 });

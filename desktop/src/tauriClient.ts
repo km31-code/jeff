@@ -354,6 +354,14 @@ export async function clearPreferredWorkspaceFolder(): Promise<void> {
   return invoke<void>("clear_preferred_workspace_folder");
 }
 
+export async function getWorkspacePromptDismissed(): Promise<boolean> {
+  return invoke<boolean>("get_workspace_prompt_dismissed");
+}
+
+export async function setWorkspacePromptDismissed(dismissed: boolean): Promise<void> {
+  return invoke<void>("set_workspace_prompt_dismissed", { dismissed });
+}
+
 export async function createTask(title: string): Promise<TaskDto> {
   return invoke<TaskDto>("create_task", { title });
 }

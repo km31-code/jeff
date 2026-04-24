@@ -2,9 +2,9 @@ use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
-pub trait ReasoningProvider: Send + Sync {
-    fn generate_response(&self, system_prompt: &str, user_prompt: &str) -> Result<String>;
-}
+// re-export the canonical trait so all call sites use one definition.
+// reasoning::ReasoningProvider resolves to providers::ReasoningModelProvider.
+pub use crate::providers::ReasoningModelProvider as ReasoningProvider;
 
 #[derive(Clone)]
 pub struct OpenAiReasoningProvider {
@@ -19,9 +19,8 @@ impl OpenAiReasoningProvider {
     }
 }
 
-impl ReasoningProvider for OpenAiReasoningProvider {
+impl crate::providers::ReasoningModelProvider for OpenAiReasoningProvider {
     fn generate_response(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        use crate::providers::ReasoningModelProvider;
         self.inner.generate_response(system_prompt, user_prompt)
     }
 }

@@ -17,7 +17,7 @@ use crate::{
     },
     onboarding::{
         APP_SETTING_ONBOARDING_COMPLETE, APP_SETTING_ONBOARDING_LAST_COMPLETED_AT,
-        APP_SETTING_PREFERRED_WORKSPACE_FOLDER,
+        APP_SETTING_PREFERRED_WORKSPACE_FOLDER, APP_SETTING_WORKSPACE_PROMPT_DISMISSED,
     },
     workspace::slugify_title,
 };
@@ -2545,6 +2545,19 @@ impl TaskStore {
         self.set_app_setting(APP_SETTING_PREFERRED_WORKSPACE_FOLDER, folder)
     }
 
+    pub fn get_workspace_prompt_dismissed(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_WORKSPACE_PROMPT_DISMISSED)?
+            .unwrap_or(false))
+    }
+
+    pub fn set_workspace_prompt_dismissed(&self, dismissed: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_WORKSPACE_PROMPT_DISMISSED,
+            if dismissed { "1" } else { "0" },
+        )
+    }
+
     // ---------------------------------------------------------------------
     // event log
     // ---------------------------------------------------------------------
@@ -3718,6 +3731,26 @@ mod tests {
             err.to_string().contains("expected status 'applying'"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    #[test]
+    fn store_cold_open_is_fast() {
+        use std::time::Instant;
+        use tempfile::TempDir;
+        use crate::latency::STARTUP_BUDGET_MS;
+
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let started = Instant::now();
+        let _store = TaskStore::initialize(dir.path())
+            .expect("failed to initialize store");
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+
+        assert!(
+            elapsed_ms < STARTUP_BUDGET_MS,
+            "store cold-open exceeded startup budget: {}ms >= {}ms",
+            elapsed_ms,
+            STARTUP_BUDGET_MS
         );
     }
 }

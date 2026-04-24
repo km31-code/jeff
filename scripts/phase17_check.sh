@@ -69,10 +69,14 @@ for constant_name in \
 done
 pass "latency.rs contains all 4 budget constants"
 
-# 8. startup budget test passes
+# 8. latency budget tests pass (renamed from startup_budget_is_met; store test added)
 cargo test --manifest-path "$ROOT_DIR/desktop/src-tauri/Cargo.toml" \
-  startup_budget_is_met -- --test-threads=1
-pass "startup_budget_is_met test passes"
+  provider_instantiation_is_fast -- --test-threads=1
+pass "provider_instantiation_is_fast test passes"
+
+cargo test --manifest-path "$ROOT_DIR/desktop/src-tauri/Cargo.toml" \
+  store_cold_open_is_fast -- --test-threads=1
+pass "store_cold_open_is_fast test passes"
 
 # 9. optional live intent eval budget assertion
 if [ -n "${OPENAI_API_KEY:-}" ]; then

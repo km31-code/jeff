@@ -55,3 +55,17 @@ impl OpenAiVoiceProvider {
         })
     }
 }
+
+impl crate::providers::VoiceProvider for OpenAiVoiceProvider {
+    fn transcribe_audio_base64(
+        &self,
+        audio_base64: &str,
+        mime_type: &str,
+    ) -> Result<TranscriptionResultDto> {
+        self.transcribe_audio_base64(audio_base64, mime_type)
+    }
+
+    fn synthesize_speech(&self, text: &str) -> Result<SpeechSynthesisDto> {
+        self.synthesize_speech(text)
+    }
+}

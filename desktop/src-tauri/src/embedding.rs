@@ -1,8 +1,8 @@
 use anyhow::Result;
 
-pub trait EmbeddingProvider: Send + Sync {
-    fn embed_text(&self, input: &str) -> Result<Vec<f32>>;
-}
+// re-export the canonical trait so all call sites use one definition.
+// embedding::EmbeddingProvider resolves to providers::EmbeddingsProvider.
+pub use crate::providers::EmbeddingsProvider as EmbeddingProvider;
 
 #[derive(Clone)]
 pub struct OpenAiEmbeddingProvider {
@@ -17,9 +17,8 @@ impl OpenAiEmbeddingProvider {
     }
 }
 
-impl EmbeddingProvider for OpenAiEmbeddingProvider {
+impl crate::providers::EmbeddingsProvider for OpenAiEmbeddingProvider {
     fn embed_text(&self, input: &str) -> Result<Vec<f32>> {
-        use crate::providers::EmbeddingsProvider;
         self.inner.embed_text(input)
     }
 }

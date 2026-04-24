@@ -130,9 +130,11 @@ pub fn clear_preferred_workspace_folder(state: State<'_, JeffState>) -> Result<(
         .map_err(map_jeff_error)
 }
 
+// runs the blocking reqwest call on a thread-pool thread so the tauri command
+// thread is not blocked for the full 8-second timeout window.
 #[tauri::command]
-pub fn validate_openai_api_key(api_key: String) -> Result<ApiKeyValidationDto, String> {
-    let trimmed = api_key.trim();
+pub async fn validate_openai_api_key(api_key: String) -> Result<ApiKeyValidationDto, String> {
+    let trimmed = api_key.trim().to_string();
     if trimmed.is_empty() {
         return Ok(ApiKeyValidationDto {
             is_valid: false,
@@ -140,50 +142,54 @@ pub fn validate_openai_api_key(api_key: String) -> Result<ApiKeyValidationDto, S
         });
     }
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .connect_timeout(Duration::from_secs(8))
-        .build()
-        .map_err(map_jeff_error)?;
+    tokio::task::spawn_blocking(move || {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .connect_timeout(Duration::from_secs(8))
+            .build()
+            .map_err(|err| format!("failed to build http client: {err}"))?;
 
-    let response = client
-        .get("https://api.openai.com/v1/models")
-        .bearer_auth(trimmed)
-        .send();
+        let response = client
+            .get("https://api.openai.com/v1/models")
+            .bearer_auth(&trimmed)
+            .send();
 
-    let response = match response {
-        Ok(resp) => resp,
-        Err(err) => {
-            let message = if err.is_timeout() {
-                crate::errors::JeffError::ApiTimeout.to_string()
-            } else {
-                format!("OpenAI key validation failed: {err}")
-            };
+        let response = match response {
+            Ok(resp) => resp,
+            Err(err) => {
+                let message = if err.is_timeout() {
+                    crate::errors::JeffError::ApiTimeout.to_string()
+                } else {
+                    format!("OpenAI key validation failed: {err}")
+                };
+                return Ok(ApiKeyValidationDto {
+                    is_valid: false,
+                    message,
+                });
+            }
+        };
+
+        if response.status().is_success() {
             return Ok(ApiKeyValidationDto {
-                is_valid: false,
-                message,
+                is_valid: true,
+                message: "API key validated successfully.".to_string(),
             });
         }
-    };
 
-    if response.status().is_success() {
-        return Ok(ApiKeyValidationDto {
-            is_valid: true,
-            message: "API key validated successfully.".to_string(),
-        });
-    }
+        if response.status().as_u16() == 401 {
+            return Ok(ApiKeyValidationDto {
+                is_valid: false,
+                message: crate::errors::JeffError::InvalidApiKey.to_string(),
+            });
+        }
 
-    if response.status().as_u16() == 401 {
-        return Ok(ApiKeyValidationDto {
+        Ok(ApiKeyValidationDto {
             is_valid: false,
-            message: crate::errors::JeffError::InvalidApiKey.to_string(),
-        });
-    }
-
-    Ok(ApiKeyValidationDto {
-        is_valid: false,
-        message: format!("OpenAI rejected the key (status {}).", response.status()),
+            message: format!("OpenAI rejected the key (status {}).", response.status()),
+        })
     })
+    .await
+    .map_err(|join_err| format!("validation task panicked: {join_err}"))?
 }
 
 #[tauri::command]
@@ -194,6 +200,25 @@ pub fn store_openai_api_key(api_key: String) -> Result<(), String> {
 #[tauri::command]
 pub fn delete_openai_api_key() -> Result<(), String> {
     crate::secrets::delete_openai_api_key().map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn get_workspace_prompt_dismissed(state: State<'_, JeffState>) -> Result<bool, String> {
+    state
+        .store
+        .get_workspace_prompt_dismissed()
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn set_workspace_prompt_dismissed(
+    state: State<'_, JeffState>,
+    dismissed: bool,
+) -> Result<(), String> {
+    state
+        .store
+        .set_workspace_prompt_dismissed(dismissed)
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]

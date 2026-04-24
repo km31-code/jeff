@@ -261,9 +261,10 @@ export default function Overlay(): JSX.Element {
     );
 
     unsubscribers.push(
-      listen("ambient://open-onboarding", () => {
+      listen<{ step?: number }>("ambient://open-onboarding", (event) => {
         onboardingSnoozedRef.current = false;
-        void openOnboardingWizard(1);
+        const step = (event.payload?.step as OnboardingStep) || 1;
+        void openOnboardingWizard(step);
       })
     );
 
