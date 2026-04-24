@@ -443,3 +443,12 @@ pub struct ApiKeyValidationDto {
     pub is_valid: bool,
     pub message: String,
 }
+
+// phase 19: session restore
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionRestoreDto {
+    pub had_active_task: bool,
+    pub overlay_expanded: bool,
+    pub quiet_mode: bool,
+}

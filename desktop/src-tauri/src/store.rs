@@ -24,6 +24,12 @@ use crate::{
 
 const SQLITE_NOW_EXPR: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 
+// phase 19: session persistence setting keys
+pub const APP_SETTING_LAUNCH_AT_LOGIN: &str = "launch_at_login";
+pub const APP_SETTING_OVERLAY_MODE: &str = "overlay_mode";
+pub const APP_SETTING_QUIET_MODE: &str = "quiet_mode";
+pub const APP_SETTING_SESSION_RESTORED_AT: &str = "session_restored_at";
+
 #[derive(Debug, Clone)]
 pub struct StorePaths {
     pub db_path: PathBuf,
@@ -2558,6 +2564,60 @@ impl TaskStore {
         )
     }
 
+    // phase 19: session persistence -------------------------------------------
+
+    pub fn get_launch_at_login(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_LAUNCH_AT_LOGIN)?
+            .unwrap_or(false))
+    }
+
+    pub fn set_launch_at_login(&self, enabled: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_LAUNCH_AT_LOGIN,
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    pub fn get_quiet_mode(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_QUIET_MODE)?
+            .unwrap_or(false))
+    }
+
+    pub fn set_quiet_mode(&self, quiet: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_QUIET_MODE,
+            if quiet { "true" } else { "false" },
+        )
+    }
+
+    // stores overlay mode as the string "expanded" or "collapsed".
+    pub fn get_overlay_expanded(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting(APP_SETTING_OVERLAY_MODE)?
+            .map(|v| v.trim() == "expanded")
+            .unwrap_or(false))
+    }
+
+    pub fn set_overlay_expanded(&self, expanded: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_OVERLAY_MODE,
+            if expanded { "expanded" } else { "collapsed" },
+        )
+    }
+
+    // returns true if this is NOT the first ever session (session_restored_at is set).
+    pub fn get_session_restored_at(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting(APP_SETTING_SESSION_RESTORED_AT)?
+            .is_some())
+    }
+
+    pub fn mark_session_restored(&self) -> Result<()> {
+        self.set_app_setting(APP_SETTING_SESSION_RESTORED_AT, "1")
+    }
+
     // ---------------------------------------------------------------------
     // event log
     // ---------------------------------------------------------------------
@@ -3752,5 +3812,38 @@ mod tests {
             elapsed_ms,
             STARTUP_BUDGET_MS
         );
+    }
+
+    #[test]
+    fn session_settings_round_trip() {
+        let (_dir, store) = new_test_store();
+
+        // all default to false / not set
+        assert!(!store.get_launch_at_login().unwrap());
+        assert!(!store.get_quiet_mode().unwrap());
+        assert!(!store.get_overlay_expanded().unwrap());
+        assert!(!store.get_session_restored_at().unwrap());
+
+        // launch_at_login round-trip
+        store.set_launch_at_login(true).unwrap();
+        assert!(store.get_launch_at_login().unwrap());
+        store.set_launch_at_login(false).unwrap();
+        assert!(!store.get_launch_at_login().unwrap());
+
+        // quiet_mode round-trip
+        store.set_quiet_mode(true).unwrap();
+        assert!(store.get_quiet_mode().unwrap());
+        store.set_quiet_mode(false).unwrap();
+        assert!(!store.get_quiet_mode().unwrap());
+
+        // overlay_expanded round-trip
+        store.set_overlay_expanded(true).unwrap();
+        assert!(store.get_overlay_expanded().unwrap());
+        store.set_overlay_expanded(false).unwrap();
+        assert!(!store.get_overlay_expanded().unwrap());
+
+        // session_restored_at: absent = false, mark = true
+        store.mark_session_restored().unwrap();
+        assert!(store.get_session_restored_at().unwrap());
     }
 }

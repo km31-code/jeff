@@ -52,6 +52,14 @@ fn main() {
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // phase 19: login-item registration via macOS LaunchAgent mechanism.
+        // tauri-plugin-autostart wraps the OS registration so set_launch_at_login
+        // and get_launch_at_login commands can sync jeff's persisted preference
+        // with the actual OS login-item state without shell invocations.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -71,12 +79,49 @@ fn main() {
 
             let store = TaskStore::initialize(&app_local_data_dir)
                 .map_err(|error| format!("failed to initialize local task store: {error}"))?;
+
+            // phase 19: read persisted session settings before constructing
+            // managed state so AmbientState starts in the correct mode without
+            // a round-trip through the frontend after the window is shown.
+            let quiet_mode = store.get_quiet_mode().unwrap_or(false);
+            let overlay_expanded = store.get_overlay_expanded().unwrap_or(false);
+            let launch_at_login = store.get_launch_at_login().unwrap_or(false);
+            // detect first session: session_restored_at absent means jeff has
+            // never completed a session on this install.
+            let is_first_session = !store.get_session_restored_at().unwrap_or(false);
+            if is_first_session {
+                // mark immediately so a crash before the notification fires
+                // does not cause a duplicate on the next launch.
+                let _ = store.mark_session_restored();
+            }
+
             let embeddings = Arc::new(default_embeddings_provider());
             let reasoning = Arc::new(OpenAiReasoningProvider::from_env());
             let voice: Arc<dyn VoiceProvider> = Arc::new(OpenAiVoiceProvider::from_env());
 
+            // build AmbientState with restored quiet_mode and overlay_mode
+            // applied so the overlay opens in the correct state immediately.
+            let ambient_state = {
+                let s = AmbientState::new();
+                if quiet_mode {
+                    s.set_quiet_mode(true);
+                }
+                if overlay_expanded {
+                    s.set_overlay_mode(ambient::OverlayMode::Expanded);
+                }
+                s
+            };
+
             app.manage(JeffState::new(store, embeddings, reasoning, voice));
-            app.manage(AmbientState::new());
+            app.manage(ambient_state);
+
+            // phase 19: sync the OS login-item registry with the persisted
+            // preference. only enable; never silently disable (the user might
+            // have registered jeff via another path we do not control).
+            if launch_at_login {
+                use tauri_plugin_autostart::ManagerExt;
+                let _ = app.autolaunch().enable();
+            }
 
             {
                 let state = app.state::<JeffState>();
@@ -106,13 +151,42 @@ fn main() {
 
             ambient::build_overlay_window(&handle)
                 .map_err(|error| format!("failed to build overlay window: {error}"))?;
-            ambient::install_tray(&handle)
+
+            // phase 19: if overlay was restored as expanded, resize the window
+            // now so it opens at the right height without a frontend round-trip.
+            if overlay_expanded {
+                let _ = ambient::resize_overlay_for_mode(&handle, ambient::OverlayMode::Expanded);
+            }
+
+            // pass initial toggle state so tray checkmarks are correct from
+            // the first paint rather than waiting for a user interaction.
+            ambient::install_tray(&handle, launch_at_login, quiet_mode)
                 .map_err(|error| format!("failed to install tray icon: {error}"))?;
 
             // register the global hotkey. registration may fail if the combo
             // is already owned by another app; we surface the conflict via an
             // event and continue — the tray remains a working entry point.
             let _ = ambient::register_global_hotkey(&handle);
+
+            // phase 19: fire a one-time native notification on the very first
+            // session so users who enabled launch-at-login know jeff is running
+            // in the tray without needing to look for it.
+            // set_focus is never called here; jeff must not steal focus on
+            // automatic startup (phase 11 + phase 19 constraint).
+            if is_first_session {
+                let _ = ambient::dispatch_notification(
+                    &handle,
+                    ambient::NotificationPayload {
+                        title: "Jeff is ready".to_string(),
+                        body: format!(
+                            "Press {} to bring it up.",
+                            ambient::DEFAULT_HOTKEY
+                        ),
+                        context_kind: None,
+                        context_id: None,
+                    },
+                );
+            }
 
             Ok(())
         })
@@ -209,6 +283,10 @@ fn main() {
             commands::reject_subtask_file_write,
             commands::list_write_audit_log,
             commands::start_subtask_chain,
+            // phase 19
+            commands::get_launch_at_login,
+            commands::set_launch_at_login,
+            commands::restore_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Jeff desktop app");

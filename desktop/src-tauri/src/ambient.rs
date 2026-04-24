@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Runtime, State, WebviewUrl,
     WebviewWindowBuilder,
@@ -368,9 +368,14 @@ pub fn ambient_hide_workspace<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
 pub fn ambient_set_overlay_mode<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AmbientState>,
+    jeff_state: State<'_, crate::state::JeffState>,
     mode: OverlayMode,
 ) -> Result<AmbientStateDto, String> {
     state.set_overlay_mode(mode);
+    // persist so the mode survives process restart (phase 19)
+    let _ = jeff_state
+        .store
+        .set_overlay_expanded(mode == OverlayMode::Expanded);
     resize_overlay_for_mode(&app, mode).map_err(|e| e.to_string())?;
     let snapshot = state.snapshot();
     let _ = app.emit("ambient://state-changed", &snapshot);
@@ -394,9 +399,12 @@ pub fn ambient_set_tray_status<R: Runtime>(
 pub fn ambient_set_quiet_mode<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AmbientState>,
+    jeff_state: State<'_, crate::state::JeffState>,
     quiet: bool,
 ) -> Result<AmbientStateDto, String> {
     state.set_quiet_mode(quiet);
+    // persist so quiet mode survives process restart (phase 19)
+    let _ = jeff_state.store.set_quiet_mode(quiet);
     let snapshot = state.snapshot();
     let _ = app.emit("ambient://state-changed", &snapshot);
     Ok(snapshot)
@@ -430,7 +438,13 @@ fn apply_tray_tooltip<R: Runtime>(app: &AppHandle<R>, status: TrayStatus) {
     }
 }
 
-pub fn install_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+// builds a fresh tray menu reflecting current toggle states. called once at
+// install time and again after any toggle so the checkmark updates immediately.
+fn build_tray_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    launch_at_login: bool,
+    quiet_mode: bool,
+) -> tauri::Result<Menu<R>> {
     let show_item = MenuItem::with_id(app, "tray:show", "Show Jeff", true, None::<&str>)?;
     let workspace_item = MenuItem::with_id(
         app,
@@ -439,20 +453,61 @@ pub fn install_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
-    let setup_item = MenuItem::with_id(app, "tray:setup", "Set up Jeff again", true, None::<&str>)?;
-    let quiet_item = MenuItem::with_id(app, "tray:quiet", "Quiet Mode", true, None::<&str>)?;
+    let setup_item =
+        MenuItem::with_id(app, "tray:setup", "Set up Jeff again", true, None::<&str>)?;
+    let quiet_item = CheckMenuItem::with_id(
+        app,
+        "tray:quiet",
+        "Quiet Mode",
+        true,
+        quiet_mode,
+        None::<&str>,
+    )?;
+    let launch_item = CheckMenuItem::with_id(
+        app,
+        "tray:launch_at_login",
+        "Launch at Login",
+        true,
+        launch_at_login,
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(app, "tray:quit", "Quit Jeff", true, None::<&str>)?;
-
-    let menu = Menu::with_items(
+    Menu::with_items(
         app,
         &[
             &show_item,
             &workspace_item,
             &setup_item,
             &quiet_item,
+            &launch_item,
             &quit_item,
         ],
-    )?;
+    )
+}
+
+// rebuilds and replaces the tray menu so check-state is immediately visible.
+fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
+    let launch_at_login = app
+        .try_state::<crate::state::JeffState>()
+        .and_then(|s| s.store.get_launch_at_login().ok())
+        .unwrap_or(false);
+    let quiet_mode = app
+        .try_state::<AmbientState>()
+        .map(|s| s.is_quiet_mode())
+        .unwrap_or(false);
+    if let Ok(menu) = build_tray_menu(app, launch_at_login, quiet_mode) {
+        if let Some(tray) = app.tray_by_id("jeff-tray") {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
+}
+
+pub fn install_tray<R: Runtime>(
+    app: &AppHandle<R>,
+    launch_at_login: bool,
+    quiet_mode: bool,
+) -> tauri::Result<()> {
+    let menu = build_tray_menu(app, launch_at_login, quiet_mode)?;
 
     let icon: Image<'_> = app
         .default_window_icon()
@@ -476,10 +531,30 @@ pub fn install_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 let _ = open_onboarding_flow(app);
             }
             "tray:quiet" => {
-                if let Some(state) = app.try_state::<AmbientState>() {
-                    let new_value = !state.is_quiet_mode();
-                    state.set_quiet_mode(new_value);
-                    let _ = app.emit("ambient://state-changed", &state.snapshot());
+                if let Some(ambient) = app.try_state::<AmbientState>() {
+                    let new_value = !ambient.is_quiet_mode();
+                    ambient.set_quiet_mode(new_value);
+                    // persist across restarts (phase 19)
+                    if let Some(jeff) = app.try_state::<crate::state::JeffState>() {
+                        let _ = jeff.store.set_quiet_mode(new_value);
+                    }
+                    let _ = app.emit("ambient://state-changed", &ambient.snapshot());
+                    refresh_tray_menu(app);
+                }
+            }
+            "tray:launch_at_login" => {
+                if let Some(jeff) = app.try_state::<crate::state::JeffState>() {
+                    let current = jeff.store.get_launch_at_login().unwrap_or(false);
+                    let new_value = !current;
+                    let _ = jeff.store.set_launch_at_login(new_value);
+                    // sync with the OS login-item registry (phase 19)
+                    use tauri_plugin_autostart::ManagerExt;
+                    if new_value {
+                        let _ = app.autolaunch().enable();
+                    } else {
+                        let _ = app.autolaunch().disable();
+                    }
+                    refresh_tray_menu(app);
                 }
             }
             "tray:quit" => {

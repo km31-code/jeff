@@ -17,8 +17,8 @@ use crate::{
         IntentClassificationDto, IntentLabel, IntentSlotsDto, OnboardingStatusDto, OpenResourceDto,
         ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto,
         RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto, RevisionTargetDto,
-        SendMessageResponseDto, SessionModeStateDto, SpeechSynthesisDto, SubTaskDto,
-        SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto,
+        SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
+        SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto,
         SuggestionEvaluationDto, TaskContextPackDto, TaskDto, TaskSummaryDto,
         TranscriptionResultDto, WatcherStatusDto, WorkspaceInfoDto, WriteAuditEntryDto,
     },
@@ -1550,6 +1550,57 @@ pub fn start_subtask_chain(
         &source,
     )
     .map_err(map_jeff_error)
+}
+
+// phase 19: session persistence commands --------------------------------------
+
+/// returns the persisted launch-at-login preference. does not query the OS
+/// login-item registry; the setting is the source of truth for jeff's intent.
+#[tauri::command]
+pub fn get_launch_at_login(state: State<'_, JeffState>) -> Result<bool, String> {
+    state.store.get_launch_at_login().map_err(map_jeff_error)
+}
+
+/// persists the preference and syncs with the OS login-item registry via
+/// tauri-plugin-autostart, which uses the macOS LaunchAgent mechanism.
+#[tauri::command]
+pub async fn set_launch_at_login<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, JeffState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    state
+        .store
+        .set_launch_at_login(enabled)
+        .map_err(map_jeff_error)?;
+
+    use tauri_plugin_autostart::ManagerExt;
+    if enabled {
+        app.autolaunch().enable().map_err(|e| e.to_string())?;
+    } else {
+        app.autolaunch().disable().map_err(|e| e.to_string())?;
+    }
+
+    Ok(enabled)
+}
+
+/// returns the restored session state so the frontend can apply it on startup.
+/// the backend already applies overlay_mode and quiet_mode to AmbientState
+/// in main.rs setup; this command is for the frontend to confirm and act on.
+#[tauri::command]
+pub fn restore_session(state: State<'_, JeffState>) -> Result<SessionRestoreDto, String> {
+    let active_task = state.store.get_active_task().map_err(map_jeff_error)?;
+    let overlay_expanded = state
+        .store
+        .get_overlay_expanded()
+        .map_err(map_jeff_error)?;
+    let quiet_mode = state.store.get_quiet_mode().map_err(map_jeff_error)?;
+
+    Ok(SessionRestoreDto {
+        had_active_task: active_task.is_some(),
+        overlay_expanded,
+        quiet_mode,
+    })
 }
 
 #[cfg(test)]
