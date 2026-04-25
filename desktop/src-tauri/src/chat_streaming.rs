@@ -252,8 +252,8 @@ async fn run_llm_stream<R: Runtime + 'static>(
 
     let user_prompt = build_user_prompt(&message, &context_pack);
 
-    // phase 20: prepend active window context to system prompt when available.
-    let effective_system_prompt = build_system_prompt(active_context.as_deref());
+    // phase 20/23: prepend active window context and user profile to system prompt.
+    let effective_system_prompt = build_system_prompt(&store, active_context.as_deref());
 
     // open the streaming LLM channel.
     let mut rx = match reasoning.stream_response(

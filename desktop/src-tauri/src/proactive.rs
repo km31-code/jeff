@@ -13,6 +13,7 @@ use crate::{
     retrieval::retrieve_relevant_chunks,
     store::TaskStore,
     subtask::{create_subtask_and_start, suggest_subtask_for_task, SubTaskRunner},
+    user_model,
 };
 
 // cooldown and threshold constants (seconds)
@@ -157,6 +158,8 @@ pub fn generate_reorientation(
     task_id: i64,
     // phase 20: active window context prefix for the system prompt.
     active_context: Option<&str>,
+    // phase 23: upcoming calendar event (within 2 hours), or None.
+    calendar_event: Option<&str>,
 ) -> Result<ReorientationDto> {
     let fired_at = now_iso_string();
 
@@ -203,9 +206,40 @@ pub fn generate_reorientation(
         task_summary.summary_text, message_context
     );
 
-    let effective_reorientation_prompt = match active_context {
-        Some(ctx) if !ctx.is_empty() => format!("{ctx}\n\n{REORIENTATION_SYSTEM_PROMPT}"),
-        _ => REORIENTATION_SYSTEM_PROMPT.to_string(),
+    // phase 23: inject user profile if the privacy gate allows it
+    let profile_prefix = if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        user_model::build_profile_injection(store)
+    } else {
+        None
+    };
+
+    let effective_reorientation_prompt = {
+        let mut parts: Vec<&str> = Vec::new();
+        let profile_str; // needs longer lifetime
+        if let Some(ref p) = profile_prefix {
+            profile_str = p.as_str();
+            parts.push(profile_str);
+        }
+        let ctx_str;
+        if let Some(ctx) = active_context {
+            if !ctx.is_empty() {
+                ctx_str = ctx;
+                parts.push(ctx_str);
+            }
+        }
+        // phase 23: include upcoming calendar event when within 2 hours
+        let cal_str;
+        if let Some(cal) = calendar_event {
+            if !cal.is_empty() {
+                cal_str = cal;
+                parts.push(cal_str);
+            }
+        }
+        parts.push(REORIENTATION_SYSTEM_PROMPT);
+        parts.join("\n\n")
     };
     let summary = reasoning
         .generate_response(&effective_reorientation_prompt, &user_prompt)
@@ -403,7 +437,7 @@ mod tests {
         };
 
         // no prior focus → treated as first visit; absence is considered infinite
-        let result = generate_reorientation(&store, &reasoning, task.id, None).unwrap();
+        let result = generate_reorientation(&store, &reasoning, task.id, None, None).unwrap();
         // first visit with no prior focus record: since get_last_task_focus returns None
         // the absence check is skipped and we proceed to fire the LLM
         assert!(
@@ -429,7 +463,7 @@ mod tests {
             drift: r#"{"is_drifting":false,"reason":"","confidence":0.0}"#.to_string(),
         };
 
-        let result = generate_reorientation(&store, &reasoning, task.id, None).unwrap();
+        let result = generate_reorientation(&store, &reasoning, task.id, None, None).unwrap();
         assert!(
             result.summary.is_empty(),
             "expected suppressed summary within cooldown"
@@ -464,7 +498,7 @@ mod tests {
                 fired_at: String::new(),
             }
         } else {
-            generate_reorientation(&store, &PanicReasoningProvider, task.id, None).unwrap()
+            generate_reorientation(&store, &PanicReasoningProvider, task.id, None, None).unwrap()
         };
 
         assert_eq!(response.task_id, task.id);

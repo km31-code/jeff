@@ -1009,3 +1009,103 @@ export async function clearActiveTaskData(): Promise<DataClearResultDto> {
 export async function clearAllJeffData(): Promise<DataClearResultDto> {
   return invoke<DataClearResultDto>("clear_all_jeff_data");
 }
+
+// phase 23 types and commands
+
+export interface UserProfileSignalDto {
+  key: string;
+  label: string;
+  value: string;
+  updated_at: string;
+}
+
+export interface WorkloadTaskDto {
+  id: number;
+  title: string;
+  last_focused_at: string | null;
+  days_since_focus: number | null;
+  pending_item_count: number;
+  is_active: boolean;
+}
+
+export interface WorkloadSummaryDto {
+  active_tasks: WorkloadTaskDto[];
+  stale_tasks: WorkloadTaskDto[];
+}
+
+export interface CalendarEventDto {
+  title: string;
+  starts_at: string;
+  minutes_until: number;
+}
+
+export interface LiveEditReceiptDto {
+  id: number;
+  editor_surface: string;
+  document_title: string;
+  before_hash: string;
+  after_hash: string;
+  timestamp: string;
+  status: string;
+}
+
+export interface PendingLiveEditDto {
+  receipt_id: number;
+  editor_surface: string;
+  document_title: string;
+  before_text: string;
+  after_text: string;
+  timestamp: string;
+}
+
+export async function getUserProfileSignals(): Promise<UserProfileSignalDto[]> {
+  return invoke<UserProfileSignalDto[]>("get_user_profile_signals");
+}
+
+export async function addQualityRubric(text: string): Promise<UserProfileSignalDto[]> {
+  return invoke<UserProfileSignalDto[]>("add_quality_rubric", { text });
+}
+
+export async function deleteQualityRubric(key: string): Promise<UserProfileSignalDto[]> {
+  return invoke<UserProfileSignalDto[]>("delete_quality_rubric", { key });
+}
+
+export async function deleteUserProfileSignal(key: string): Promise<UserProfileSignalDto[]> {
+  return invoke<UserProfileSignalDto[]>("delete_user_profile_signal", { key });
+}
+
+export async function getWorkloadSummary(): Promise<WorkloadSummaryDto> {
+  return invoke<WorkloadSummaryDto>("get_workload_summary");
+}
+
+export async function switchActiveTaskFromCompanion(taskId: number): Promise<TaskDto> {
+  return invoke<TaskDto>("switch_active_task_from_companion", { taskId });
+}
+
+export async function requestCalendarPermission(): Promise<boolean> {
+  return invoke<boolean>("request_calendar_permission");
+}
+
+export async function getCalendarPermissionStatus(): Promise<string> {
+  return invoke<string>("get_calendar_permission_status");
+}
+
+export async function getCalendarNextEvent(): Promise<CalendarEventDto | null> {
+  return invoke<CalendarEventDto | null>("get_calendar_next_event");
+}
+
+export async function approveLiveEdit(receiptId: number): Promise<LiveEditReceiptDto> {
+  return invoke<LiveEditReceiptDto>("approve_live_edit", { receiptId });
+}
+
+export async function rejectLiveEdit(receiptId: number): Promise<LiveEditReceiptDto> {
+  return invoke<LiveEditReceiptDto>("reject_live_edit", { receiptId });
+}
+
+export async function listLiveEditReceipts(taskId: number): Promise<LiveEditReceiptDto[]> {
+  return invoke<LiveEditReceiptDto[]>("list_live_edit_receipts", { taskId });
+}
+
+export async function getPendingLiveEdits(): Promise<PendingLiveEditDto[]> {
+  return invoke<PendingLiveEditDto[]>("get_pending_live_edits");
+}

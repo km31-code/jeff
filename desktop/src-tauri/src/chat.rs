@@ -7,6 +7,7 @@ use crate::{
     reasoning::ReasoningProvider,
     retrieval::build_task_context_pack,
     store::TaskStore,
+    user_model,
 };
 
 const GROUNDING_SYSTEM_PROMPT: &str = "You are Jeff, a task-focused assistant. Use only the provided context chunks, active-window title context, and explicitly selected-text context to answer. If the answer is not in context, explicitly say you don't know based on available materials. Be concise. One to three sentences unless the user asks for more. No filler phrases.";
@@ -48,7 +49,7 @@ pub fn send_message_for_task(
     let context_pack = build_task_context_pack(store, embeddings, task_id, clean_message)?;
     let user_prompt = build_user_prompt(clean_message, &context_pack);
 
-    let effective_system_prompt = build_system_prompt(active_context);
+    let effective_system_prompt = build_system_prompt(store, active_context);
     let assistant_response = reasoning.generate_response(&effective_system_prompt, &user_prompt)?;
     if is_cancelled() {
         return Ok(SendMessageResponseDto {
@@ -73,14 +74,29 @@ pub fn send_message_for_task(
     })
 }
 
-// builds the effective system prompt, prepending active window context when present.
-pub fn build_system_prompt(active_context: Option<&str>) -> String {
-    match active_context {
-        Some(ctx) if !ctx.is_empty() => {
-            format!("{ctx}\n\n{GROUNDING_SYSTEM_PROMPT}")
+/// builds the effective system prompt, prepending active window context and user
+/// profile injection when present. profile injection is gated on the privacy setting.
+pub fn build_system_prompt(store: &TaskStore, active_context: Option<&str>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // phase 23: profile injection (gated on privacy setting)
+    if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        if let Some(injection) = user_model::build_profile_injection(store) {
+            parts.push(injection);
         }
-        _ => GROUNDING_SYSTEM_PROMPT.to_string(),
     }
+
+    if let Some(ctx) = active_context {
+        if !ctx.is_empty() {
+            parts.push(ctx.to_string());
+        }
+    }
+
+    parts.push(GROUNDING_SYSTEM_PROMPT.to_string());
+    parts.join("\n\n")
 }
 
 pub fn build_user_prompt(message: &str, context_pack: &TaskContextPackDto) -> String {

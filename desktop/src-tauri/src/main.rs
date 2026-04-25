@@ -1,5 +1,6 @@
 mod ambient;
 mod artifact_parser;
+mod calendar;
 mod chat;
 mod chat_streaming;
 mod chunking;
@@ -28,9 +29,11 @@ mod store;
 mod streaming;
 mod subtask;
 mod typing_activity;
+mod user_model;
 mod voice;
 mod voice_naturalness;
 mod watcher;
+mod workload;
 mod workspace;
 
 use std::sync::Arc;
@@ -40,7 +43,7 @@ use providers::VoiceProvider;
 use reasoning::OpenAiReasoningProvider;
 use retrieval::default_embeddings_provider;
 use selection_capture::SelectionCaptureState;
-use state::{ContextState, JeffState};
+use state::{CalendarState, ContextState, JeffState};
 use store::TaskStore;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::ShortcutState;
@@ -129,6 +132,8 @@ fn main() {
                 .get_privacy_typing_activity_enabled()
                 .unwrap_or(true);
             app.manage(TypingActivityState::new(typing_enabled));
+            // phase 23: manage calendar state for EventKit polling.
+            app.manage(CalendarState::new());
 
             // phase 19: sync the macos SMAppService login-item registry with
             // the persisted preference. if registration fails, clear the
@@ -352,6 +357,71 @@ fn main() {
                 });
             }
 
+            // phase 23: calendar poll task (60-second interval).
+            // polls EventKit for the next upcoming event when the privacy gate
+            // is enabled and the OS permission has been granted.
+            {
+                let cal_poll_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+                        let quiet = cal_poll_handle
+                            .try_state::<AmbientState>()
+                            .map(|s| s.is_quiet_mode())
+                            .unwrap_or(false);
+                        if quiet {
+                            continue;
+                        }
+
+                        let cal_enabled = cal_poll_handle
+                            .try_state::<JeffState>()
+                            .and_then(|s| s.store.get_privacy_calendar_context_enabled().ok())
+                            .unwrap_or(false);
+
+                        if !cal_enabled {
+                            // clear stale event if feature is turned off mid-session
+                            if let Some(cs) = cal_poll_handle.try_state::<CalendarState>() {
+                                cs.update(None);
+                            }
+                            continue;
+                        }
+
+                        let next_event = calendar::fetch_next_event(8);
+
+                        if let Some(cs) = cal_poll_handle.try_state::<CalendarState>() {
+                            cs.update(next_event.clone());
+                        }
+
+                        use tauri::Emitter;
+                        let _ = cal_poll_handle.emit(
+                            "calendar://event-updated",
+                            serde_json::to_value(&next_event).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                });
+            }
+
+            // phase 23: stale-task notification check at startup
+            {
+                let stale_check_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    // give the app a few seconds to finish startup before checking
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    if let Some(jeff_state) = stale_check_handle.try_state::<JeffState>() {
+                        let quiet = stale_check_handle
+                            .try_state::<AmbientState>()
+                            .map(|s| s.is_quiet_mode())
+                            .unwrap_or(false);
+                        let _ = workload::check_stale_task_notifications(
+                            &jeff_state.store,
+                            &stale_check_handle,
+                            quiet,
+                        );
+                    }
+                });
+            }
+
             // phase 19: fire a one-time native notification on the very first
             // session so users who enabled launch-at-login know jeff is running
             // in the tray without needing to look for it.
@@ -486,6 +556,23 @@ fn main() {
             commands::get_selection_bridge_status,
             commands::capture_browser_selection,
             commands::set_tts_voice,
+            // phase 23: user profile
+            commands::get_user_profile_signals,
+            commands::add_quality_rubric,
+            commands::delete_quality_rubric,
+            commands::delete_user_profile_signal,
+            // phase 23: workload
+            commands::get_workload_summary,
+            commands::switch_active_task_from_companion,
+            // phase 23: calendar
+            commands::request_calendar_permission,
+            commands::get_calendar_permission_status,
+            commands::get_calendar_next_event,
+            // phase 23: live app actions
+            commands::approve_live_edit,
+            commands::reject_live_edit,
+            commands::list_live_edit_receipts,
+            commands::get_pending_live_edits,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Jeff desktop app");

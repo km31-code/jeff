@@ -479,6 +479,27 @@ impl TaskStore {
             "ALTER TABLE subtasks ADD COLUMN current_step INTEGER NOT NULL DEFAULT 0;",
         );
 
+        // phase 23: user profile memory + live edit receipts (idempotent)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS user_profile (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE IF NOT EXISTS live_edit_receipts (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                editor_surface TEXT NOT NULL,
+                document_title TEXT NOT NULL,
+                before_hash    TEXT NOT NULL,
+                after_hash     TEXT NOT NULL,
+                before_text    TEXT NOT NULL DEFAULT '',
+                after_text     TEXT NOT NULL DEFAULT '',
+                timestamp      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                status         TEXT NOT NULL DEFAULT 'pending_approval'
+            );",
+        )
+        .context("failed to create phase 23 tables")?;
+
         Ok(())
     }
 
@@ -3027,6 +3048,77 @@ impl TaskStore {
         Ok(value)
     }
 
+    // phase 23: workload helpers
+
+    /// count pending items for a task: pending file write proposals + running subtasks.
+    pub fn count_pending_items_for_task(&self, task_id: i64) -> Result<i64> {
+        let conn = self.connect()?;
+        let proposals: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM subtask_file_write_proposals
+                 WHERE task_id = ?1 AND status = 'pending_approval'",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let running: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM subtasks
+                 WHERE task_id = ?1 AND status IN ('pending', 'running')",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(proposals + running)
+    }
+
+    /// returns true if any speculative subtask (instruction_source='system')
+    /// has result_review_status = 'unreviewed' for the given task.
+    pub fn task_has_unreviewed_speculative_results(&self, task_id: i64) -> Result<bool> {
+        let conn = self.connect()?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM subtasks
+                 WHERE task_id = ?1
+                   AND instruction_source = 'system'
+                   AND result_review_status = 'unreviewed'
+                   AND status = 'completed'",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(count > 0)
+    }
+
+    // phase 23: returns (task_title, instruction_text) pairs for completed subtasks
+    // from tasks other than the given task_id, within the last `days` days.
+    // used for cross-task collision detection.
+    pub fn get_recent_cross_task_subtasks(
+        &self,
+        exclude_task_id: i64,
+        days: i64,
+    ) -> Result<Vec<(String, String)>> {
+        let conn = self.connect()?;
+        let cutoff = format!("-{days} days");
+        let mut stmt = conn.prepare(
+            "SELECT t.title, s.title || char(10) || s.description
+             FROM subtasks s
+             JOIN tasks t ON t.id = s.task_id
+             WHERE s.task_id != ?1
+               AND s.status = 'completed'
+               AND s.created_at > datetime('now', ?2)
+             ORDER BY s.created_at DESC
+             LIMIT 50",
+        )?;
+        let rows = stmt
+            .query_map(params![exclude_task_id, cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     pub fn record_proactive_trigger(
         &self,
         task_id: i64,
@@ -3096,6 +3188,158 @@ impl TaskStore {
             entries.push(row.context("failed to map proactive audit row")?);
         }
         Ok(entries)
+    }
+
+    // ---------------------------------------------------------------------
+    // phase 23: user profile
+    // ---------------------------------------------------------------------
+
+    pub fn get_profile_value(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.connect()?;
+        let val = conn
+            .query_row(
+                "SELECT value FROM user_profile WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to get profile value")?;
+        Ok(val)
+    }
+
+    pub fn set_profile_value(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO user_profile (key, value, updated_at)
+             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+             ON CONFLICT(key) DO UPDATE SET
+               value = excluded.value,
+               updated_at = excluded.updated_at",
+            params![key, value],
+        )
+        .context("failed to upsert profile value")?;
+        Ok(())
+    }
+
+    pub fn get_all_profile_signals(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare("SELECT key, value, updated_at FROM user_profile ORDER BY updated_at DESC")
+            .context("failed to prepare profile query")?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .context("failed to query user profile")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect profile rows")?;
+        Ok(rows)
+    }
+
+    pub fn delete_profile_signal(&self, key: &str) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute("DELETE FROM user_profile WHERE key = ?1", params![key])
+            .context("failed to delete profile signal")?;
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // phase 23: live edit receipts
+    // ---------------------------------------------------------------------
+
+    pub fn create_live_edit_receipt(
+        &self,
+        editor_surface: &str,
+        document_title: &str,
+        before_hash: &str,
+        after_hash: &str,
+        before_text: &str,
+        after_text: &str,
+    ) -> Result<i64> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO live_edit_receipts
+             (editor_surface, document_title, before_hash, after_hash, before_text, after_text)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![editor_surface, document_title, before_hash, after_hash, before_text, after_text],
+        )
+        .context("failed to create live edit receipt")?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn update_live_edit_status(
+        &self,
+        receipt_id: i64,
+        status: &str,
+    ) -> Result<crate::models::LiveEditReceiptDto> {
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE live_edit_receipts SET status = ?1 WHERE id = ?2",
+            params![status, receipt_id],
+        )
+        .context("failed to update live edit receipt status")?;
+        let receipt = conn
+            .query_row(
+                "SELECT id, editor_surface, document_title, before_hash, after_hash, timestamp, status
+                 FROM live_edit_receipts WHERE id = ?1",
+                params![receipt_id],
+                |row| {
+                    Ok(crate::models::LiveEditReceiptDto {
+                        id: row.get(0)?,
+                        editor_surface: row.get(1)?,
+                        document_title: row.get(2)?,
+                        before_hash: row.get(3)?,
+                        after_hash: row.get(4)?,
+                        timestamp: row.get(5)?,
+                        status: row.get(6)?,
+                    })
+                },
+            )
+            .context("failed to read updated live edit receipt")?;
+        Ok(receipt)
+    }
+
+    pub fn list_live_edit_receipts(&self) -> Result<Vec<crate::models::LiveEditReceiptDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, editor_surface, document_title, before_hash, after_hash, timestamp, status
+             FROM live_edit_receipts ORDER BY timestamp DESC LIMIT 100",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(crate::models::LiveEditReceiptDto {
+                    id: row.get(0)?,
+                    editor_surface: row.get(1)?,
+                    document_title: row.get(2)?,
+                    before_hash: row.get(3)?,
+                    after_hash: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    status: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect live edit receipts")?;
+        Ok(rows)
+    }
+
+    pub fn get_pending_live_edits(&self) -> Result<Vec<crate::models::PendingLiveEditDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, editor_surface, document_title, before_text, after_text, timestamp
+             FROM live_edit_receipts WHERE status = 'pending_approval' ORDER BY timestamp ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(crate::models::PendingLiveEditDto {
+                    receipt_id: row.get(0)?,
+                    editor_surface: row.get(1)?,
+                    document_title: row.get(2)?,
+                    before_text: row.get(3)?,
+                    after_text: row.get(4)?,
+                    timestamp: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect pending live edits")?;
+        Ok(rows)
     }
 
     // ---------------------------------------------------------------------
@@ -3811,7 +4055,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(count, 23, "expected 23 application tables after phase 16");
+        assert_eq!(count, 25, "expected 25 application tables after phase 23");
     }
 
     #[test]

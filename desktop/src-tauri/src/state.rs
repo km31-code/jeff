@@ -219,3 +219,44 @@ mod context_state_tests {
         assert!(!cs.should_nudge_for_switch("outline.md"));
     }
 }
+
+// ---- phase 23: calendar state -----------------------------------------------
+
+use std::time::Instant;
+
+use crate::models::CalendarEventDto;
+
+pub struct CalendarState {
+    inner: std::sync::Mutex<CalendarStateInner>,
+}
+
+struct CalendarStateInner {
+    pub next_event: Option<CalendarEventDto>,
+    pub last_polled: Option<Instant>,
+}
+
+impl CalendarState {
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(CalendarStateInner {
+                next_event: None,
+                last_polled: None,
+            }),
+        }
+    }
+
+    pub fn update(&self, event: Option<CalendarEventDto>) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.next_event = event;
+            g.last_polled = Some(Instant::now());
+        }
+    }
+
+    pub fn current(&self) -> Option<CalendarEventDto> {
+        self.inner.lock().ok()?.next_event.clone()
+    }
+
+    pub fn last_polled(&self) -> Option<Instant> {
+        self.inner.lock().ok()?.last_polled
+    }
+}

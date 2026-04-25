@@ -54,6 +54,77 @@ async function captureFromActiveTab() {
   }
 }
 
+// phase 23: poll for approval of a pending live edit and dispatch to the
+// active content script when approved. falls back to guided apply on rejection
+// or anchor mismatch.
+async function pollForLiveEditApproval(receiptId, beforeText, afterText, tabId, port) {
+  const MAX_POLLS = 40; // 20 seconds at 500ms intervals
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    try {
+      const resp = await fetch(`http://127.0.0.1:${port}/pending-approval/${receiptId}`);
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      if (data.status === "approved") {
+        // dispatch the apply command to the content script
+        chrome.tabs.sendMessage(tabId, {
+          type: "JEFF_APPLY_EDIT",
+          receiptId,
+          beforeText,
+          afterText,
+          port
+        });
+        return;
+      }
+      if (data.status === "rejected") {
+        // user declined — no action needed
+        return;
+      }
+      if (data.status === "fallback") {
+        // anchor drifted — guided apply fallback already handled by backend
+        return;
+      }
+    } catch (_) {
+      // network error, keep polling
+    }
+  }
+}
+
+// phase 23: handle a proposed live edit from the content script:
+// send it to the backend /apply-edit endpoint and start the approval poll.
+async function handleLiveEditProposal(proposal) {
+  const config = await getConfig();
+  if (!config.token) return;
+
+  const payload = {
+    token: config.token,
+    editor_surface: proposal.editorSurface || "unknown",
+    selection_anchor_hash: proposal.anchorHash,
+    before_text: proposal.beforeText,
+    after_text: proposal.afterText,
+    document_title: proposal.documentTitle || ""
+  };
+
+  const response = await fetch(`http://127.0.0.1:${config.port}/apply-edit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) return;
+
+  const data = await response.json();
+  if (data.status === "pending_approval" && data.receipt_id) {
+    pollForLiveEditApproval(
+      data.receipt_id,
+      proposal.beforeText,
+      proposal.afterText,
+      proposal.tabId,
+      config.port
+    );
+  }
+}
+
 chrome.action.onClicked.addListener(() => {
   captureFromActiveTab().catch((error) => {
     console.warn("[jeff-selection-capture]", error);
@@ -66,4 +137,18 @@ chrome.commands.onCommand.addListener((command) => {
       console.warn("[jeff-selection-capture]", error);
     });
   }
+});
+
+// phase 23: listen for live edit proposals from content scripts
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (!message) return false;
+  if (message.type === "JEFF_PROPOSE_LIVE_EDIT") {
+    handleLiveEditProposal({
+      ...message,
+      tabId: sender.tab?.id
+    }).catch((error) => {
+      console.warn("[jeff-live-edit]", error);
+    });
+  }
+  return false;
 });

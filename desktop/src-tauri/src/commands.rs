@@ -14,18 +14,19 @@ use crate::{
     message_kind::classify_user_message_kind,
     models::{
         ActiveWindowContextDto, ApiKeyValidationDto, ArtifactContentDto, ArtifactDto,
-        ArtifactVersionDto, BrowserSelectionCaptureRequestDto, ChatMessageDto,
-        CoworkingStatusDto, DataClearResultDto, DriftFlagDto, EventLogEntryDto,
-        FileWriteProposalDto, IntentClassificationDto, IntentLabel, IntentSlotsDto,
-        OnboardingStatusDto, OpenResourceDto, PrivacyCenterDashboardDto,
-        ProactiveAuditEntryDto, ProactiveEvaluationDto, RecentlyLearnedItemDto,
-        ReorientationDto, RetrievedChunkDto, RevisionApplyResultDto, RevisionProposalDto,
-        RevisionProposalResultDto, RevisionTargetDto, SelectionBridgeStatusDto,
-        SelectionCaptureIndicatorDto, SendMessageResponseDto, SessionModeStateDto,
-        SessionRestoreDto, SpeechSynthesisDto, SubTaskDto, SubTaskStepDto,
-        SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto,
-        SuggestionEvaluationDto, TaskContextPackDto, TaskDto, TaskSummaryDto,
-        TranscriptionResultDto, WatcherStatusDto, WorkspaceInfoDto, WriteAuditEntryDto,
+        ArtifactVersionDto, BrowserSelectionCaptureRequestDto, CalendarEventDto,
+        ChatMessageDto, CoworkingStatusDto, DataClearResultDto, DriftFlagDto,
+        EventLogEntryDto, FileWriteProposalDto, IntentClassificationDto, IntentLabel,
+        IntentSlotsDto, LiveEditReceiptDto, OnboardingStatusDto, OpenResourceDto,
+        PendingLiveEditDto, PrivacyCenterDashboardDto, ProactiveAuditEntryDto,
+        ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto,
+        RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto,
+        RevisionTargetDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
+        SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
+        SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto,
+        SuggestionDto, SuggestionEvaluationDto, TaskContextPackDto, TaskDto, TaskSummaryDto,
+        TranscriptionResultDto, UserProfileSignalDto, WatcherStatusDto, WorkloadSummaryDto,
+        WorkspaceInfoDto, WriteAuditEntryDto,
     },
     retrieval::{
         auto_ingest_file_for_task, build_task_context_pack, import_artifact_for_task,
@@ -47,6 +48,9 @@ use crate::{
         refine_subtask_and_start, reject_subtask_result as reject_subtask_result_by_id,
         suggest_subtask_for_task,
     },
+    similarity::cosine_similarity,
+    user_model,
+    workload,
 };
 
 fn map_jeff_error<E: ToString>(error: E) -> String {
@@ -761,9 +765,36 @@ pub fn list_task_pending_revisions(
 pub fn apply_revision(
     state: State<'_, JeffState>,
     revision_id: i64,
+    // optional: the user-edited text (if the user modified the suggestion before accepting).
+    // when provided and significantly different from the accepted content, we update style
+    // signals toward the user's edits rather than the raw suggestion.
+    user_edited_text: Option<String>,
 ) -> Result<RevisionApplyResultDto, String> {
-    apply_artifact_revision(&state.store, state.embeddings.as_ref(), revision_id)
-        .map_err(map_jeff_error)
+    let result =
+        apply_artifact_revision(&state.store, state.embeddings.as_ref(), revision_id)
+            .map_err(map_jeff_error)?;
+
+    // phase 23: update style signals from the accepted text
+    let accepted_text = &result.artifact_content.content;
+    if let Some(edited) = user_edited_text {
+        // compute word-level diff ratio to detect significant rewrites
+        let original_words = accepted_text.split_whitespace().count();
+        let edited_words = edited.split_whitespace().count();
+        let diff_ratio = if original_words == 0 {
+            1.0
+        } else {
+            (original_words.abs_diff(edited_words)) as f64 / original_words as f64
+        };
+        if diff_ratio > 0.30 {
+            let _ = user_model::record_revision_rewrite(&state.store, &edited);
+        } else {
+            let _ = user_model::record_revision_accepted(&state.store, &edited);
+        }
+    } else {
+        let _ = user_model::record_revision_accepted(&state.store, accepted_text);
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -829,7 +860,10 @@ pub fn accept_subtask_result(
     state: State<'_, JeffState>,
     subtask_id: i64,
 ) -> Result<SubTaskDto, String> {
-    accept_subtask_result_by_id(&state.store, subtask_id).map_err(map_jeff_error)
+    let result = accept_subtask_result_by_id(&state.store, subtask_id).map_err(map_jeff_error)?;
+    // phase 23: record delegation acceptance pattern
+    let _ = user_model::record_subtask_accepted(&state.store, &result.execution_type);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -837,7 +871,10 @@ pub fn reject_subtask_result(
     state: State<'_, JeffState>,
     subtask_id: i64,
 ) -> Result<SubTaskDto, String> {
-    reject_subtask_result_by_id(&state.store, subtask_id).map_err(map_jeff_error)
+    let result = reject_subtask_result_by_id(&state.store, subtask_id).map_err(map_jeff_error)?;
+    // phase 23: record delegation rejection pattern
+    let _ = user_model::record_subtask_rejected(&state.store, &result.execution_type);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1321,6 +1358,7 @@ pub fn trigger_task_resume(
         state.reasoning.as_ref(),
         task_id,
         active_ctx.as_deref(),
+        None, // calendar context injected at the command layer when CalendarState is available
     )
     .map_err(map_jeff_error)
 }
@@ -1392,7 +1430,10 @@ pub fn dismiss_proactive_trigger(
         .store
         .record_proactive_trigger(task_id, &trigger_type, true)
         .map(|_| ())
-        .map_err(map_jeff_error)
+        .map_err(map_jeff_error)?;
+    // phase 23: down-weight the trigger type so dismissals reduce future frequency
+    let _ = user_model::record_trigger_dismissed(&state.store, &trigger_type);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1400,7 +1441,11 @@ pub fn record_task_focus(state: State<'_, JeffState>, task_id: i64) -> Result<()
     state
         .store
         .record_task_focus(task_id)
-        .map_err(map_jeff_error)
+        .map_err(map_jeff_error)?;
+    // phase 23: update work-rhythm profile signal and check stale notifications
+    let _ = user_model::record_focus_hour(&state.store);
+    let _ = workload::check_stale_task_notifications_noop(&state.store);
+    Ok(())
 }
 
 // phase 16: richer parallel work commands ------------------------------------
@@ -2024,7 +2069,8 @@ pub fn clear_all_jeff_data(
 }
 
 #[tauri::command]
-pub fn start_subtask_chain(
+pub fn start_subtask_chain<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, JeffState>,
     task_id: i64,
     title: String,
@@ -2033,6 +2079,30 @@ pub fn start_subtask_chain(
     instruction_source: Option<String>,
 ) -> Result<SubTaskDto, String> {
     let source = instruction_source.unwrap_or_else(|| "text".to_string());
+
+    // phase 23: cross-task collision detection — emit a soft notice if a
+    // recently-completed subtask from another task is semantically similar.
+    let instruction = format!("{title}\n{description}");
+    if let Ok(embedding) = state.embeddings.embed_text(&instruction) {
+        if let Ok(recent) = state.store.get_recent_cross_task_subtasks(task_id, 30) {
+            for (task_title, hist_instruction) in recent {
+                if let Ok(hist_embedding) = state.embeddings.embed_text(&hist_instruction) {
+                    let score = cosine_similarity(&embedding, &hist_embedding);
+                    if score > 0.8 {
+                        let _ = app.emit(
+                            "subtask://collision-detected",
+                            serde_json::json!({
+                                "matching_task_title": task_title,
+                                "similarity_score": score
+                            }),
+                        );
+                        break; // emit at most one notice
+                    }
+                }
+            }
+        }
+    }
+
     create_chain_subtask_and_start(
         &state.store,
         state.embeddings.clone(),
@@ -2126,6 +2196,191 @@ pub fn get_session_restore_state(state: State<'_, JeffState>) -> Result<SessionR
         overlay_expanded,
         quiet_mode,
     })
+}
+
+// phase 23: user profile commands ----------------------------------------------
+
+#[tauri::command]
+pub fn get_user_profile_signals(
+    state: State<'_, JeffState>,
+) -> Result<Vec<UserProfileSignalDto>, String> {
+    let signals = user_model::get_readable_signals(&state.store).map_err(map_jeff_error)?;
+    Ok(signals
+        .into_iter()
+        .map(|s| UserProfileSignalDto {
+            key: s.key,
+            label: s.label,
+            value: s.value,
+            updated_at: s.updated_at,
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn add_quality_rubric(
+    state: State<'_, JeffState>,
+    text: String,
+) -> Result<Vec<UserProfileSignalDto>, String> {
+    user_model::add_quality_rubric(&state.store, text.trim()).map_err(map_jeff_error)?;
+    get_user_profile_signals(state)
+}
+
+#[tauri::command]
+pub fn delete_quality_rubric(
+    state: State<'_, JeffState>,
+    key: String,
+) -> Result<Vec<UserProfileSignalDto>, String> {
+    state
+        .store
+        .delete_profile_signal(&key)
+        .map_err(map_jeff_error)?;
+    get_user_profile_signals(state)
+}
+
+#[tauri::command]
+pub fn delete_user_profile_signal(
+    state: State<'_, JeffState>,
+    key: String,
+) -> Result<Vec<UserProfileSignalDto>, String> {
+    state
+        .store
+        .delete_profile_signal(&key)
+        .map_err(map_jeff_error)?;
+    get_user_profile_signals(state)
+}
+
+// phase 23: workload commands --------------------------------------------------
+
+#[tauri::command]
+pub fn get_workload_summary(
+    state: State<'_, JeffState>,
+) -> Result<WorkloadSummaryDto, String> {
+    workload::compute_workload_summary(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn switch_active_task_from_companion(
+    state: State<'_, JeffState>,
+    task_id: i64,
+) -> Result<TaskDto, String> {
+    // stop current watcher on any task, then switch active task and start watcher
+    let current = state.store.get_active_task().map_err(map_jeff_error)?;
+    if let Some(ref current_task) = current {
+        crate::watcher::stop_watcher(state.watcher.clone(), current_task.id);
+        crate::watcher::stop_clipboard_poll(state.watcher.clone(), current_task.id);
+    }
+
+    let new_task = state
+        .store
+        .set_active_task(task_id)
+        .map_err(map_jeff_error)?;
+
+    // restart workspace watcher on the new task's folder if one is configured
+    if !new_task.workspace_path.is_empty() {
+        let path = std::path::PathBuf::from(&new_task.workspace_path);
+        if path.exists() {
+            let _ = crate::watcher::start_watcher(
+                state.watcher.clone(),
+                new_task.id,
+                path,
+                state.store.clone(),
+                state.embeddings.clone(),
+            );
+        }
+    }
+
+    Ok(new_task)
+}
+
+// phase 23: calendar commands --------------------------------------------------
+
+#[tauri::command]
+pub fn request_calendar_permission() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::calendar::request_calendar_permission().map_err(map_jeff_error)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub fn get_calendar_permission_status() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        crate::calendar::get_calendar_permission_status()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "not_determined".to_string()
+    }
+}
+
+#[tauri::command]
+pub fn get_calendar_next_event(
+    state: State<'_, JeffState>,
+    calendar_state: State<'_, crate::state::CalendarState>,
+) -> Result<Option<CalendarEventDto>, String> {
+    let enabled = state
+        .store
+        .get_privacy_calendar_context_enabled()
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    Ok(calendar_state.current())
+}
+
+// phase 23: live app action commands ------------------------------------------
+
+#[tauri::command]
+pub fn approve_live_edit<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, JeffState>,
+    receipt_id: i64,
+) -> Result<LiveEditReceiptDto, String> {
+    let receipt = state
+        .store
+        .update_live_edit_status(receipt_id, "approved")
+        .map_err(map_jeff_error)?;
+    let _ = app.emit(
+        crate::selection_capture::EVENT_LIVE_ACTION_APPROVED,
+        serde_json::json!({ "receipt_id": receipt_id }),
+    );
+    Ok(receipt)
+}
+
+#[tauri::command]
+pub fn reject_live_edit(
+    state: State<'_, JeffState>,
+    receipt_id: i64,
+) -> Result<LiveEditReceiptDto, String> {
+    state
+        .store
+        .update_live_edit_status(receipt_id, "rejected")
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_live_edit_receipts(
+    state: State<'_, JeffState>,
+    task_id: i64,
+) -> Result<Vec<LiveEditReceiptDto>, String> {
+    // receipts are not per-task scoped in the DB, but we return all for now
+    let _ = task_id;
+    state.store.list_live_edit_receipts().map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn get_pending_live_edits(
+    state: State<'_, JeffState>,
+) -> Result<Vec<PendingLiveEditDto>, String> {
+    state
+        .store
+        .get_pending_live_edits()
+        .map_err(map_jeff_error)
 }
 
 #[cfg(test)]

@@ -538,3 +538,57 @@ pub struct SelectionBridgeStatusDto {
     pub port: u16,
     pub token: String,
 }
+
+// phase 23 DTOs
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserProfileSignalDto {
+    pub key: String,
+    pub label: String,
+    pub value: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkloadTaskDto {
+    pub id: i64,
+    pub title: String,
+    pub last_focused_at: Option<String>,
+    pub days_since_focus: Option<i64>,
+    pub pending_item_count: i64,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkloadSummaryDto {
+    pub active_tasks: Vec<WorkloadTaskDto>,
+    pub stale_tasks: Vec<WorkloadTaskDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CalendarEventDto {
+    pub title: String,
+    pub starts_at: String,
+    pub minutes_until: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LiveEditReceiptDto {
+    pub id: i64,
+    pub editor_surface: String,
+    pub document_title: String,
+    pub before_hash: String,
+    pub after_hash: String,
+    pub timestamp: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingLiveEditDto {
+    pub receipt_id: i64,
+    pub editor_surface: String,
+    pub document_title: String,
+    pub before_text: String,
+    pub after_text: String,
+    pub timestamp: String,
+}

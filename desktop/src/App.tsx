@@ -128,6 +128,21 @@ import {
   listProactiveTriggerAuditLog,
   clearActiveTaskData,
   clearAllJeffData,
+  // phase 23
+  UserProfileSignalDto,
+  getUserProfileSignals,
+  addQualityRubric,
+  deleteUserProfileSignal,
+  WorkloadSummaryDto,
+  WorkloadTaskDto,
+  getWorkloadSummary,
+  switchActiveTaskFromCompanion,
+  CalendarEventDto,
+  getCalendarNextEvent,
+  PendingLiveEditDto,
+  getPendingLiveEdits,
+  approveLiveEdit,
+  rejectLiveEdit,
 } from "./tauriClient";
 import {
   openOnboarding,
@@ -309,6 +324,22 @@ function App() {
   const [selectionCaptureIndicator, setSelectionCaptureIndicator] =
     useState<SelectionCaptureIndicatorDto | null>(null);
   const [selectionBridgeStatus, setSelectionBridgeStatus] = useState<SelectionBridgeStatusDto | null>(null);
+
+  // phase 23: personalization signals ("Jeff remembers" panel)
+  const [userProfileSignals, setUserProfileSignals] = useState<UserProfileSignalDto[]>([]);
+  const [jeffRemembersOpen, setJeffRemembersOpen] = useState(false);
+  const [rubricInput, setRubricInput] = useState("");
+
+  // phase 23: workload section
+  const [workloadSummary, setWorkloadSummary] = useState<WorkloadSummaryDto | null>(null);
+  const [workloadOpen, setWorkloadOpen] = useState(false);
+  const [collisionNotice, setCollisionNotice] = useState<string | null>(null);
+
+  // phase 23: calendar
+  const [calendarEvent, setCalendarEvent] = useState<CalendarEventDto | null>(null);
+
+  // phase 23: live app action pending edits
+  const [pendingLiveEdits, setPendingLiveEdits] = useState<PendingLiveEditDto[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [recording, setRecording] = useState(false);
@@ -859,6 +890,75 @@ function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [privacyDashboard?.typing_activity_enabled, activeTask?.id]);
+
+  // phase 23: load personalization signals + workload + calendar on mount and
+  // when the companion section opens.
+  useEffect(() => {
+    void getUserProfileSignals()
+      .then(setUserProfileSignals)
+      .catch(() => undefined);
+    void getWorkloadSummary()
+      .then(setWorkloadSummary)
+      .catch(() => undefined);
+    void getCalendarNextEvent()
+      .then(setCalendarEvent)
+      .catch(() => undefined);
+    void getPendingLiveEdits()
+      .then(setPendingLiveEdits)
+      .catch(() => undefined);
+  }, [activeTask?.id]);
+
+  // phase 23: listen for live_action events from the backend bridge
+  useEffect(() => {
+    const unlisten = listen<{ receipt_id: number }>(
+      "live_action://apply_requested",
+      (_event) => {
+        void getPendingLiveEdits()
+          .then(setPendingLiveEdits)
+          .catch(() => undefined);
+      }
+    );
+    const unlistenApproved = listen<{ receipt_id: number }>(
+      "live_action://approved",
+      (_event) => {
+        void getPendingLiveEdits()
+          .then(setPendingLiveEdits)
+          .catch(() => undefined);
+      }
+    );
+    const unlistenFallback = listen<{ receipt_id: number }>(
+      "live_action://fallback_triggered",
+      (_event) => {
+        void getPendingLiveEdits()
+          .then(setPendingLiveEdits)
+          .catch(() => undefined);
+      }
+    );
+    const unlistenCalendar = listen<CalendarEventDto | null>(
+      "calendar://event-updated",
+      (event) => {
+        setCalendarEvent(event.payload ?? null);
+      }
+    );
+    const unlistenCollision = listen<{ matching_task_title: string; similarity_score: number }>(
+      "subtask://collision-detected",
+      (event) => {
+        setCollisionNotice(
+          `Similar work exists in "${event.payload.matching_task_title}" — want me to pull it in?`
+        );
+      }
+    );
+    return () => {
+      void Promise.all([
+        unlisten,
+        unlistenApproved,
+        unlistenFallback,
+        unlistenCalendar,
+        unlistenCollision,
+      ]).then((unlisteners) => unlisteners.forEach((u) => u()));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function refreshShellState() {
     setLoading(true);
@@ -3365,6 +3465,11 @@ function App() {
                     {activeContext.app_name} &mdash; {activeContext.document_title}
                   </p>
                 ) : null}
+                {privacyDashboard?.calendar_context_enabled && calendarEvent && calendarEvent.minutes_until <= 480 ? (
+                  <p className="companion-context-line" data-testid="companion-calendar-event">
+                    Meeting in {calendarEvent.minutes_until} min &mdash; {calendarEvent.title}
+                  </p>
+                ) : null}
               </section>
             ) : null}
 
@@ -3709,6 +3814,225 @@ function App() {
                 ) : (
                   <p data-testid="privacy-center-loading">Loading privacy state.</p>
                 )}
+              </section>
+            ) : null}
+
+            {/* phase 23: cross-task collision notice */}
+            {collisionNotice ? (
+              <div className="companion-card" data-testid="collision-notice">
+                <p>{collisionNotice}</p>
+                <button type="button" onClick={() => setCollisionNotice(null)}>Dismiss</button>
+              </div>
+            ) : null}
+
+            {/* phase 23: pending live edit preview cards */}
+            {pendingLiveEdits.map((edit) => (
+              <div
+                key={edit.receipt_id}
+                className="companion-card"
+                data-testid="live-edit-preview-card"
+              >
+                <p>
+                  <strong>Apply edit in {edit.editor_surface}</strong> &mdash; {edit.document_title}
+                </p>
+                <div className="live-edit-diff" data-testid="live-edit-diff">
+                  <div className="live-edit-before">
+                    <p className="task-meta">Before</p>
+                    <pre>{edit.before_text}</pre>
+                  </div>
+                  <div className="live-edit-after">
+                    <p className="task-meta">After</p>
+                    <pre>{edit.after_text}</pre>
+                  </div>
+                </div>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    data-testid="live-edit-approve"
+                    onClick={() => {
+                      void approveLiveEdit(edit.receipt_id).then(() =>
+                        getPendingLiveEdits().then(setPendingLiveEdits)
+                      ).catch(() => undefined);
+                    }}
+                  >
+                    Apply
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="live-edit-reject"
+                    onClick={() => {
+                      void rejectLiveEdit(edit.receipt_id).then(() =>
+                        getPendingLiveEdits().then(setPendingLiveEdits)
+                      ).catch(() => undefined);
+                    }}
+                  >
+                    Reject
+                  </button>
+                </div>
+                <p className="task-meta" data-testid="guided-apply-fallback" style={{ display: "none" }}>
+                  The document changed &mdash; paste this manually where it belongs.
+                </p>
+              </div>
+            ))}
+
+            {/* phase 23: "Jeff remembers" panel */}
+            {privacyDashboard?.user_profile_memory_enabled !== false ? (
+              <section
+                className="settings-panel jeff-remembers-panel"
+                data-testid="jeff-remembers-panel"
+              >
+                {userProfileSignals.length > 0 ? (
+                  <>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        onClick={() => setJeffRemembersOpen((o) => !o)}
+                        data-testid="jeff-remembers-toggle"
+                      >
+                        {jeffRemembersOpen ? "Hide" : "Show"} what Jeff remembers
+                        {` (${userProfileSignals.length})`}
+                      </button>
+                      {jeffRemembersOpen ? (
+                        <button
+                          type="button"
+                          data-testid="jeff-remembers-clear-all"
+                          onClick={() => {
+                            void clearUserProfileMemory()
+                              .then(() => getUserProfileSignals().then(setUserProfileSignals))
+                              .then(() => setJeffRemembersOpen(false))
+                              .catch(() => undefined);
+                          }}
+                        >
+                          Clear all
+                        </button>
+                      ) : null}
+                    </div>
+                    {jeffRemembersOpen ? (
+                      <ul data-testid="jeff-remembers-list">
+                        {userProfileSignals.slice(0, 3).map((signal) => (
+                          <li key={signal.key} data-testid="jeff-remembers-signal">
+                            <span>{signal.label}</span>
+                            <button
+                              type="button"
+                              data-testid="jeff-remembers-delete-signal"
+                              onClick={() => {
+                                void deleteUserProfileSignal(signal.key)
+                                  .then(setUserProfileSignals)
+                                  .catch(() => undefined);
+                              }}
+                            >
+                              Remove
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </>
+                ) : null}
+                {jeffRemembersOpen ? (
+                  <div className="row-actions">
+                    <input
+                      type="text"
+                      value={rubricInput}
+                      onChange={(e) => setRubricInput(e.target.value)}
+                      placeholder='Quality note, e.g. "Always cite sources."'
+                      data-testid="rubric-input"
+                    />
+                    <button
+                      type="button"
+                      data-testid="rubric-add"
+                      onClick={() => {
+                        if (!rubricInput.trim()) return;
+                        void addQualityRubric(rubricInput.trim())
+                          .then(setUserProfileSignals)
+                          .then(() => setRubricInput(""))
+                          .catch(() => undefined);
+                      }}
+                    >
+                      Save
+                    </button>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+
+            {/* phase 23: "Your workload" section */}
+            {workloadSummary ? (
+              <section
+                className="settings-panel workload-panel"
+                data-testid="workload-panel"
+              >
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    onClick={() => setWorkloadOpen((o) => !o)}
+                    data-testid="workload-toggle"
+                  >
+                    {workloadOpen ? "Hide" : "Show"} your workload
+                    {workloadSummary.active_tasks.length > 0
+                      ? ` (${workloadSummary.active_tasks.length} active)`
+                      : ""}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="workload-refresh"
+                    onClick={() => {
+                      void getWorkloadSummary().then(setWorkloadSummary).catch(() => undefined);
+                    }}
+                  >
+                    Refresh
+                  </button>
+                </div>
+                {workloadOpen ? (
+                  <>
+                    {workloadSummary.active_tasks.length > 0 ? (
+                      <div data-testid="workload-active-tasks">
+                        <p className="task-meta">Active (last 14 days)</p>
+                        <ul>
+                          {workloadSummary.active_tasks.map((task) => (
+                            <li key={task.id} data-testid="workload-task-item">
+                              <button
+                                type="button"
+                                data-testid="workload-task-switch"
+                                onClick={() => {
+                                  void switchActiveTaskFromCompanion(task.id)
+                                    .then((t) => setActiveTaskState(t))
+                                    .then(() => getWorkloadSummary().then(setWorkloadSummary))
+                                    .catch(() => undefined);
+                                }}
+                              >
+                                {task.title}
+                              </button>
+                              {task.pending_item_count > 0 ? (
+                                <span className="task-meta"> — {task.pending_item_count} pending</span>
+                              ) : null}
+                              {task.days_since_focus !== null ? (
+                                <span className="task-meta">
+                                  {" "}&mdash; {task.days_since_focus === 0 ? "today" : `${task.days_since_focus}d ago`}
+                                </span>
+                              ) : null}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {workloadSummary.stale_tasks.length > 0 ? (
+                      <div data-testid="workload-stale-tasks">
+                        <p className="task-meta">Not worked on recently</p>
+                        <ul>
+                          {workloadSummary.stale_tasks.map((task) => (
+                            <li key={task.id} data-testid="workload-stale-task-item">
+                              <span>{task.title}</span>
+                              {task.days_since_focus !== null ? (
+                                <span className="task-meta"> &mdash; last worked on {task.days_since_focus} days ago</span>
+                              ) : null}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
               </section>
             ) : null}
 

@@ -26,6 +26,9 @@ pub const MAX_SELECTION_CHARS: usize = 12_000;
 pub const EVENT_SELECTION_CAPTURED: &str = "selection://captured";
 pub const EVENT_SELECTION_FAILED: &str = "selection://capture-failed";
 pub const EVENT_SELECTION_CLEARED: &str = "selection://cleared";
+// phase 23: live app action events
+pub const EVENT_LIVE_ACTION_APPROVED: &str = "live_action://approved";
+pub const EVENT_LIVE_ACTION_FALLBACK: &str = "live_action://fallback_triggered";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedSelection {
@@ -346,20 +349,86 @@ fn handle_bridge_stream<R: Runtime>(app: &AppHandle<R>, mut stream: TcpStream) {
         return;
     }
 
-    if request.method != "POST" || request.path != "/selection-capture" {
-        let _ = write_http_response(
-            &mut stream,
-            404,
-            &serde_json::json!({ "ok": false, "error": "unsupported selection bridge route" }),
-        );
-        return;
-    }
-
-    let parsed: BrowserSelectionCaptureRequestDto = match serde_json::from_slice(&request.body) {
-        Ok(value) => value,
-        Err(err) => {
+    match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/selection-capture") => {
+            let parsed: BrowserSelectionCaptureRequestDto =
+                match serde_json::from_slice(&request.body) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        let _ = write_http_response(
+                            &mut stream,
+                            400,
+                            &serde_json::json!({ "ok": false, "error": err.to_string() }),
+                        );
+                        return;
+                    }
+                };
+            match capture_browser_selection_request(app, parsed) {
+                Ok(indicator) => {
+                    let _ = write_http_response(
+                        &mut stream,
+                        200,
+                        &serde_json::json!({ "ok": true, "indicator": indicator }),
+                    );
+                }
+                Err(err) => {
+                    let _ = write_http_response(
+                        &mut stream,
+                        403,
+                        &serde_json::json!({ "ok": false, "error": err }),
+                    );
+                }
+            }
+        }
+        // phase 23: apply-edit — receives a proposed live edit from the extension,
+        // stores a pending receipt, and emits an approval-request event to the frontend.
+        ("POST", "/apply-edit") => {
+            handle_apply_edit_request(app, &mut stream, &request.body);
+        }
+        // phase 23: apply-fallback — called by the extension when anchor validation fails.
+        ("POST", "/apply-fallback") => {
+            handle_apply_fallback_request(app, &mut stream, &request.body);
+        }
+        // phase 23: long-poll endpoint — extension polls for approval of a receipt.
+        ("GET", path) if path.starts_with("/pending-approval/") => {
+            let receipt_id_str = path.trim_start_matches("/pending-approval/");
+            handle_pending_approval_poll(app, &mut stream, receipt_id_str);
+        }
+        _ => {
             let _ = write_http_response(
                 &mut stream,
+                404,
+                &serde_json::json!({ "ok": false, "error": "unsupported selection bridge route" }),
+            );
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ApplyEditRequest {
+    token: String,
+    editor_surface: String,
+    selection_anchor_hash: String,
+    before_text: String,
+    after_text: String,
+    document_title: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ApplyFallbackRequest {
+    receipt_id: i64,
+}
+
+fn handle_apply_edit_request<R: Runtime>(
+    app: &AppHandle<R>,
+    stream: &mut TcpStream,
+    body: &[u8],
+) {
+    let parsed: ApplyEditRequest = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = write_http_response(
+                stream,
                 400,
                 &serde_json::json!({ "ok": false, "error": err.to_string() }),
             );
@@ -367,22 +436,163 @@ fn handle_bridge_stream<R: Runtime>(app: &AppHandle<R>, mut stream: TcpStream) {
         }
     };
 
-    match capture_browser_selection_request(app, parsed) {
-        Ok(indicator) => {
-            let _ = write_http_response(
-                &mut stream,
-                200,
-                &serde_json::json!({ "ok": true, "indicator": indicator }),
-            );
+    // validate token
+    let state = match app.try_state::<SelectionCaptureState>() {
+        Some(s) => s,
+        None => {
+            let _ = write_http_response(stream, 500, &serde_json::json!({ "ok": false }));
+            return;
         }
+    };
+    if !state.token_matches(&parsed.token) {
+        let _ = write_http_response(
+            stream,
+            403,
+            &serde_json::json!({ "ok": false, "error": "invalid token" }),
+        );
+        return;
+    }
+
+    // compute after_hash
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    parsed.after_text.hash(&mut h);
+    let after_hash = format!("{:x}", h.finish());
+
+    // create receipt
+    let jeff_state = match app.try_state::<JeffState>() {
+        Some(s) => s,
+        None => {
+            let _ = write_http_response(stream, 500, &serde_json::json!({ "ok": false }));
+            return;
+        }
+    };
+    let receipt_id = match jeff_state.store.create_live_edit_receipt(
+        &parsed.editor_surface,
+        &parsed.document_title,
+        &parsed.selection_anchor_hash,
+        &after_hash,
+        &parsed.before_text,
+        &parsed.after_text,
+    ) {
+        Ok(id) => id,
         Err(err) => {
             let _ = write_http_response(
-                &mut stream,
-                403,
-                &serde_json::json!({ "ok": false, "error": err }),
+                stream,
+                500,
+                &serde_json::json!({ "ok": false, "error": err.to_string() }),
             );
+            return;
         }
+    };
+
+    // emit approval request to frontend
+    let _ = app.emit(
+        "live_action://apply_requested",
+        serde_json::json!({ "receipt_id": receipt_id }),
+    );
+
+    let _ = write_http_response(
+        stream,
+        200,
+        &serde_json::json!({ "status": "pending_approval", "receipt_id": receipt_id }),
+    );
+}
+
+fn handle_apply_fallback_request<R: Runtime>(
+    app: &AppHandle<R>,
+    stream: &mut TcpStream,
+    body: &[u8],
+) {
+    let parsed: ApplyFallbackRequest = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = write_http_response(
+                stream,
+                400,
+                &serde_json::json!({ "ok": false, "error": err.to_string() }),
+            );
+            return;
+        }
+    };
+
+    let jeff_state = match app.try_state::<JeffState>() {
+        Some(s) => s,
+        None => {
+            let _ = write_http_response(stream, 500, &serde_json::json!({ "ok": false }));
+            return;
+        }
+    };
+
+    let _ = jeff_state
+        .store
+        .update_live_edit_status(parsed.receipt_id, "fallback");
+    let _ = app.emit(
+        EVENT_LIVE_ACTION_FALLBACK,
+        serde_json::json!({ "receipt_id": parsed.receipt_id }),
+    );
+
+    let _ = write_http_response(stream, 200, &serde_json::json!({ "ok": true }));
+}
+
+fn handle_pending_approval_poll<R: Runtime>(
+    app: &AppHandle<R>,
+    stream: &mut TcpStream,
+    receipt_id_str: &str,
+) {
+    let receipt_id: i64 = match receipt_id_str.trim().parse() {
+        Ok(id) => id,
+        Err(_) => {
+            let _ = write_http_response(
+                stream,
+                400,
+                &serde_json::json!({ "ok": false, "error": "invalid receipt_id" }),
+            );
+            return;
+        }
+    };
+
+    let jeff_state = match app.try_state::<JeffState>() {
+        Some(s) => s,
+        None => {
+            let _ = write_http_response(stream, 500, &serde_json::json!({ "ok": false }));
+            return;
+        }
+    };
+
+    // poll up to 20 seconds (40 × 500ms)
+    for _ in 0..40 {
+        // check current status
+        if let Ok(receipts) = jeff_state.store.list_live_edit_receipts() {
+            if let Some(receipt) = receipts.iter().find(|r| r.id == receipt_id) {
+                if receipt.status == "approved" {
+                    let _ = write_http_response(
+                        stream,
+                        200,
+                        &serde_json::json!({ "status": "approved" }),
+                    );
+                    return;
+                }
+                if receipt.status == "rejected" || receipt.status == "fallback" {
+                    let _ = write_http_response(
+                        stream,
+                        200,
+                        &serde_json::json!({ "status": receipt.status }),
+                    );
+                    return;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
     }
+
+    // timed out — still pending
+    let _ = write_http_response(
+        stream,
+        200,
+        &serde_json::json!({ "status": "pending_approval" }),
+    );
 }
 
 struct HttpRequest {
