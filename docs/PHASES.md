@@ -24,7 +24,9 @@
 - Phase 19: complete (presence completion: launch at login + session restore)
 - Phase 20: complete (active window context, title-level)
 - Phase 21: complete (privacy and trust control center)
-- **Phase 22: complete (selection capture and voice naturalness)**
+- Phase 22: complete (selection capture and voice naturalness)
+- Phase 23: complete (live app actions, personalization, workload awareness, calendar context)
+- **Phase 24: complete (distribution + auto-update)**
 
 ## Phase 10 Exit Criteria
 
