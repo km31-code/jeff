@@ -435,7 +435,7 @@ Behavioral tests:
 
 ### M24.1 — Universal Binary + Signing + Notarization Config
 
-**Status: [ ]**
+**Status: [x]**
 
 Goal: configure the Tauri build for a signed, notarized universal binary.
 No actual signing keys committed — config structure only. CI secrets provide creds.
@@ -471,7 +471,7 @@ Verification:
 
 ### M24.2 — Auto-Update Implementation
 
-**Status: [ ]**
+**Status: [x]**
 
 Goal: Jeff silently checks for updates on launch and shows a native dialog.
 

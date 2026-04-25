@@ -26,6 +26,20 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["app", "dmg"],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "$(APPLE_SIGNING_IDENTITY)",
+      "providerShortName": "$(APPLE_PROVIDER_SHORT_NAME)",
+      "entitlements": "./entitlements.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/OWNER/REPO/releases/latest/download/latest.json"],
+      "dialog": false,
+      "pubkey": "TAURI_PUBLIC_KEY"
+    }
   }
 }

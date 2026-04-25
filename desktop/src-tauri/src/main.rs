@@ -62,6 +62,7 @@ fn main() {
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -422,6 +423,16 @@ fn main() {
                 });
             }
 
+            // phase 24: background update check — delayed 2 seconds so it
+            // does not compete with tray-ready or session-restore on startup.
+            {
+                let update_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    perform_update_check(update_handle).await;
+                });
+            }
+
             // phase 19: fire a one-time native notification on the very first
             // session so users who enabled launch-at-login know jeff is running
             // in the tray without needing to look for it.
@@ -576,6 +587,40 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Jeff desktop app");
+}
+
+// phase 24: silent background update check. runs after a short startup
+// delay so tray-ready and session-restore finish first. shows a native
+// dialog with Install / Later buttons; user-dismissed means next launch.
+async fn perform_update_check(app: tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    let update = match updater.check().await {
+        Ok(Some(u)) => u,
+        _ => return,
+    };
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let install = app
+        .dialog()
+        .message(format!(
+            "Jeff {} is available — install now?",
+            update.version
+        ))
+        .title("Jeff Update Available")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Install".into(),
+            "Later".into(),
+        ))
+        .blocking_show();
+    if install {
+        let _ = update
+            .download_and_install(|_chunk, _total| {}, || {})
+            .await;
+        app.restart();
+    }
 }
 
 fn document_is_off_task(document_title: &str, task_title: &str) -> bool {
