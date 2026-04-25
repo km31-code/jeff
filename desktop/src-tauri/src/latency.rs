@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub const STARTUP_BUDGET_MS: u64 = 2000;
 pub const FIRST_TOKEN_BUDGET_MS: u64 = 1000;
 pub const FIRST_AUDIO_BUDGET_MS: u64 = 400;
@@ -25,4 +27,3 @@ fn provider_instantiation_is_fast() {
         STARTUP_BUDGET_MS
     );
 }
-

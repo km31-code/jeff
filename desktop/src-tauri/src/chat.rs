@@ -9,7 +9,7 @@ use crate::{
     store::TaskStore,
 };
 
-const GROUNDING_SYSTEM_PROMPT: &str = "You are Jeff, a task-focused assistant. Use only the provided context chunks to answer. If the answer is not in context, explicitly say you don't know based on available materials.";
+const GROUNDING_SYSTEM_PROMPT: &str = "You are Jeff, a task-focused assistant. Use only the provided context chunks, active-window title context, and explicitly selected-text context to answer. If the answer is not in context, explicitly say you don't know based on available materials. Be concise. One to three sentences unless the user asks for more. No filler phrases.";
 
 pub fn send_message_for_task(
     store: &TaskStore,
@@ -18,6 +18,9 @@ pub fn send_message_for_task(
     task_id: i64,
     message: &str,
     message_source: &str,
+    // phase 20: optional active-window context injected as a system-prompt prefix.
+    // format: "User's active app: X. Document: Y." — under 30 tokens.
+    active_context: Option<&str>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<SendMessageResponseDto> {
     let clean_message = message.trim();
@@ -45,7 +48,8 @@ pub fn send_message_for_task(
     let context_pack = build_task_context_pack(store, embeddings, task_id, clean_message)?;
     let user_prompt = build_user_prompt(clean_message, &context_pack);
 
-    let assistant_response = reasoning.generate_response(GROUNDING_SYSTEM_PROMPT, &user_prompt)?;
+    let effective_system_prompt = build_system_prompt(active_context);
+    let assistant_response = reasoning.generate_response(&effective_system_prompt, &user_prompt)?;
     if is_cancelled() {
         return Ok(SendMessageResponseDto {
             assistant_response: String::new(),
@@ -67,6 +71,16 @@ pub fn send_message_for_task(
         retrieved_chunks: context_pack.retrieved_chunks,
         cancelled: false,
     })
+}
+
+// builds the effective system prompt, prepending active window context when present.
+pub fn build_system_prompt(active_context: Option<&str>) -> String {
+    match active_context {
+        Some(ctx) if !ctx.is_empty() => {
+            format!("{ctx}\n\n{GROUNDING_SYSTEM_PROMPT}")
+        }
+        _ => GROUNDING_SYSTEM_PROMPT.to_string(),
+    }
 }
 
 pub fn build_user_prompt(message: &str, context_pack: &TaskContextPackDto) -> String {
@@ -91,7 +105,7 @@ pub fn build_user_prompt(message: &str, context_pack: &TaskContextPackDto) -> St
     };
 
     format!(
-        "Task Summary:\n{}\n\nUser Query:\n{}\n\nRetrieved Context Chunks:\n{}\n\nAnswer strictly from retrieved context.",
+        "Task Summary:\n{}\n\nUser Query:\n{}\n\nRetrieved Context Chunks:\n{}\n\nAnswer strictly from retrieved context and any active-window title or selected-text context in the system prompt.",
         context_pack.task_summary, message, chunks_text
     )
 }
@@ -192,6 +206,7 @@ mod tests {
             task.id,
             "What are the primary source requirements?",
             "text",
+            None,
             || false,
         )
         .expect("failed to send message");
@@ -253,6 +268,7 @@ mod tests {
             task.id,
             "primary source requirement",
             "voice",
+            None,
             || true,
         )
         .expect("failed to send cancelled message");
@@ -302,6 +318,7 @@ mod tests {
             task.id,
             "What are the primary source requirements?",
             "voice",
+            None,
             || false,
         )
         .expect("failed to send voice direct question");

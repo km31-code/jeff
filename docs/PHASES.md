@@ -18,7 +18,13 @@
 - Phase 13: complete (workspace awareness)
 - Phase 14: complete (real intent understanding)
 - Phase 15: complete (proactive initiation)
-- **Phase 16: complete (richer parallel work)**
+- Phase 16: complete (richer parallel work)
+- Phase 17: complete (reliability and productization gate)
+- Phase 18: complete (first-run onboarding + secure key management)
+- Phase 19: complete (presence completion: launch at login + session restore)
+- Phase 20: complete (active window context, title-level)
+- Phase 21: complete (privacy and trust control center)
+- **Phase 22: complete (selection capture and voice naturalness)**
 
 ## Phase 10 Exit Criteria
 

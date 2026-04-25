@@ -40,14 +40,14 @@ impl OpenAiVoiceProvider {
         Ok(TranscriptionResultDto { text: cleaned })
     }
 
-    pub fn synthesize_speech(&self, text: &str) -> Result<SpeechSynthesisDto> {
+    pub fn synthesize_speech(&self, text: &str, voice: &str) -> Result<SpeechSynthesisDto> {
         let clean_text = text.trim();
         if clean_text.is_empty() {
             return Err(anyhow!("speech synthesis text cannot be empty"));
         }
 
         use crate::providers::TextToSpeechProvider;
-        let audio_bytes = self.tts.synthesize(clean_text)?;
+        let audio_bytes = self.tts.synthesize(clean_text, voice)?;
 
         Ok(SpeechSynthesisDto {
             audio_base64: BASE64.encode(audio_bytes),
@@ -65,7 +65,7 @@ impl crate::providers::VoiceProvider for OpenAiVoiceProvider {
         self.transcribe_audio_base64(audio_base64, mime_type)
     }
 
-    fn synthesize_speech(&self, text: &str) -> Result<SpeechSynthesisDto> {
-        self.synthesize_speech(text)
+    fn synthesize_speech(&self, text: &str, voice: &str) -> Result<SpeechSynthesisDto> {
+        self.synthesize_speech(text, voice)
     }
 }

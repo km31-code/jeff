@@ -109,6 +109,25 @@ import {
   rejectSubtaskFileWrite,
   listWriteAuditLog,
   startSubtaskChain,
+  ActiveWindowContextDto,
+  getActiveWindowContext,
+  getAccessibilityPermissionStatus,
+  requestAccessibilityPermission,
+  PrivacyCenterDashboardDto,
+  SelectionCaptureIndicatorDto,
+  SelectionBridgeStatusDto,
+  ProactiveAuditEntryDto,
+  DataClearResultDto,
+  getPrivacyCenterDashboard,
+  setPrivacySurfaceEnabled,
+  getSelectionCaptureIndicator,
+  getSelectionBridgeStatus,
+  dismissSelectionCapture,
+  setTtsVoice,
+  clearUserProfileMemory,
+  listProactiveTriggerAuditLog,
+  clearActiveTaskData,
+  clearAllJeffData,
 } from "./tauriClient";
 import {
   openOnboarding,
@@ -272,6 +291,25 @@ function App() {
   const [subtaskStepsById, setSubtaskStepsById] = useState<Record<number, SubTaskStepDto[]>>({});
   const [writeAuditLog, setWriteAuditLog] = useState<WriteAuditEntryDto[]>([]);
 
+  // phase 20: active window context and document-switch nudge
+  const [activeContext, setActiveContext] = useState<ActiveWindowContextDto | null>(null);
+  const [docSwitchBanner, setDocSwitchBanner] = useState<{ app_name: string; document_title: string } | null>(null);
+  const [accessibilityPermissionGranted, setAccessibilityPermissionGranted] = useState<boolean | null>(null);
+  const [accessibilityPromptDismissed, setAccessibilityPromptDismissed] = useState(false);
+  const docSwitchTimerRef = useRef<number | null>(null);
+
+  // phase 21: privacy and trust control center
+  const [privacyCenterOpen, setPrivacyCenterOpen] = useState(false);
+  const [privacyDashboard, setPrivacyDashboard] = useState<PrivacyCenterDashboardDto | null>(null);
+  const [proactiveAuditLog, setProactiveAuditLog] = useState<ProactiveAuditEntryDto[]>([]);
+  const [privacyActionMessage, setPrivacyActionMessage] = useState<string | null>(null);
+  const [clearAllConfirmation, setClearAllConfirmation] = useState("");
+
+  // phase 22: explicit selected-text capture indicator.
+  const [selectionCaptureIndicator, setSelectionCaptureIndicator] =
+    useState<SelectionCaptureIndicatorDto | null>(null);
+  const [selectionBridgeStatus, setSelectionBridgeStatus] = useState<SelectionBridgeStatusDto | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [recording, setRecording] = useState(false);
   const [recordingPurpose, setRecordingPurpose] = useState<RecordingPurpose>("chat");
@@ -296,6 +334,10 @@ function App() {
   const streamTtsQueueRef = useRef<Map<number, { audio: HTMLAudioElement; url: string }>>(new Map());
   const streamTtsNextPhraseRef = useRef<number>(1);
   const streamTtsCurrentRef = useRef<HTMLAudioElement | null>(null);
+  const streamTtsDelayTimerRef = useRef<number | null>(null);
+  const speechDelayTimerRef = useRef<number | null>(null);
+  const userIsTypingRef = useRef(false);
+  const typingRateTimestampsRef = useRef<number[]>([]);
 
   // phase 12: partial stt via web speech api.
   const speechRecognitionRef = useRef<PartialSpeechRecognition | null>(null);
@@ -305,6 +347,11 @@ function App() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingPurposeRef = useRef<RecordingPurpose>("chat");
+
+  const docSwitchTaskCandidates = useMemo(
+    () => tasks.filter((task) => !activeTask || task.id !== activeTask.id).slice(0, 3),
+    [activeTask, tasks]
+  );
 
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsObjectUrlRef = useRef<string | null>(null);
@@ -352,6 +399,14 @@ function App() {
       if (typingTimeoutRef.current !== null) {
         window.clearTimeout(typingTimeoutRef.current);
         typingTimeoutRef.current = null;
+      }
+      if (streamTtsDelayTimerRef.current !== null) {
+        window.clearTimeout(streamTtsDelayTimerRef.current);
+        streamTtsDelayTimerRef.current = null;
+      }
+      if (speechDelayTimerRef.current !== null) {
+        window.clearTimeout(speechDelayTimerRef.current);
+        speechDelayTimerRef.current = null;
       }
 
       stopSpeechPlayback();
@@ -665,6 +720,146 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTask?.id, viewMode, selectedArtifactId]);
 
+  // phase 20: subscribe to backend context://context-updated events.
+  // the backend emits this after every 3-second poll so no client-side interval
+  // is needed. fetch once on mount for the initial state before the first event.
+  useEffect(() => {
+    let cancelled = false;
+    void getActiveWindowContext()
+      .then((ctx) => { if (!cancelled) setActiveContext(ctx); })
+      .catch(() => undefined);
+    const unsub = listen<ActiveWindowContextDto | null>(
+      "context://context-updated",
+      (event) => {
+        if (!cancelled) setActiveContext(event.payload ?? null);
+      }
+    );
+    return () => {
+      cancelled = true;
+      unsub.then((fn) => fn()).catch(() => undefined);
+    };
+  }, []);
+
+  // phase 20: check accessibility status without showing the macOS prompt.
+  useEffect(() => {
+    let cancelled = false;
+    const refreshPermission = async () => {
+      try {
+        const granted = await getAccessibilityPermissionStatus();
+        if (!cancelled) {
+          setAccessibilityPermissionGranted(granted);
+        }
+      } catch {
+        if (!cancelled) {
+          setAccessibilityPermissionGranted(false);
+        }
+      }
+    };
+    void refreshPermission();
+    const id = window.setInterval(() => void refreshPermission(), 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // phase 20: subscribe to document-switch nudge events from the backend.
+  useEffect(() => {
+    const unsubscribe = listen<{ app_name: string; document_title: string }>(
+      "context://document-switch",
+      (event) => {
+        setDocSwitchBanner(event.payload);
+        if (docSwitchTimerRef.current !== null) {
+          window.clearTimeout(docSwitchTimerRef.current);
+        }
+        docSwitchTimerRef.current = window.setTimeout(() => {
+          setDocSwitchBanner(null);
+          docSwitchTimerRef.current = null;
+        }, 8000);
+      }
+    );
+    return () => {
+      unsubscribe.then((fn) => fn()).catch(() => undefined);
+      if (docSwitchTimerRef.current !== null) {
+        window.clearTimeout(docSwitchTimerRef.current);
+      }
+    };
+  }, []);
+
+  // phase 21: tray entry opens the same Privacy Center as companion settings.
+  useEffect(() => {
+    const unsubscribe = listen("privacy://open", () => {
+      setPrivacyCenterOpen(true);
+      void refreshPrivacyCenter();
+    });
+    return () => {
+      unsubscribe.then((fn) => fn()).catch(() => undefined);
+    };
+  }, []);
+
+  // phase 22: selection-capture state is event-driven but also loaded on start
+  // so an indicator survives frontend reload while the backend process lives.
+  useEffect(() => {
+    let cancelled = false;
+    void getSelectionCaptureIndicator()
+      .then((indicator) => {
+        if (!cancelled) setSelectionCaptureIndicator(indicator);
+      })
+      .catch(() => undefined);
+
+    const unlisteners = [
+      listen<SelectionCaptureIndicatorDto>("selection://captured", (event) => {
+        setSelectionCaptureIndicator(event.payload);
+      }),
+      listen<SelectionCaptureIndicatorDto>("selection://capture-failed", (event) => {
+        setSelectionCaptureIndicator(event.payload);
+      }),
+      listen("selection://cleared", () => {
+        setSelectionCaptureIndicator(null);
+      })
+    ];
+
+    return () => {
+      cancelled = true;
+      unlisteners.forEach((promise) => promise.then((fn) => fn()).catch(() => undefined));
+    };
+  }, []);
+
+  // phase 22: backend global monitor emits only a typing boolean. the frontend
+  // uses it exclusively to delay/suppress tts playback.
+  useEffect(() => {
+    const unsubscribe = listen<{
+      is_typing: boolean;
+      rate_only: boolean;
+      monitor_available: boolean;
+      last_error: string | null;
+    }>("typing://activity-changed", (event) => {
+      const isTyping =
+        privacyDashboard?.typing_activity_enabled !== false && Boolean(event.payload.is_typing);
+      userIsTypingRef.current = isTyping;
+      if (!isTyping) {
+        scheduleStreamTtsPlayback();
+      }
+    });
+    return () => {
+      unsubscribe.then((fn) => fn()).catch(() => undefined);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [privacyDashboard?.typing_activity_enabled]);
+
+  // phase 22 fallback for platforms where global key-rate events are not
+  // available: track only keydown timing inside Jeff's own UI.
+  useEffect(() => {
+    const onKeyDown = () => {
+      noteRateOnlyKeydown();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [privacyDashboard?.typing_activity_enabled, activeTask?.id]);
+
   async function refreshShellState() {
     setLoading(true);
     setErrorMessage(null);
@@ -695,6 +890,7 @@ function App() {
       } else {
         clearWorkspaceState();
       }
+      await refreshPrivacyCenter();
     } catch (error) {
       setErrorMessage(formatError(error));
     } finally {
@@ -708,6 +904,33 @@ function App() {
       setCoworkingStatus(status);
     } catch {
       // status refresh errors should not break interaction flow
+    }
+  }
+
+  async function refreshPrivacyCenter() {
+    try {
+      const [dashboard, bridgeStatus] = await Promise.all([
+        getPrivacyCenterDashboard(),
+        getSelectionBridgeStatus()
+      ]);
+      setPrivacyDashboard(dashboard);
+      setSelectionBridgeStatus(bridgeStatus);
+      setClipboardCaptureEnabled(dashboard.clipboard_capture_enabled);
+      setAccessibilityPermissionGranted(dashboard.accessibility_permission_status === "granted");
+      setQuietModeState(!dashboard.proactive_triggers_enabled);
+      if (dashboard.active_task_id !== null) {
+        const [triggerLog, writeLog] = await Promise.all([
+          listProactiveTriggerAuditLog(dashboard.active_task_id),
+          listWriteAuditLog(dashboard.active_task_id)
+        ]);
+        setProactiveAuditLog(triggerLog);
+        setWriteAuditLog(writeLog);
+      } else {
+        setProactiveAuditLog([]);
+        setWriteAuditLog([]);
+      }
+    } catch (error) {
+      setOperationError("Failed to refresh Privacy Center", error);
     }
   }
 
@@ -985,6 +1208,40 @@ function App() {
       await refreshCoworkingStatus();
       setFullWorkspaceVisible(false);
       setViewMode("workspace");
+    } catch (error) {
+      setErrorMessage(formatError(error));
+    }
+  }
+
+  async function handleStartTaskFromDocumentTitle(documentTitle: string) {
+    const title = deriveTaskTitleFromPrompt(documentTitle);
+    setErrorMessage(null);
+
+    try {
+      const created = await createTask(title);
+      const nextActiveTask = await setActiveTask(created.id);
+      setActiveTaskState(nextActiveTask);
+      setTasks(await listTasks());
+      await loadWorkspaceState(nextActiveTask.id);
+      await refreshCoworkingStatus();
+      setDocSwitchBanner(null);
+      setFullWorkspaceVisible(false);
+      setViewMode("workspace");
+    } catch (error) {
+      setErrorMessage(formatError(error));
+    }
+  }
+
+  async function handleRequestAccessibilityPermission() {
+    setErrorMessage(null);
+
+    try {
+      await requestAccessibilityPermission();
+      window.setTimeout(() => {
+        getAccessibilityPermissionStatus()
+          .then((granted) => setAccessibilityPermissionGranted(granted))
+          .catch(() => setAccessibilityPermissionGranted(false));
+      }, 800);
     } catch (error) {
       setErrorMessage(formatError(error));
     }
@@ -1483,6 +1740,7 @@ function App() {
       const status = await startWorkspaceWatcher(activeTask.id, folderPath);
       setWatcherStatus(status);
       activeWatcherTaskIdRef.current = activeTask.id;
+      await refreshPrivacyCenter();
     } catch (error) {
       setOperationError("Failed to start workspace watcher", error);
     }
@@ -1496,6 +1754,7 @@ function App() {
       if (activeWatcherTaskIdRef.current === activeTask.id) {
         activeWatcherTaskIdRef.current = null;
       }
+      await refreshPrivacyCenter();
     } catch (error) {
       setOperationError("Failed to stop workspace watcher", error);
     }
@@ -1507,8 +1766,96 @@ function App() {
     try {
       await setClipboardCapture(activeTask.id, next);
       setClipboardCaptureEnabled(next);
+      await refreshPrivacyCenter();
     } catch (error) {
       setOperationError("Failed to update clipboard capture setting", error);
+    }
+  }
+
+  async function handleOpenPrivacyCenter() {
+    setPrivacyCenterOpen(true);
+    setPrivacyActionMessage(null);
+    await refreshPrivacyCenter();
+  }
+
+  async function handleTogglePrivacySurface(surface: string, enabled: boolean) {
+    try {
+      const dashboard = await setPrivacySurfaceEnabled(surface, enabled);
+      setPrivacyDashboard(dashboard);
+      setClipboardCaptureEnabled(dashboard.clipboard_capture_enabled);
+      setQuietModeState(!dashboard.proactive_triggers_enabled);
+      if (!dashboard.typing_activity_enabled) {
+        userIsTypingRef.current = false;
+      }
+      if (dashboard.active_task_id !== null) {
+        const [triggerLog, writeLog] = await Promise.all([
+          listProactiveTriggerAuditLog(dashboard.active_task_id),
+          listWriteAuditLog(dashboard.active_task_id)
+        ]);
+        setProactiveAuditLog(triggerLog);
+        setWriteAuditLog(writeLog);
+      }
+    } catch (error) {
+      setOperationError("Failed to update privacy setting", error);
+    }
+  }
+
+  async function handleSetTtsVoice(voice: string) {
+    try {
+      const dashboard = await setTtsVoice(voice);
+      setPrivacyDashboard(dashboard);
+    } catch (error) {
+      setOperationError("Failed to update Jeff's voice", error);
+    }
+  }
+
+  async function handleDismissSelectionCapture() {
+    try {
+      await dismissSelectionCapture();
+      setSelectionCaptureIndicator(null);
+    } catch (error) {
+      setOperationError("Failed to dismiss captured selection", error);
+    }
+  }
+
+  async function handleClearUserProfileMemory() {
+    try {
+      const dashboard = await clearUserProfileMemory();
+      setPrivacyDashboard(dashboard);
+      setPrivacyActionMessage("User profile memory cleared.");
+    } catch (error) {
+      setOperationError("Failed to clear user profile memory", error);
+    }
+  }
+
+  async function handleClearActiveTaskData() {
+    try {
+      const result: DataClearResultDto = await clearActiveTaskData();
+      setPrivacyActionMessage(result.message);
+      setSelectionCaptureIndicator(null);
+      await refreshShellState();
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to clear active task data", error);
+    }
+  }
+
+  async function handleClearAllJeffData() {
+    if (clearAllConfirmation.trim() !== "CLEAR JEFF") {
+      setPrivacyActionMessage("Type CLEAR JEFF to confirm clearing all data.");
+      return;
+    }
+
+    try {
+      const result: DataClearResultDto = await clearAllJeffData();
+      setPrivacyActionMessage(result.message);
+      setClearAllConfirmation("");
+      setPrivacyCenterOpen(false);
+      setSelectionCaptureIndicator(null);
+      await refreshShellState();
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to clear all Jeff data", error);
     }
   }
 
@@ -1544,6 +1891,7 @@ function App() {
     try {
       await setQuietMode(next);
       setQuietModeState(next);
+      await refreshPrivacyCenter();
     } catch {
       // non-fatal
     }
@@ -2060,6 +2408,12 @@ function App() {
 
   async function startSpeechPlayback(text: string, requestId: number) {
     try {
+      const shouldPlay = await waitForSpeechPlaybackSlot(requestId);
+      if (!shouldPlay) {
+        updateTrayStatus("idle");
+        return;
+      }
+
       const speech = await synthesizeSpeech(text);
       if (requestId !== sendRequestIdRef.current) {
         return;
@@ -2101,7 +2455,46 @@ function App() {
     }
   }
 
+  function waitForSpeechPlaybackSlot(requestId: number): Promise<boolean> {
+    if (!userIsTypingRef.current) {
+      return Promise.resolve(true);
+    }
+
+    if (speechDelayTimerRef.current !== null) {
+      window.clearTimeout(speechDelayTimerRef.current);
+      speechDelayTimerRef.current = null;
+    }
+
+    const startedAt = Date.now();
+    return new Promise((resolve) => {
+      const check = () => {
+        if (requestId !== sendRequestIdRef.current) {
+          speechDelayTimerRef.current = null;
+          resolve(false);
+          return;
+        }
+        if (!userIsTypingRef.current) {
+          speechDelayTimerRef.current = null;
+          resolve(true);
+          return;
+        }
+        if (Date.now() - startedAt >= 3000) {
+          speechDelayTimerRef.current = null;
+          resolve(false);
+          return;
+        }
+        speechDelayTimerRef.current = window.setTimeout(check, 100);
+      };
+      speechDelayTimerRef.current = window.setTimeout(check, 100);
+    });
+  }
+
   function stopSpeechPlayback() {
+    if (speechDelayTimerRef.current !== null) {
+      window.clearTimeout(speechDelayTimerRef.current);
+      speechDelayTimerRef.current = null;
+    }
+
     if (ttsAudioRef.current) {
       const isJsDomRuntime =
         typeof navigator !== "undefined" &&
@@ -2134,6 +2527,25 @@ function App() {
   // attempt to play the next queued streaming tts phrase in phrase_id order.
   // called each time a new chunk arrives and each time a phrase finishes.
   function scheduleStreamTtsPlayback() {
+    if (userIsTypingRef.current) {
+      if (streamTtsDelayTimerRef.current === null) {
+        streamTtsDelayTimerRef.current = window.setTimeout(() => {
+          streamTtsDelayTimerRef.current = null;
+          if (userIsTypingRef.current) {
+            discardStreamingTtsForTextOnly();
+          } else {
+            scheduleStreamTtsPlayback();
+          }
+        }, 3000);
+      }
+      return;
+    }
+
+    if (streamTtsDelayTimerRef.current !== null) {
+      window.clearTimeout(streamTtsDelayTimerRef.current);
+      streamTtsDelayTimerRef.current = null;
+    }
+
     if (streamTtsCurrentRef.current !== null) {
       // a phrase is already playing; it will call this on end.
       return;
@@ -2191,9 +2603,34 @@ function App() {
     });
   }
 
+  function discardStreamingTtsForTextOnly() {
+    for (const { audio, url } of streamTtsQueueRef.current.values()) {
+      try {
+        audio.pause();
+      } catch {
+        // ignore
+      }
+      if (typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(url);
+      }
+    }
+    streamTtsQueueRef.current.clear();
+    streamTtsNextPhraseRef.current = 1;
+    ttsActiveTurnIdRef.current = null;
+    void setAssistantSpeaking(false)
+      .then((status) => setCoworkingStatus(status))
+      .catch(() => undefined);
+    updateTrayStatus("idle");
+  }
+
   // immediately stop all streaming tts playback and drain the queue.
   // called on barge-in and before any new streaming turn starts.
   function stopStreamingTtsPlayback() {
+    if (streamTtsDelayTimerRef.current !== null) {
+      window.clearTimeout(streamTtsDelayTimerRef.current);
+      streamTtsDelayTimerRef.current = null;
+    }
+
     if (streamTtsCurrentRef.current) {
       try {
         streamTtsCurrentRef.current.pause();
@@ -2307,9 +2744,47 @@ function App() {
       typingTimeoutRef.current = null;
     }
 
-    void setUserTyping(false)
+    setTypingActivity(false);
+  }
+
+  function setTypingActivity(isTyping: boolean) {
+    const allowed = privacyDashboard?.typing_activity_enabled !== false;
+    const next = isTyping && allowed;
+    userIsTypingRef.current = next;
+    if (!next) {
+      typingRateTimestampsRef.current = [];
+    }
+
+    void setUserTyping(next)
       .then((status) => setCoworkingStatus(status))
       .catch(() => undefined);
+
+    if (!next) {
+      scheduleStreamTtsPlayback();
+    }
+  }
+
+  function noteRateOnlyKeydown() {
+    if (!activeTask || privacyDashboard?.typing_activity_enabled === false) {
+      return;
+    }
+
+    const now = Date.now();
+    typingRateTimestampsRef.current = [...typingRateTimestampsRef.current, now].filter(
+      (timestamp) => now - timestamp <= 2000
+    );
+
+    if (typingRateTimestampsRef.current.length > 1) {
+      setTypingActivity(true);
+    }
+
+    if (typingTimeoutRef.current !== null) {
+      window.clearTimeout(typingTimeoutRef.current);
+    }
+    typingTimeoutRef.current = window.setTimeout(() => {
+      typingTimeoutRef.current = null;
+      setTypingActivity(false);
+    }, 2000);
   }
 
   function handleChatInputChange(value: string) {
@@ -2324,15 +2799,11 @@ function App() {
       typingTimeoutRef.current = null;
     }
 
-    void setUserTyping(true)
-      .then((status) => setCoworkingStatus(status))
-      .catch(() => undefined);
+    setTypingActivity(true);
 
     typingTimeoutRef.current = window.setTimeout(() => {
-      void setUserTyping(false)
-        .then((status) => setCoworkingStatus(status))
-        .catch(() => undefined);
       typingTimeoutRef.current = null;
+      setTypingActivity(false);
     }, 1200);
   }
 
@@ -2375,7 +2846,17 @@ function App() {
             </button>
             <button onClick={() => setViewMode("home")}>Back to Home</button>
           </div>
-        ) : null}
+        ) : (
+          <div className="row-actions">
+            <button
+              type="button"
+              onClick={() => void handleOpenPrivacyCenter()}
+              data-testid="privacy-center-open-home"
+            >
+              What Jeff knows
+            </button>
+          </div>
+        )}
       </header>
 
       <section className="panel status-panel" data-testid="status-indicator">
@@ -2385,6 +2866,36 @@ function App() {
           {coworkingStatus?.state === "speaking" ? " • Jeff is speaking" : ""}
         </p>
       </section>
+
+      {selectionCaptureIndicator ? (
+        <section
+          className={`panel selection-capture-panel ${
+            selectionCaptureIndicator.status === "failed" ? "selection-capture-panel-error" : ""
+          }`}
+          data-testid="selection-capture-indicator"
+        >
+          <div className="row-actions">
+            <p>
+              <strong>
+                {selectionCaptureIndicator.status === "captured"
+                  ? `Captured ${selectionCaptureIndicator.word_count} words from ${selectionCaptureIndicator.app_name}`
+                  : selectionCaptureIndicator.message}
+              </strong>
+              {selectionCaptureIndicator.status === "captured" &&
+              selectionCaptureIndicator.document_title ? (
+                <span> • {selectionCaptureIndicator.document_title}</span>
+              ) : null}
+            </p>
+            <button
+              type="button"
+              onClick={() => void handleDismissSelectionCapture()}
+              data-testid="selection-capture-dismiss"
+            >
+              Dismiss
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       {viewMode === "home" ? (
         <section className="panel" data-testid="home-resume-screen">
@@ -2837,9 +3348,23 @@ function App() {
                   >
                     {quietMode ? "[Q]" : "[q]"}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleOpenPrivacyCenter()}
+                    data-testid="privacy-center-open"
+                  >
+                    What Jeff knows
+                  </button>
                 </div>
                 <p>{buildCompanionGreeting(activeTask, sessionModeState, artifacts)}</p>
                 <p data-testid="companion-route-hint">Last routed intent: {lastRoutedIntent}</p>
+                {privacyDashboard?.active_window_context_enabled !== false &&
+                activeContext &&
+                activeContext.document_title ? (
+                  <p className="companion-context-line" data-testid="companion-active-context">
+                    {activeContext.app_name} &mdash; {activeContext.document_title}
+                  </p>
+                ) : null}
               </section>
             ) : null}
 
@@ -2863,6 +3388,29 @@ function App() {
               </div>
             ) : null}
 
+            {!fullWorkspaceVisible &&
+            onboardingStatus?.onboarding_complete &&
+            privacyDashboard?.active_window_context_enabled !== false &&
+            accessibilityPermissionGranted === false &&
+            !accessibilityPromptDismissed &&
+            !activeContext ? (
+              <div className="companion-card" data-testid="accessibility-context-prompt">
+                <p>Jeff needs accessibility permission to know which document you have open.</p>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    onClick={() => void handleRequestAccessibilityPermission()}
+                    data-testid="request-accessibility-permission"
+                  >
+                    Enable
+                  </button>
+                  <button type="button" onClick={() => setAccessibilityPromptDismissed(true)}>
+                    Not now
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
             {reorientationBanner ? (
               <div className="companion-card" data-testid="reorientation-banner">
                 <p>{reorientationBanner}</p>
@@ -2879,6 +3427,289 @@ function App() {
                   Got it
                 </button>
               </div>
+            ) : null}
+
+            {docSwitchBanner ? (
+              <div className="companion-card" data-testid="doc-switch-banner">
+                <p>
+                  You switched to {docSwitchBanner.document_title}. Want to start or switch tasks?
+                </p>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    onClick={() => void handleStartTaskFromDocumentTitle(docSwitchBanner.document_title)}
+                    data-testid="doc-switch-start-task"
+                  >
+                    Start task
+                  </button>
+                  {docSwitchTaskCandidates.map((task) => (
+                    <button
+                      type="button"
+                      key={task.id}
+                      onClick={() => {
+                        setDocSwitchBanner(null);
+                        void handleSetActiveTask(task.id);
+                      }}
+                    >
+                      Switch to {task.title}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setDocSwitchBanner(null)}
+                    data-testid="doc-switch-dismiss"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {privacyCenterOpen ? (
+              <section className="settings-panel privacy-center-panel" data-testid="privacy-center-panel">
+                <div className="row-actions">
+                  <h3>What Jeff knows</h3>
+                  <button type="button" onClick={() => void refreshPrivacyCenter()} data-testid="privacy-center-refresh">
+                    Refresh
+                  </button>
+                  <button type="button" onClick={() => setPrivacyCenterOpen(false)} data-testid="privacy-center-close">
+                    Close
+                  </button>
+                </div>
+
+                {privacyActionMessage ? (
+                  <p data-testid="privacy-action-message">{privacyActionMessage}</p>
+                ) : null}
+
+                {privacyDashboard ? (
+                  <>
+                    <ul className="compact-list privacy-surface-list" data-testid="privacy-surface-list">
+                      <li data-testid="privacy-surface-workspace">
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={privacyDashboard.workspace_watcher_enabled}
+                            onChange={(event) =>
+                              void handleTogglePrivacySurface("workspace_watcher", event.target.checked)
+                            }
+                            data-testid="privacy-toggle-workspace-watcher"
+                          />
+                          Workspace watcher
+                        </label>
+                        <p className="task-meta">
+                          {privacyDashboard.workspace_folder_path ?? "No folder set"};{" "}
+                          {privacyDashboard.workspace_watched_file_count} files known;{" "}
+                          {privacyDashboard.workspace_watcher_running ? "running" : "stopped"}
+                        </p>
+                      </li>
+
+                      <li data-testid="privacy-surface-clipboard">
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={privacyDashboard.clipboard_capture_enabled}
+                            onChange={(event) =>
+                              void handleTogglePrivacySurface("clipboard_capture", event.target.checked)
+                            }
+                            data-testid="privacy-toggle-clipboard-capture"
+                          />
+                          Clipboard capture
+                        </label>
+                        <p className="task-meta">{privacyDashboard.clipboard_capture_reminder}</p>
+                      </li>
+
+                      <li data-testid="privacy-surface-active-window">
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={privacyDashboard.active_window_context_enabled}
+                            onChange={(event) =>
+                              void handleTogglePrivacySurface("active_window_context", event.target.checked)
+                            }
+                            data-testid="privacy-toggle-active-window-context"
+                          />
+                          Active window context
+                        </label>
+                        <p className="task-meta">
+                          Accessibility permission: {privacyDashboard.accessibility_permission_status}
+                        </p>
+                      </li>
+
+                      <li data-testid="privacy-surface-selection-capture">
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={privacyDashboard.selection_capture_enabled}
+                            onChange={(event) =>
+                              void handleTogglePrivacySurface("selection_capture", event.target.checked)
+                            }
+                            data-testid="privacy-toggle-selection-capture"
+                          />
+                          Selection capture
+                        </label>
+                        <p className="task-meta">Only captures selected text after the capture hotkey or bridge action.</p>
+                        {selectionBridgeStatus ? (
+                          <p className="task-meta" data-testid="selection-bridge-status">
+                            Browser bridge: 127.0.0.1:{selectionBridgeStatus.port}; token{" "}
+                            <code>{selectionBridgeStatus.token}</code>
+                          </p>
+                        ) : null}
+                      </li>
+
+                      <li data-testid="privacy-surface-typing-activity">
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={privacyDashboard.typing_activity_enabled}
+                            onChange={(event) =>
+                              void handleTogglePrivacySurface("typing_activity", event.target.checked)
+                            }
+                            data-testid="privacy-toggle-typing-activity"
+                          />
+                          Typing activity
+                        </label>
+                        <p className="task-meta">Rate-only; Jeff stores no key values or typed text.</p>
+                      </li>
+
+                      <li data-testid="privacy-surface-proactive">
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={privacyDashboard.proactive_triggers_enabled}
+                            onChange={(event) =>
+                              void handleTogglePrivacySurface("proactive_triggers", event.target.checked)
+                            }
+                            data-testid="privacy-toggle-proactive-triggers"
+                          />
+                          Proactive triggers
+                        </label>
+                        <p className="task-meta">Equivalent to quiet mode for proactive surfaces.</p>
+                      </li>
+
+                      <li data-testid="privacy-surface-profile">
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={privacyDashboard.user_profile_memory_enabled}
+                            onChange={(event) =>
+                              void handleTogglePrivacySurface("user_profile_memory", event.target.checked)
+                            }
+                            data-testid="privacy-toggle-user-profile-memory"
+                          />
+                          User profile memory
+                        </label>
+                        <p className="task-meta">{privacyDashboard.user_profile_signal_count} signals stored.</p>
+                        <button
+                          type="button"
+                          onClick={() => void handleClearUserProfileMemory()}
+                          data-testid="privacy-clear-user-profile"
+                        >
+                          Clear memory
+                        </button>
+                      </li>
+
+                      <li data-testid="privacy-surface-calendar">
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={privacyDashboard.calendar_context_enabled}
+                            onChange={(event) =>
+                              void handleTogglePrivacySurface("calendar_context", event.target.checked)
+                            }
+                            data-testid="privacy-toggle-calendar-context"
+                          />
+                          Calendar context
+                        </label>
+                        <p className="task-meta">Permission: {privacyDashboard.calendar_permission_status}</p>
+                      </li>
+
+                      <li data-testid="privacy-surface-voice">
+                        <label className="toggle-row">
+                          <span>Jeff voice</span>
+                          <select
+                            value={privacyDashboard.tts_voice}
+                            onChange={(event) => void handleSetTtsVoice(event.target.value)}
+                            data-testid="tts-voice-select"
+                          >
+                            {privacyDashboard.available_tts_voices.map((voice) => (
+                              <option key={voice} value={voice}>
+                                {voice}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <p className="task-meta">Takes effect on the next spoken response.</p>
+                      </li>
+                    </ul>
+
+                    <h4 className="compact-heading">Audit</h4>
+                    {activeTask ? (
+                      <>
+                        <p className="task-meta">Write decisions</p>
+                        {writeAuditLog.length === 0 ? (
+                          <p data-testid="privacy-write-audit-empty">No write decisions for this task.</p>
+                        ) : (
+                          <ul className="compact-list" data-testid="privacy-write-audit-list">
+                            {writeAuditLog.map((entry) => (
+                              <li key={`privacy-write-${entry.id}`}>
+                                {entry.action} {entry.proposed_path} at {entry.resolved_at}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+
+                        <p className="task-meta">Proactive triggers</p>
+                        {proactiveAuditLog.length === 0 ? (
+                          <p data-testid="privacy-proactive-audit-empty">No proactive triggers for this task.</p>
+                        ) : (
+                          <ul className="compact-list" data-testid="privacy-proactive-audit-list">
+                            {proactiveAuditLog.map((entry) => (
+                              <li key={`privacy-trigger-${entry.id}`}>
+                                {entry.trigger_type} at {entry.fired_at}{" "}
+                                {entry.suppressed ? "(suppressed)" : "(surfaced)"}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </>
+                    ) : (
+                      <p data-testid="privacy-audit-no-task">No active task, so there is no task audit yet.</p>
+                    )}
+
+                    <h4 className="compact-heading">Data controls</h4>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        onClick={() => void handleClearActiveTaskData()}
+                        disabled={!activeTask}
+                        data-testid="privacy-clear-active-task-data"
+                      >
+                        Clear active task data
+                      </button>
+                    </div>
+
+                    <label className="toggle-row">
+                      <span>Type CLEAR JEFF to clear all Jeff data</span>
+                      <input
+                        type="text"
+                        value={clearAllConfirmation}
+                        onChange={(event) => setClearAllConfirmation(event.target.value)}
+                        data-testid="privacy-clear-all-confirmation"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => void handleClearAllJeffData()}
+                      disabled={clearAllConfirmation.trim() !== "CLEAR JEFF"}
+                      data-testid="privacy-clear-all-data"
+                    >
+                      Clear all Jeff data
+                    </button>
+                  </>
+                ) : (
+                  <p data-testid="privacy-center-loading">Loading privacy state.</p>
+                )}
+              </section>
             ) : null}
 
             <section

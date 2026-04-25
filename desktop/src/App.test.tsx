@@ -106,6 +106,28 @@ type EventLogEntryDto = {
   created_at: string;
 };
 
+type PrivacyCenterDashboardDto = {
+  active_task_id: number | null;
+  active_task_title: string | null;
+  workspace_watcher_enabled: boolean;
+  workspace_folder_path: string | null;
+  workspace_watched_file_count: number;
+  workspace_watcher_running: boolean;
+  clipboard_capture_enabled: boolean;
+  clipboard_capture_reminder: string;
+  active_window_context_enabled: boolean;
+  accessibility_permission_status: string;
+  proactive_triggers_enabled: boolean;
+  user_profile_memory_enabled: boolean;
+  user_profile_signal_count: number;
+  calendar_context_enabled: boolean;
+  calendar_permission_status: string;
+  selection_capture_enabled: boolean;
+  typing_activity_enabled: boolean;
+  tts_voice: string;
+  available_tts_voices: string[];
+};
+
 type StreamTrackLike = {
   stop: ReturnType<typeof vi.fn>;
 };
@@ -162,7 +184,10 @@ afterEach(() => {
   eventHandlers.clear();
 });
 
-function setupInvokeMock(options?: { failCommands?: Record<string, string> }) {
+function setupInvokeMock(options?: {
+  failCommands?: Record<string, string>;
+  accessibilityGranted?: boolean;
+}) {
   const now = "2026-04-19T00:00:00Z";
 
   const tasks: TaskDto[] = [
@@ -236,6 +261,27 @@ function setupInvokeMock(options?: { failCommands?: Record<string, string> }) {
   };
   let workspacePromptDismissed = false;
   let clipboardCaptureEnabled = false;
+  let privacyDashboard: PrivacyCenterDashboardDto = {
+    active_task_id: 1,
+    active_task_title: "history storymap",
+    workspace_watcher_enabled: true,
+    workspace_folder_path: "/tmp/jeff_data/tasks/history-storymap",
+    workspace_watched_file_count: 0,
+    workspace_watcher_running: false,
+    clipboard_capture_enabled: false,
+    clipboard_capture_reminder: "Clipboard capture is off by default.",
+    active_window_context_enabled: true,
+    accessibility_permission_status: options?.accessibilityGranted === false ? "not granted" : "granted",
+    proactive_triggers_enabled: true,
+    user_profile_memory_enabled: false,
+    user_profile_signal_count: 0,
+    calendar_context_enabled: false,
+    calendar_permission_status: "not requested",
+    selection_capture_enabled: true,
+    typing_activity_enabled: true,
+    tts_voice: "alloy",
+    available_tts_voices: ["alloy", "nova", "shimmer"]
+  };
   const recentlyLearned: Array<{
     id: number;
     task_id: number;
@@ -445,6 +491,148 @@ function setupInvokeMock(options?: { failCommands?: Record<string, string> }) {
       return tasks.find((task) => task.is_active) ?? null;
     }
 
+    if (command === "get_active_window_context") {
+      return null;
+    }
+
+    if (command === "get_accessibility_permission_status") {
+      return options?.accessibilityGranted ?? true;
+    }
+
+    if (command === "request_accessibility_permission") {
+      return null;
+    }
+
+    if (command === "get_privacy_center_dashboard") {
+      return { ...privacyDashboard };
+    }
+
+    if (command === "get_selection_capture_indicator") {
+      return null;
+    }
+
+    if (command === "dismiss_selection_capture") {
+      return null;
+    }
+
+    if (command === "get_selection_bridge_status") {
+      return {
+        enabled: true,
+        port: 47832,
+        token: "test-selection-token"
+      };
+    }
+
+    if (command === "set_tts_voice") {
+      privacyDashboard = {
+        ...privacyDashboard,
+        tts_voice: String(args?.voice ?? "alloy")
+      };
+      return { ...privacyDashboard };
+    }
+
+    if (command === "set_privacy_surface_enabled") {
+      const surface = String(args?.surface ?? "");
+      const enabled = Boolean(args?.enabled);
+      if (surface === "workspace_watcher") {
+        privacyDashboard = {
+          ...privacyDashboard,
+          workspace_watcher_enabled: enabled,
+          workspace_watcher_running: enabled
+        };
+      }
+      if (surface === "clipboard_capture") {
+        clipboardCaptureEnabled = enabled;
+        privacyDashboard = {
+          ...privacyDashboard,
+          clipboard_capture_enabled: enabled
+        };
+      }
+      if (surface === "active_window_context") {
+        privacyDashboard = {
+          ...privacyDashboard,
+          active_window_context_enabled: enabled
+        };
+      }
+      if (surface === "proactive_triggers") {
+        proactiveMode = enabled;
+        privacyDashboard = {
+          ...privacyDashboard,
+          proactive_triggers_enabled: enabled
+        };
+      }
+      if (surface === "user_profile_memory") {
+        privacyDashboard = {
+          ...privacyDashboard,
+          user_profile_memory_enabled: enabled
+        };
+      }
+      if (surface === "calendar_context") {
+        privacyDashboard = {
+          ...privacyDashboard,
+          calendar_context_enabled: enabled
+        };
+      }
+      if (surface === "selection_capture") {
+        privacyDashboard = {
+          ...privacyDashboard,
+          selection_capture_enabled: enabled
+        };
+      }
+      if (surface === "typing_activity") {
+        privacyDashboard = {
+          ...privacyDashboard,
+          typing_activity_enabled: enabled
+        };
+      }
+      return { ...privacyDashboard };
+    }
+
+    if (command === "clear_user_profile_memory") {
+      privacyDashboard = {
+        ...privacyDashboard,
+        user_profile_signal_count: 0
+      };
+      return { ...privacyDashboard };
+    }
+
+    if (command === "list_proactive_trigger_audit_log") {
+      return [];
+    }
+
+    if (command === "clear_active_task_data") {
+      messages.length = 0;
+      recentlyLearned.length = 0;
+      return {
+        cleared: true,
+        active_task_id: 1,
+        message: "Active task data cleared. The task record was kept."
+      };
+    }
+
+    if (command === "clear_all_jeff_data") {
+      tasks.length = 0;
+      messages.length = 0;
+      onboardingStatus = {
+        onboarding_complete: false,
+        has_stored_api_key: false,
+        api_key_source: "none",
+        preferred_workspace_folder: null
+      };
+      privacyDashboard = {
+        ...privacyDashboard,
+        active_task_id: null,
+        active_task_title: null,
+        workspace_watcher_running: false,
+        clipboard_capture_enabled: false
+      };
+      return {
+        cleared: true,
+        active_task_id: null,
+        message: "All Jeff data cleared. Jeff is back in first-run state."
+      };
+    }
+
     if (command === "get_onboarding_status") {
       return { ...onboardingStatus };
     }
@@ -606,6 +794,18 @@ function setupInvokeMock(options?: { failCommands?: Record<string, string> }) {
       return subtasks
         .slice()
         .sort((left, right) => right.subtask_id - left.subtask_id);
+    }
+
+    if (command === "list_file_write_proposals") {
+      return [];
+    }
+
+    if (command === "list_subtask_steps") {
+      return [];
+    }
+
+    if (command === "list_write_audit_log") {
+      return [];
     }
 
     if (command === "get_session_mode_state") {
@@ -1915,6 +2115,145 @@ describe("App", () => {
     await screen.findByTestId("workspace-screen");
 
     expect(await screen.findByTestId("companion-workspace-soft-prompt")).toBeInTheDocument();
+  });
+
+  it("offers accessibility permission with explicit user action", async () => {
+    const mocks = setupInvokeMock({ accessibilityGranted: false });
+    mocks.setOnboardingStatus({
+      onboarding_complete: true,
+      has_stored_api_key: true,
+      api_key_source: "keychain",
+      preferred_workspace_folder: "/tmp/jeff_data/tasks/history-storymap"
+    });
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    expect(await screen.findByTestId("accessibility-context-prompt")).toHaveTextContent(
+      "Jeff needs accessibility permission to know which document you have open."
+    );
+    await userEvent.click(screen.getByTestId("request-accessibility-permission"));
+    expect(invokeMock).toHaveBeenCalledWith("request_accessibility_permission");
+  });
+
+  it("document-switch nudge includes a start-task action", async () => {
+    setupInvokeMock();
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    for (const handler of eventHandlers.get("context://document-switch") ?? []) {
+      handler({ payload: { app_name: "TextEdit", document_title: "Civil Rights Draft" } });
+    }
+
+    expect(await screen.findByTestId("doc-switch-banner")).toHaveTextContent(
+      "Civil Rights Draft"
+    );
+    expect(screen.getByTestId("doc-switch-start-task")).toBeInTheDocument();
+  });
+
+  it("opens Privacy Center and persists a sensing toggle", async () => {
+    setupInvokeMock();
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    await userEvent.click(screen.getByTestId("privacy-center-open"));
+    expect(await screen.findByTestId("privacy-center-panel")).toHaveTextContent("What Jeff knows");
+    expect(screen.getByTestId("privacy-surface-workspace")).toHaveTextContent("Workspace watcher");
+    expect(screen.getByTestId("privacy-surface-active-window")).toHaveTextContent(
+      "Accessibility permission: granted"
+    );
+    expect(screen.getByTestId("privacy-surface-selection-capture")).toHaveTextContent(
+      "Browser bridge: 127.0.0.1:47832"
+    );
+    expect(screen.getByTestId("privacy-surface-typing-activity")).toHaveTextContent(
+      "Rate-only"
+    );
+
+    await userEvent.click(screen.getByTestId("privacy-toggle-active-window-context"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("set_privacy_surface_enabled", {
+        surface: "active_window_context",
+        enabled: false
+      })
+    );
+  });
+
+  it("shows and dismisses selected-text capture indicators", async () => {
+    setupInvokeMock();
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+
+    emitTauriEvent("selection://captured", {
+      status: "captured",
+      app_name: "TextEdit",
+      document_title: "Essay Draft",
+      captured_at: 1,
+      word_count: 8,
+      source_type: "native_accessibility",
+      message: "Captured 8 words from TextEdit"
+    });
+
+    expect(await screen.findByTestId("selection-capture-indicator")).toHaveTextContent(
+      "Captured 8 words from TextEdit"
+    );
+    expect(screen.getByTestId("selection-capture-indicator")).toHaveTextContent("Essay Draft");
+
+    await userEvent.click(screen.getByTestId("selection-capture-dismiss"));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("dismiss_selection_capture"));
+    expect(screen.queryByTestId("selection-capture-indicator")).not.toBeInTheDocument();
+  });
+
+  it("persists TTS voice selection from Privacy Center", async () => {
+    setupInvokeMock();
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    await userEvent.click(screen.getByTestId("privacy-center-open"));
+    const select = await screen.findByTestId("tts-voice-select");
+    await userEvent.selectOptions(select, "nova");
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("set_tts_voice", { voice: "nova" })
+    );
+  });
+
+  it("Privacy Center clear all requires explicit confirmation text", async () => {
+    setupInvokeMock();
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    await userEvent.click(screen.getByTestId("privacy-center-open"));
+    await screen.findByTestId("privacy-center-panel");
+
+    const clearAllButton = screen.getByTestId("privacy-clear-all-data");
+    expect(clearAllButton).toBeDisabled();
+
+    await userEvent.type(screen.getByTestId("privacy-clear-all-confirmation"), "CLEAR JEFF");
+    expect(clearAllButton).not.toBeDisabled();
+    await userEvent.click(clearAllButton);
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("clear_all_jeff_data"));
   });
 
   it("hides workspace soft prompt when folder is configured", async () => {

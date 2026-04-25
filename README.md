@@ -2,7 +2,7 @@
 
 Jeff is a local-first desktop AI coworker focused on one active task.
 
-This repository is currently at **Phase 12**: ambient presence + streaming-everywhere on top of the companion-first interaction layer.
+This repository is currently at **Phase 22**: explicit selected-text capture and more natural, activity-aware voice behavior on top of privacy controls, active-window title context, launch-at-login presence, onboarding, workspace awareness, proactive initiation, and parallel work.
 
 ## Phase 10-12 Scope
 
@@ -99,6 +99,24 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ```bash
 ./scripts/phase12_check.sh
+```
+
+### Phase 19 Gate
+
+```bash
+./scripts/phase19_check.sh
+```
+
+### Phase 20 Gate
+
+```bash
+./scripts/phase20_check.sh
+```
+
+### Phase 21 Gate
+
+```bash
+./scripts/phase21_check.sh
 ```
 
 ### End-to-End Validation

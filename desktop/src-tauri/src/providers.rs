@@ -10,7 +10,7 @@ pub trait SpeechToTextProvider: Send + Sync {
 }
 
 pub trait TextToSpeechProvider: Send + Sync {
-    fn synthesize(&self, text: &str) -> Result<Vec<u8>>;
+    fn synthesize(&self, text: &str, voice: &str) -> Result<Vec<u8>>;
 }
 
 pub trait ReasoningModelProvider: Send + Sync {
@@ -38,7 +38,7 @@ pub trait VoiceProvider: Send + Sync {
         audio_base64: &str,
         mime_type: &str,
     ) -> Result<TranscriptionResultDto>;
-    fn synthesize_speech(&self, text: &str) -> Result<SpeechSynthesisDto>;
+    fn synthesize_speech(&self, text: &str, voice: &str) -> Result<SpeechSynthesisDto>;
 }
 
 #[derive(Clone)]
@@ -180,7 +180,6 @@ impl SpeechToTextProvider for OpenAiSttProvider {
 pub struct OpenAiTtsProvider {
     client: Client,
     model: String,
-    voice: String,
 }
 
 impl OpenAiTtsProvider {
@@ -188,13 +187,12 @@ impl OpenAiTtsProvider {
         Self {
             client: Client::new(),
             model: "gpt-4o-mini-tts".to_string(),
-            voice: "alloy".to_string(),
         }
     }
 }
 
 impl TextToSpeechProvider for OpenAiTtsProvider {
-    fn synthesize(&self, text: &str) -> Result<Vec<u8>> {
+    fn synthesize(&self, text: &str, voice: &str) -> Result<Vec<u8>> {
         let api_key = crate::secrets::resolve_openai_api_key_required()?;
 
         let clean_text = text.trim();
@@ -202,13 +200,14 @@ impl TextToSpeechProvider for OpenAiTtsProvider {
             return Err(anyhow!("speech synthesis text cannot be empty"));
         }
 
+        let voice = crate::voice_naturalness::normalize_tts_voice(voice);
         let response = self
             .client
             .post("https://api.openai.com/v1/audio/speech")
             .bearer_auth(&api_key)
             .json(&serde_json::json!({
                 "model": self.model,
-                "voice": self.voice,
+                "voice": voice,
                 "input": clean_text,
                 "format": "mp3"
             }))

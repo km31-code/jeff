@@ -5,11 +5,13 @@ mod chat_streaming;
 mod chunking;
 mod classifier;
 mod commands;
+mod context_observer;
 mod coworking;
 mod embedding;
 mod errors;
 mod flow;
 mod latency;
+mod login_item;
 mod message_kind;
 mod models;
 mod onboarding;
@@ -19,26 +21,31 @@ mod reasoning;
 mod retrieval;
 mod revision;
 mod secrets;
+mod selection_capture;
 mod similarity;
 mod state;
 mod store;
 mod streaming;
 mod subtask;
+mod typing_activity;
 mod voice;
+mod voice_naturalness;
 mod watcher;
 mod workspace;
 
 use std::sync::Arc;
 
 use ambient::AmbientState;
+use providers::VoiceProvider;
 use reasoning::OpenAiReasoningProvider;
 use retrieval::default_embeddings_provider;
-use state::JeffState;
+use selection_capture::SelectionCaptureState;
+use state::{ContextState, JeffState};
 use store::TaskStore;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::ShortcutState;
+use typing_activity::TypingActivityState;
 use voice::OpenAiVoiceProvider;
-use providers::VoiceProvider;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 fn main() {
@@ -52,21 +59,20 @@ fn main() {
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
-        // phase 19: login-item registration via macOS LaunchAgent mechanism.
-        // tauri-plugin-autostart wraps the OS registration so set_launch_at_login
-        // and get_launch_at_login commands can sync jeff's persisted preference
-        // with the actual OS login-item state without shell invocations.
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
+                .with_handler(|app, shortcut, event| {
                     // toggle on key press; ignore release so we do not
                     // double-fire. pressed-only keeps toggle latency tight.
                     if event.state == ShortcutState::Pressed {
-                        let _ = ambient::toggle_overlay(app);
+                        if ambient::shortcut_matches(shortcut, ambient::DEFAULT_HOTKEY) {
+                            let _ = ambient::toggle_overlay(app);
+                        } else if ambient::shortcut_matches(
+                            shortcut,
+                            selection_capture::SELECTION_CAPTURE_HOTKEY,
+                        ) {
+                            selection_capture::capture_selection_from_hotkey(app);
+                        }
                     }
                 })
                 .build(),
@@ -114,13 +120,30 @@ fn main() {
 
             app.manage(JeffState::new(store, embeddings, reasoning, voice));
             app.manage(ambient_state);
+            // phase 20: manage context state for active-window polling.
+            app.manage(ContextState::new());
+            app.manage(SelectionCaptureState::new());
+            let typing_enabled = app
+                .state::<JeffState>()
+                .store
+                .get_privacy_typing_activity_enabled()
+                .unwrap_or(true);
+            app.manage(TypingActivityState::new(typing_enabled));
 
-            // phase 19: sync the OS login-item registry with the persisted
-            // preference. only enable; never silently disable (the user might
-            // have registered jeff via another path we do not control).
+            // phase 19: sync the macos SMAppService login-item registry with
+            // the persisted preference. if registration fails, clear the
+            // persisted setting so the tray checkmark cannot lie about state.
             if launch_at_login {
-                use tauri_plugin_autostart::ManagerExt;
-                let _ = app.autolaunch().enable();
+                match login_item::set_login_item_enabled(true) {
+                    Ok(status) if status.is_enabled_or_pending() => {}
+                    Ok(_) => {
+                        let _ = app.state::<JeffState>().store.set_launch_at_login(false);
+                    }
+                    Err(err) => {
+                        eprintln!("[jeff login-item] failed to sync launch at login: {err}");
+                        let _ = app.state::<JeffState>().store.set_launch_at_login(false);
+                    }
+                }
             }
 
             {
@@ -131,6 +154,10 @@ fn main() {
             }
 
             let handle = app.handle().clone();
+            selection_capture::start_browser_bridge(handle.clone());
+            if let Some(typing_state) = handle.try_state::<TypingActivityState>() {
+                typing_activity::start_global_typing_monitor(typing_state.clone_state());
+            }
 
             // phase 11: main window starts hidden. jeff is tray-resident.
             // the full workspace is only shown on explicit user action.
@@ -168,6 +195,163 @@ fn main() {
             // event and continue — the tray remains a working entry point.
             let _ = ambient::register_global_hotkey(&handle);
 
+            // phase 20: spawn the active-window context polling loop.
+            // polls NSWorkspace every 3 seconds (first poll is immediate).
+            // emits context://context-updated after every poll so the frontend
+            // can subscribe to the event instead of maintaining its own interval.
+            // emits context://document-switch when the frontmost document title
+            // changes to one not yet nudged this session, and the document is
+            // off-task relative to the active task title.
+            {
+                use tauri::Emitter;
+                let poll_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        // skip polling when quiet mode is active.
+                        let quiet = poll_handle
+                            .try_state::<AmbientState>()
+                            .map(|s| s.is_quiet_mode())
+                            .unwrap_or(false);
+
+                        if quiet {
+                            // still emit a null context so the frontend clears stale display.
+                            let _ = poll_handle.emit(
+                                "context://context-updated",
+                                serde_json::Value::Null,
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            continue;
+                        }
+
+                        let active_context_allowed = poll_handle
+                            .try_state::<JeffState>()
+                            .map(|s| {
+                                let onboarding_complete =
+                                    s.store.get_onboarding_complete().unwrap_or(false);
+                                let privacy_enabled = s
+                                    .store
+                                    .get_privacy_active_window_context_enabled()
+                                    .unwrap_or(true);
+                                onboarding_complete && privacy_enabled
+                            })
+                            .unwrap_or(false);
+
+                        if !active_context_allowed {
+                            if let Some(ctx_state) = poll_handle.try_state::<ContextState>() {
+                                ctx_state.update(None);
+                            }
+                            let _ = poll_handle.emit(
+                                "context://context-updated",
+                                serde_json::Value::Null,
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            continue;
+                        }
+
+                        let new_ctx = context_observer::poll_active_window();
+
+                        let Some(ctx_state) = poll_handle.try_state::<ContextState>() else {
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            continue;
+                        };
+
+                        // fire the document-switch nudge before updating state so
+                        // we compare the incoming title against the last-known one.
+                        if context_observer::is_accessibility_trusted() {
+                            if let Some(ref ctx) = new_ctx {
+                                let title = &ctx.document_title;
+                                if !title.is_empty() && ctx_state.should_nudge_for_switch(title) {
+                                    // suppress nudge when the document title matches
+                                    // the active task title (user is on-task).
+                                    let task_title = poll_handle
+                                        .try_state::<JeffState>()
+                                        .and_then(|s| s.store.get_active_task().ok().flatten())
+                                        .map(|t| t.title);
+                                    let off_task = task_title
+                                        .as_deref()
+                                        .map_or(true, |t| document_is_off_task(title, t));
+                                    if off_task {
+                                        let _ = poll_handle.emit(
+                                            "context://document-switch",
+                                            serde_json::json!({
+                                                "app_name": ctx.app_name,
+                                                "document_title": ctx.document_title,
+                                            }),
+                                        );
+                                        ctx_state.mark_nudged(title.clone());
+                                    }
+                                }
+                            }
+                        }
+
+                        ctx_state.update(new_ctx);
+
+                        // emit context-updated so the frontend tracks current state
+                        // without needing its own polling interval.
+                        let context_payload = ctx_state.current().map(|ctx| {
+                            serde_json::json!({
+                                "app_name": ctx.app_name,
+                                "document_title": ctx.document_title,
+                                "captured_at": ctx.captured_at,
+                            })
+                        });
+                        let _ = poll_handle.emit(
+                            "context://context-updated",
+                            context_payload.unwrap_or(serde_json::Value::Null),
+                        );
+
+                        // sleep at end so the first poll runs immediately on startup.
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                });
+            }
+
+            // phase 22: keep rate-only typing state in sync with privacy and
+            // expose only a boolean event for the frontend tts queue.
+            {
+                use tauri::Emitter;
+                let typing_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut last_typing: Option<bool> = None;
+                    loop {
+                        let Some(typing_state) = typing_handle.try_state::<TypingActivityState>()
+                        else {
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            continue;
+                        };
+
+                        let enabled = typing_handle
+                            .try_state::<JeffState>()
+                            .and_then(|state| state.store.get_privacy_typing_activity_enabled().ok())
+                            .unwrap_or(true);
+                        typing_state.set_enabled(enabled);
+                        let is_typing = enabled && typing_state.is_typing();
+
+                        if last_typing != Some(is_typing) {
+                            last_typing = Some(is_typing);
+                            let _ = typing_handle.emit(
+                                "typing://activity-changed",
+                                serde_json::json!({
+                                    "is_typing": is_typing,
+                                    "rate_only": true,
+                                    "monitor_available": typing_state.monitor_available(),
+                                    "last_error": typing_state.last_error(),
+                                }),
+                            );
+                            if let Some(state) = typing_handle.try_state::<JeffState>() {
+                                if let Ok(now) = coworking::unix_now_seconds() {
+                                    if let Ok(mut runtime) = state.coworking.lock() {
+                                        let _ = runtime.set_user_typing(is_typing, now);
+                                    }
+                                }
+                            }
+                        }
+
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                });
+            }
+
             // phase 19: fire a one-time native notification on the very first
             // session so users who enabled launch-at-login know jeff is running
             // in the tray without needing to look for it.
@@ -178,10 +362,7 @@ fn main() {
                     &handle,
                     ambient::NotificationPayload {
                         title: "Jeff is ready".to_string(),
-                        body: format!(
-                            "Press {} to bring it up.",
-                            ambient::DEFAULT_HOTKEY
-                        ),
+                        body: format!("Press {} to bring it up.", ambient::DEFAULT_HOTKEY),
                         context_kind: None,
                         context_id: None,
                     },
@@ -251,6 +432,7 @@ fn main() {
             ambient::ambient_show_overlay,
             ambient::ambient_hide_overlay,
             ambient::ambient_show_workspace,
+            ambient::ambient_open_privacy_center,
             ambient::ambient_open_onboarding,
             ambient::ambient_open_onboarding_at_step,
             ambient::ambient_hide_workspace,
@@ -286,8 +468,75 @@ fn main() {
             // phase 19
             commands::get_launch_at_login,
             commands::set_launch_at_login,
-            commands::restore_session,
+            commands::get_session_restore_state,
+            // phase 20
+            commands::get_active_window_context,
+            commands::get_accessibility_permission_status,
+            commands::request_accessibility_permission,
+            // phase 21
+            commands::get_privacy_center_dashboard,
+            commands::set_privacy_surface_enabled,
+            commands::clear_user_profile_memory,
+            commands::list_proactive_trigger_audit_log,
+            commands::clear_active_task_data,
+            commands::clear_all_jeff_data,
+            // phase 22
+            commands::get_selection_capture_indicator,
+            commands::dismiss_selection_capture,
+            commands::get_selection_bridge_status,
+            commands::capture_browser_selection,
+            commands::set_tts_voice,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Jeff desktop app");
+}
+
+fn document_is_off_task(document_title: &str, task_title: &str) -> bool {
+    let doc = document_title.trim().to_ascii_lowercase();
+    let task = task_title.trim().to_ascii_lowercase();
+    if doc.is_empty() || task.is_empty() {
+        return true;
+    }
+    // require task title to be at least 5 chars before attempting suppression.
+    // short names like "a", "my", or "doc" would match too broadly via
+    // substring containment and suppress nudges the user should see.
+    if task.len() < 5 {
+        return true;
+    }
+    !(doc.contains(&task) || task.contains(&doc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::document_is_off_task;
+
+    #[test]
+    fn document_task_match_is_case_insensitive_and_substring_tolerant() {
+        assert!(!document_is_off_task(
+            "History Storymap Draft",
+            "history storymap"
+        ));
+        assert!(!document_is_off_task(
+            "history storymap",
+            "History Storymap Draft"
+        ));
+        assert!(document_is_off_task("Chemistry Notes", "history storymap"));
+    }
+
+    #[test]
+    fn short_task_titles_are_always_off_task_to_avoid_broad_suppression() {
+        // "a", "my", "doc" are too short to meaningfully match document titles.
+        assert!(document_is_off_task("a quick note", "a"));
+        assert!(document_is_off_task("my documents", "my"));
+        assert!(document_is_off_task("document.txt", "doc"));
+        // exactly 5 chars is long enough to participate in matching.
+        assert!(!document_is_off_task("notes on taxes", "notes"));
+    }
+
+    #[test]
+    fn empty_inputs_are_always_off_task() {
+        assert!(document_is_off_task("", "history notes"));
+        assert!(document_is_off_task("history notes", ""));
+        assert!(document_is_off_task("", ""));
+    }
 }

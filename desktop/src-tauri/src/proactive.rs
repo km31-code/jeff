@@ -24,7 +24,7 @@ pub const STUCK_SILENCE_THRESHOLD_SECONDS: i64 = 600;
 pub const DRIFT_SIMILARITY_THRESHOLD: f32 = 0.6;
 
 const REORIENTATION_SYSTEM_PROMPT: &str =
-    "You are Jeff. The user just returned to this task. Write one short sentence (max 25 words) summarizing where they left off. Be specific to the content. No commands.";
+    "You are Jeff. The user just returned to this task. Write one short sentence (max 25 words) summarizing where they left off. Be specific to the content. No commands. No filler phrases.";
 
 const DRIFT_SYSTEM_PROMPT: &str =
     "You are Jeff's drift detector. Given the task goal and current text, determine if the current text diverges from the stated task goal. Return strict JSON only: {\"is_drifting\": bool, \"reason\": string, \"confidence\": number}";
@@ -155,6 +155,8 @@ pub fn generate_reorientation(
     store: &TaskStore,
     reasoning: &dyn ReasoningProvider,
     task_id: i64,
+    // phase 20: active window context prefix for the system prompt.
+    active_context: Option<&str>,
 ) -> Result<ReorientationDto> {
     let fired_at = now_iso_string();
 
@@ -201,8 +203,12 @@ pub fn generate_reorientation(
         task_summary.summary_text, message_context
     );
 
+    let effective_reorientation_prompt = match active_context {
+        Some(ctx) if !ctx.is_empty() => format!("{ctx}\n\n{REORIENTATION_SYSTEM_PROMPT}"),
+        _ => REORIENTATION_SYSTEM_PROMPT.to_string(),
+    };
     let summary = reasoning
-        .generate_response(REORIENTATION_SYSTEM_PROMPT, &user_prompt)
+        .generate_response(&effective_reorientation_prompt, &user_prompt)
         .context("reorientation LLM call failed")?;
 
     let clean_summary = summary.trim().to_string();
@@ -223,6 +229,8 @@ pub fn evaluate_drift(
     embeddings: &dyn EmbeddingProvider,
     task_id: i64,
     current_text: &str,
+    // phase 20: active window context prefix for the system prompt.
+    active_context: Option<&str>,
 ) -> Result<DriftFlagDto> {
     // cooldown check
     if let Some(last_trigger) = store.get_last_proactive_trigger(task_id, "drift")? {
@@ -260,8 +268,12 @@ pub fn evaluate_drift(
         task_summary.summary_text, current_text
     );
 
+    let effective_drift_prompt = match active_context {
+        Some(ctx) if !ctx.is_empty() => format!("{ctx}\n\n{DRIFT_SYSTEM_PROMPT}"),
+        _ => DRIFT_SYSTEM_PROMPT.to_string(),
+    };
     let raw = reasoning
-        .generate_response(DRIFT_SYSTEM_PROMPT, &user_prompt)
+        .generate_response(&effective_drift_prompt, &user_prompt)
         .context("drift detection LLM call failed")?;
 
     let parsed = serde_json::from_str::<DriftJson>(raw.trim()).unwrap_or(DriftJson {
@@ -391,7 +403,7 @@ mod tests {
         };
 
         // no prior focus → treated as first visit; absence is considered infinite
-        let result = generate_reorientation(&store, &reasoning, task.id).unwrap();
+        let result = generate_reorientation(&store, &reasoning, task.id, None).unwrap();
         // first visit with no prior focus record: since get_last_task_focus returns None
         // the absence check is skipped and we proceed to fire the LLM
         assert!(
@@ -417,7 +429,7 @@ mod tests {
             drift: r#"{"is_drifting":false,"reason":"","confidence":0.0}"#.to_string(),
         };
 
-        let result = generate_reorientation(&store, &reasoning, task.id).unwrap();
+        let result = generate_reorientation(&store, &reasoning, task.id, None).unwrap();
         assert!(
             result.summary.is_empty(),
             "expected suppressed summary within cooldown"
@@ -452,7 +464,7 @@ mod tests {
                 fired_at: String::new(),
             }
         } else {
-            generate_reorientation(&store, &PanicReasoningProvider, task.id).unwrap()
+            generate_reorientation(&store, &PanicReasoningProvider, task.id, None).unwrap()
         };
 
         assert_eq!(response.task_id, task.id);
@@ -478,7 +490,8 @@ mod tests {
             drift: r#"{"is_drifting":false,"reason":"on track","confidence":0.2}"#.to_string(),
         };
 
-        let result = evaluate_drift(&store, &reasoning, &embeddings, task.id, "some text").unwrap();
+        let result =
+            evaluate_drift(&store, &reasoning, &embeddings, task.id, "some text", None).unwrap();
         assert!(!result.is_drifting);
     }
 
@@ -500,6 +513,7 @@ mod tests {
             &embeddings,
             task.id,
             "completely unrelated text",
+            None,
         )
         .unwrap();
         assert!(result.is_drifting);
@@ -528,6 +542,7 @@ mod tests {
             &embeddings,
             task.id,
             "focused draft text",
+            None,
         )
         .unwrap();
         assert!(!result.is_drifting);

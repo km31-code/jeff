@@ -52,6 +52,16 @@ p {
   gap: 0.25rem;
 }
 
+.selection-capture-panel {
+  border-color: #b8dcc9;
+  background: #f3fbf6;
+}
+
+.selection-capture-panel-error {
+  border-color: #e4b6b6;
+  background: #fff7f7;
+}
+
 .workspace-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
@@ -69,6 +79,8 @@ p {
 .row-actions {
   display: flex;
   gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 .task-form {
@@ -248,6 +260,22 @@ pre {
   padding: 0.55rem;
   display: grid;
   gap: 0.35rem;
+}
+
+.privacy-center-panel {
+  border-color: #c8d1dc;
+  background: #f6f8fb;
+}
+
+.privacy-surface-list > li {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid #e1e6ee;
+}
+
+.privacy-surface-list > li:last-child {
+  border-bottom: 0;
 }
 
 .toggle-row {
@@ -656,6 +684,18 @@ body.overlay-body {
   gap: 6px;
 }
 
+.overlay-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.overlay-banner-actions button {
+  min-height: 24px;
+  padding: 3px 7px;
+}
+
 .overlay-banner-warn {
   background: #fff2e0;
   color: #7a4a00;
@@ -666,6 +706,19 @@ body.overlay-body {
   background: #e9f3ff;
   color: #1a4a8a;
   border: 1px solid #cfe0f5;
+}
+
+.overlay-selection-capture-message {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overlay-selection-capture-doc {
+  opacity: 0.75;
+  font-style: italic;
 }
 
 .overlay-error {

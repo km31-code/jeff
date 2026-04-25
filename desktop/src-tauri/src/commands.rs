@@ -1,10 +1,11 @@
 use std::{fs, path::PathBuf, time::Duration};
 
-use tauri::{AppHandle, Manager, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 use crate::{
     ambient,
     chat::send_message_for_task,
+    context_observer,
     coworking::{evaluate_proactive_nudge_for_task, unix_now_seconds},
     flow::{
         accept_suggestion_for_task, dismiss_suggestion_for_task,
@@ -12,13 +13,17 @@ use crate::{
     },
     message_kind::classify_user_message_kind,
     models::{
-        ApiKeyValidationDto, ArtifactContentDto, ArtifactDto, ArtifactVersionDto, ChatMessageDto,
-        CoworkingStatusDto, DriftFlagDto, EventLogEntryDto, FileWriteProposalDto,
-        IntentClassificationDto, IntentLabel, IntentSlotsDto, OnboardingStatusDto, OpenResourceDto,
-        ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto,
-        RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto, RevisionTargetDto,
-        SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
-        SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto,
+        ActiveWindowContextDto, ApiKeyValidationDto, ArtifactContentDto, ArtifactDto,
+        ArtifactVersionDto, BrowserSelectionCaptureRequestDto, ChatMessageDto,
+        CoworkingStatusDto, DataClearResultDto, DriftFlagDto, EventLogEntryDto,
+        FileWriteProposalDto, IntentClassificationDto, IntentLabel, IntentSlotsDto,
+        OnboardingStatusDto, OpenResourceDto, PrivacyCenterDashboardDto,
+        ProactiveAuditEntryDto, ProactiveEvaluationDto, RecentlyLearnedItemDto,
+        ReorientationDto, RetrievedChunkDto, RevisionApplyResultDto, RevisionProposalDto,
+        RevisionProposalResultDto, RevisionTargetDto, SelectionBridgeStatusDto,
+        SelectionCaptureIndicatorDto, SendMessageResponseDto, SessionModeStateDto,
+        SessionRestoreDto, SpeechSynthesisDto, SubTaskDto, SubTaskStepDto,
+        SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto,
         SuggestionEvaluationDto, TaskContextPackDto, TaskDto, TaskSummaryDto,
         TranscriptionResultDto, WatcherStatusDto, WorkspaceInfoDto, WriteAuditEntryDto,
     },
@@ -33,7 +38,8 @@ use crate::{
         reject_revision as reject_artifact_revision,
         revert_artifact_to_version as revert_artifact_by_version,
     },
-    state::JeffState,
+    selection_capture::SelectionCaptureState,
+    state::{ContextState, JeffState},
     subtask::{
         accept_subtask_result as accept_subtask_result_by_id,
         cancel_subtask as cancel_subtask_by_id, convert_subtask_result_to_revision,
@@ -45,6 +51,53 @@ use crate::{
 
 fn map_jeff_error<E: ToString>(error: E) -> String {
     crate::errors::map_error_message(&error.to_string())
+}
+
+// phase 20: build the context prefix string from ContextState.
+// returns None when no context is available or both fields are empty.
+fn active_context_string(ctx_state: &ContextState) -> Option<String> {
+    let ctx = ctx_state.current()?;
+    if ctx.app_name.is_empty() && ctx.document_title.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "User's active app: {}. Document: {}.",
+        ctx.app_name, ctx.document_title
+    ))
+}
+
+fn active_context_string_if_enabled(
+    state: &JeffState,
+    ctx_state: &ContextState,
+) -> Option<String> {
+    if !state
+        .store
+        .get_privacy_active_window_context_enabled()
+        .unwrap_or(true)
+    {
+        return None;
+    }
+    active_context_string(ctx_state)
+}
+
+fn next_message_context<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &JeffState,
+    ctx_state: &ContextState,
+    selection_state: &SelectionCaptureState,
+) -> Option<String> {
+    let active_context = active_context_string_if_enabled(state, ctx_state);
+    let selection_context = selection_state.take_prompt_context();
+    if selection_context.is_some() {
+        let _ = app.emit(crate::selection_capture::EVENT_SELECTION_CLEARED, serde_json::json!({}));
+    }
+
+    match (active_context, selection_context) {
+        (Some(active), Some(selection)) => Some(format!("{active}\n\n{selection}")),
+        (Some(active), None) => Some(active),
+        (None, Some(selection)) => Some(selection),
+        (None, None) => None,
+    }
 }
 
 #[tauri::command]
@@ -306,6 +359,8 @@ pub fn list_messages(
 #[tauri::command]
 pub fn send_message<R: Runtime>(
     state: State<'_, JeffState>,
+    context_state: State<'_, ContextState>,
+    selection_state: State<'_, SelectionCaptureState>,
     app: AppHandle<R>,
     task_id: i64,
     message: String,
@@ -323,6 +378,7 @@ pub fn send_message<R: Runtime>(
 
     let epoch = state.next_interaction_epoch();
     let message_source = normalize_message_source(source);
+    let active_ctx = next_message_context(&app, state.inner(), &context_state, &selection_state);
 
     let response = send_message_for_task(
         &state.store,
@@ -331,6 +387,7 @@ pub fn send_message<R: Runtime>(
         task_id,
         &message,
         &message_source,
+        active_ctx.as_deref(),
         || state.current_interaction_epoch() != epoch,
     );
 
@@ -432,6 +489,8 @@ fn active_artifact_setting_key(task_id: i64) -> String {
 #[tauri::command]
 pub async fn send_message_streaming<R: Runtime>(
     state: State<'_, JeffState>,
+    context_state: State<'_, ContextState>,
+    selection_state: State<'_, SelectionCaptureState>,
     app: AppHandle<R>,
     task_id: i64,
     message: String,
@@ -446,6 +505,8 @@ pub async fn send_message_streaming<R: Runtime>(
     let token = InteractionToken::new(turn_id.clone());
     state.interactions.register(&token);
 
+    let active_ctx = next_message_context(&app, state.inner(), &context_state, &selection_state);
+
     // start_streaming_turn spawns the async work and returns immediately.
     if let Err(err) = start_streaming_turn(
         &state,
@@ -455,6 +516,7 @@ pub async fn send_message_streaming<R: Runtime>(
         source.unwrap_or_else(|| "text".to_string()),
         token.clone(),
         state.interactions.clone(),
+        active_ctx,
     )
     .await
     {
@@ -505,7 +567,12 @@ pub fn synthesize_speech(
     state: State<'_, JeffState>,
     text: String,
 ) -> Result<SpeechSynthesisDto, String> {
-    state.voice.synthesize_speech(&text).map_err(map_jeff_error)
+    let voice = state.store.get_tts_voice().map_err(map_jeff_error)?;
+    let spoken_text = crate::voice_naturalness::prepare_tts_text(&text, "non-streaming");
+    state
+        .voice
+        .synthesize_speech(&spoken_text, &voice)
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -533,6 +600,10 @@ pub fn set_proactive_mode(
         .store
         .set_app_setting("proactive_mode", if enabled { "1" } else { "0" })
         .map_err(map_jeff_error)?;
+    state
+        .store
+        .set_privacy_proactive_triggers_enabled(enabled)
+        .map_err(map_jeff_error)?;
     Ok(status)
 }
 
@@ -542,11 +613,15 @@ pub fn set_user_typing(
     is_typing: bool,
 ) -> Result<CoworkingStatusDto, String> {
     let now = unix_now_seconds().map_err(map_jeff_error)?;
+    let allowed = state
+        .store
+        .get_privacy_typing_activity_enabled()
+        .map_err(map_jeff_error)?;
     let mut runtime = state
         .coworking
         .lock()
         .map_err(|_| "failed to lock coworking runtime".to_string())?;
-    Ok(runtime.set_user_typing(is_typing, now))
+    Ok(runtime.set_user_typing(is_typing && allowed, now))
 }
 
 #[tauri::command]
@@ -581,6 +656,25 @@ pub fn evaluate_proactive_nudge<R: Runtime>(
     app: AppHandle<R>,
     task_id: i64,
 ) -> Result<ProactiveEvaluationDto, String> {
+    if !state
+        .store
+        .get_privacy_proactive_triggers_enabled()
+        .map_err(map_jeff_error)?
+    {
+        let now = unix_now_seconds().map_err(map_jeff_error)?;
+        let status = state
+            .coworking
+            .lock()
+            .map_err(|_| "failed to lock coworking runtime".to_string())?
+            .status(now);
+        return Ok(ProactiveEvaluationDto {
+            status,
+            decision_event_type: "skip".to_string(),
+            decision_reason: "privacy_proactive_triggers_disabled".to_string(),
+            nudge: None,
+        });
+    }
+
     let now = unix_now_seconds().map_err(map_jeff_error)?;
     let evaluation = {
         let mut runtime = state
@@ -976,12 +1070,16 @@ fn sync_clipboard_poll_for_active_task(
     state: &crate::state::JeffState,
     task_id: i64,
 ) -> Result<(), String> {
+    let global_enabled = state
+        .store
+        .get_privacy_clipboard_capture_enabled()
+        .map_err(map_jeff_error)?;
     let enabled = state
         .store
         .get_clipboard_capture(task_id)
         .map_err(map_jeff_error)?;
 
-    if enabled {
+    if global_enabled && enabled {
         crate::watcher::start_clipboard_poll(
             state.watcher.clone(),
             task_id,
@@ -999,6 +1097,19 @@ pub fn ensure_workspace_awareness_for_task(
     state: &crate::state::JeffState,
     task_id: i64,
 ) -> Result<WatcherStatusDto, String> {
+    if !state
+        .store
+        .get_privacy_workspace_watcher_enabled()
+        .map_err(map_jeff_error)?
+    {
+        crate::watcher::stop_all_except(state.watcher.clone(), None);
+        return Ok(WatcherStatusDto {
+            task_id,
+            is_watching: false,
+            watched_path: None,
+        });
+    }
+
     crate::watcher::stop_all_except(state.watcher.clone(), Some(task_id));
 
     let workspace_path = state
@@ -1069,6 +1180,10 @@ pub fn start_workspace_watcher(
         return Err("folder_path cannot be empty".to_string());
     }
 
+    state
+        .store
+        .set_privacy_workspace_watcher_enabled(true)
+        .map_err(map_jeff_error)?;
     crate::watcher::stop_all_except(state.watcher.clone(), Some(task_id));
     let status = start_watcher_and_persist_folder(state.inner(), task_id, path)?;
     sync_clipboard_poll_for_active_task(state.inner(), task_id)?;
@@ -1080,6 +1195,10 @@ pub fn stop_workspace_watcher(
     state: State<'_, crate::state::JeffState>,
     task_id: i64,
 ) -> Result<WatcherStatusDto, String> {
+    state
+        .store
+        .set_privacy_workspace_watcher_enabled(false)
+        .map_err(map_jeff_error)?;
     state
         .store
         .clear_watched_folder(task_id)
@@ -1114,6 +1233,10 @@ pub fn set_clipboard_capture(
     task_id: i64,
     enabled: bool,
 ) -> Result<(), String> {
+    state
+        .store
+        .set_privacy_clipboard_capture_enabled(enabled)
+        .map_err(map_jeff_error)?;
     state
         .store
         .set_clipboard_capture(task_id, enabled)
@@ -1177,27 +1300,45 @@ pub fn classify_message_intent(
 pub fn trigger_task_resume(
     state: State<'_, JeffState>,
     ambient: State<'_, crate::ambient::AmbientState>,
+    context_state: State<'_, ContextState>,
     task_id: i64,
 ) -> Result<ReorientationDto, String> {
-    if ambient.is_quiet_mode() {
+    if ambient.is_quiet_mode()
+        || !state
+            .store
+            .get_privacy_proactive_triggers_enabled()
+            .map_err(map_jeff_error)?
+    {
         return Ok(ReorientationDto {
             task_id,
             summary: String::new(),
             fired_at: String::new(),
         });
     }
-    crate::proactive::generate_reorientation(&state.store, state.reasoning.as_ref(), task_id)
-        .map_err(map_jeff_error)
+    let active_ctx = active_context_string_if_enabled(state.inner(), &context_state);
+    crate::proactive::generate_reorientation(
+        &state.store,
+        state.reasoning.as_ref(),
+        task_id,
+        active_ctx.as_deref(),
+    )
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
 pub fn check_task_drift(
     state: State<'_, JeffState>,
     ambient: State<'_, crate::ambient::AmbientState>,
+    context_state: State<'_, ContextState>,
     task_id: i64,
     current_text: String,
 ) -> Result<DriftFlagDto, String> {
-    if ambient.is_quiet_mode() {
+    if ambient.is_quiet_mode()
+        || !state
+            .store
+            .get_privacy_proactive_triggers_enabled()
+            .map_err(map_jeff_error)?
+    {
         return Ok(DriftFlagDto {
             task_id,
             is_drifting: false,
@@ -1205,12 +1346,14 @@ pub fn check_task_drift(
             confidence: 0.0,
         });
     }
+    let active_ctx = active_context_string_if_enabled(state.inner(), &context_state);
     crate::proactive::evaluate_drift(
         &state.store,
         state.reasoning.as_ref(),
         state.embeddings.as_ref(),
         task_id,
         &current_text,
+        active_ctx.as_deref(),
     )
     .map_err(map_jeff_error)
 }
@@ -1221,7 +1364,12 @@ pub fn trigger_speculative_subtask(
     ambient: State<'_, crate::ambient::AmbientState>,
     task_id: i64,
 ) -> Result<Option<SubTaskDto>, String> {
-    if ambient.is_quiet_mode() {
+    if ambient.is_quiet_mode()
+        || !state
+            .store
+            .get_privacy_proactive_triggers_enabled()
+            .map_err(map_jeff_error)?
+    {
         return Ok(None);
     }
     crate::proactive::propose_speculative_subtask(
@@ -1528,6 +1676,353 @@ pub fn list_write_audit_log(
         .map_err(map_jeff_error)
 }
 
+fn build_privacy_center_dashboard(
+    state: &JeffState,
+    ambient: &ambient::AmbientState,
+) -> Result<PrivacyCenterDashboardDto, String> {
+    let active_task = state.store.get_active_task().map_err(map_jeff_error)?;
+    let active_task_id = active_task.as_ref().map(|task| task.id);
+
+    let (workspace_folder_path, workspace_watched_file_count, workspace_watcher_running) =
+        if let Some(task) = active_task.as_ref() {
+            let watcher_status = crate::watcher::get_watcher_status(state.watcher.clone(), task.id);
+            let watched_folder = state
+                .store
+                .get_watched_folder(task.id)
+                .map_err(map_jeff_error)?
+                .map(|folder| folder.folder_path);
+            (
+                watcher_status
+                    .watched_path
+                    .or(watched_folder)
+                    .or_else(|| Some(task.workspace_path.clone())),
+                state
+                    .store
+                    .count_watched_files(task.id)
+                    .map_err(map_jeff_error)?,
+                watcher_status.is_watching,
+            )
+        } else {
+            (None, 0, false)
+        };
+
+    let clipboard_task_enabled = if let Some(task_id) = active_task_id {
+        state
+            .store
+            .get_clipboard_capture(task_id)
+            .map_err(map_jeff_error)?
+    } else {
+        false
+    };
+    let clipboard_privacy_enabled = state
+        .store
+        .get_privacy_clipboard_capture_enabled()
+        .map_err(map_jeff_error)?;
+    let active_window_context_enabled = state
+        .store
+        .get_privacy_active_window_context_enabled()
+        .map_err(map_jeff_error)?;
+    let accessibility_permission_status = if context_observer::is_accessibility_trusted() {
+        "granted"
+    } else {
+        "not granted"
+    };
+    let proactive_triggers_enabled = state
+        .store
+        .get_privacy_proactive_triggers_enabled()
+        .map_err(map_jeff_error)?
+        && !ambient.is_quiet_mode();
+
+    Ok(PrivacyCenterDashboardDto {
+        active_task_id,
+        active_task_title: active_task.map(|task| task.title),
+        workspace_watcher_enabled: state
+            .store
+            .get_privacy_workspace_watcher_enabled()
+            .map_err(map_jeff_error)?,
+        workspace_folder_path,
+        workspace_watched_file_count,
+        workspace_watcher_running,
+        clipboard_capture_enabled: clipboard_privacy_enabled && clipboard_task_enabled,
+        clipboard_capture_reminder: "Clipboard capture is off by default.".to_string(),
+        active_window_context_enabled,
+        accessibility_permission_status: accessibility_permission_status.to_string(),
+        proactive_triggers_enabled,
+        user_profile_memory_enabled: state
+            .store
+            .get_privacy_user_profile_memory_enabled()
+            .map_err(map_jeff_error)?,
+        user_profile_signal_count: state
+            .store
+            .count_user_profile_signals()
+            .map_err(map_jeff_error)?,
+        calendar_context_enabled: state
+            .store
+            .get_privacy_calendar_context_enabled()
+            .map_err(map_jeff_error)?,
+        calendar_permission_status: "not requested".to_string(),
+        selection_capture_enabled: state
+            .store
+            .get_privacy_selection_capture_enabled()
+            .map_err(map_jeff_error)?,
+        typing_activity_enabled: state
+            .store
+            .get_privacy_typing_activity_enabled()
+            .map_err(map_jeff_error)?,
+        tts_voice: state.store.get_tts_voice().map_err(map_jeff_error)?,
+        available_tts_voices: crate::voice_naturalness::available_tts_voices(),
+    })
+}
+
+#[tauri::command]
+pub fn get_privacy_center_dashboard(
+    state: State<'_, JeffState>,
+    ambient: State<'_, ambient::AmbientState>,
+) -> Result<PrivacyCenterDashboardDto, String> {
+    build_privacy_center_dashboard(state.inner(), &ambient)
+}
+
+#[tauri::command]
+pub fn set_privacy_surface_enabled(
+    state: State<'_, JeffState>,
+    ambient: State<'_, ambient::AmbientState>,
+    context_state: State<'_, ContextState>,
+    surface: String,
+    enabled: bool,
+) -> Result<PrivacyCenterDashboardDto, String> {
+    let surface_key = surface.trim();
+    match surface_key {
+        "workspace_watcher" => {
+            state
+                .store
+                .set_privacy_workspace_watcher_enabled(enabled)
+                .map_err(map_jeff_error)?;
+            if enabled {
+                let _ = restore_workspace_awareness_for_active_task(state.inner());
+            } else {
+                crate::watcher::stop_all_except(state.watcher.clone(), None);
+            }
+        }
+        "clipboard_capture" => {
+            state
+                .store
+                .set_privacy_clipboard_capture_enabled(enabled)
+                .map_err(map_jeff_error)?;
+            if let Some(task) = state.store.get_active_task().map_err(map_jeff_error)? {
+                state
+                    .store
+                    .set_clipboard_capture(task.id, enabled)
+                    .map_err(map_jeff_error)?;
+                if enabled {
+                    sync_clipboard_poll_for_active_task(state.inner(), task.id)?;
+                } else {
+                    crate::watcher::stop_clipboard_poll(state.watcher.clone(), task.id);
+                }
+            }
+        }
+        "active_window_context" => {
+            state
+                .store
+                .set_privacy_active_window_context_enabled(enabled)
+                .map_err(map_jeff_error)?;
+            if !enabled {
+                context_state.update(None);
+            }
+        }
+        "proactive_triggers" => {
+            // privacy toggle for proactive triggers: suppress unsolicited initiation
+            // (reorientation, drift, speculative subtask, proactive notifications).
+            // this is intentionally distinct from quiet mode, which suppresses all
+            // output including responses to explicit user messages and tts playback.
+            // do NOT touch quiet_mode here.
+            state
+                .store
+                .set_privacy_proactive_triggers_enabled(enabled)
+                .map_err(map_jeff_error)?;
+            state
+                .store
+                .set_app_setting("proactive_mode", if enabled { "1" } else { "0" })
+                .map_err(map_jeff_error)?;
+            let now = unix_now_seconds().map_err(map_jeff_error)?;
+            let mut runtime = state
+                .coworking
+                .lock()
+                .map_err(|_| "failed to lock coworking runtime".to_string())?;
+            runtime.set_proactive_mode(enabled, now);
+        }
+        "user_profile_memory" => {
+            state
+                .store
+                .set_privacy_user_profile_memory_enabled(enabled)
+                .map_err(map_jeff_error)?;
+        }
+        "calendar_context" => {
+            state
+                .store
+                .set_privacy_calendar_context_enabled(enabled)
+                .map_err(map_jeff_error)?;
+        }
+        "selection_capture" => {
+            state
+                .store
+                .set_privacy_selection_capture_enabled(enabled)
+                .map_err(map_jeff_error)?;
+        }
+        "typing_activity" => {
+            state
+                .store
+                .set_privacy_typing_activity_enabled(enabled)
+                .map_err(map_jeff_error)?;
+            if let Ok(now) = unix_now_seconds() {
+                let mut runtime = state
+                    .coworking
+                    .lock()
+                    .map_err(|_| "failed to lock coworking runtime".to_string())?;
+                let _ = runtime.set_user_typing(false, now);
+            }
+        }
+        _ => return Err(format!("unknown privacy surface '{surface_key}'")),
+    }
+
+    build_privacy_center_dashboard(state.inner(), &ambient)
+}
+
+#[tauri::command]
+pub fn clear_user_profile_memory(
+    state: State<'_, JeffState>,
+    ambient: State<'_, ambient::AmbientState>,
+) -> Result<PrivacyCenterDashboardDto, String> {
+    state.store.clear_user_profile().map_err(map_jeff_error)?;
+    build_privacy_center_dashboard(state.inner(), &ambient)
+}
+
+#[tauri::command]
+pub fn get_selection_capture_indicator(
+    selection_state: State<'_, SelectionCaptureState>,
+) -> Option<SelectionCaptureIndicatorDto> {
+    selection_state.current_indicator()
+}
+
+#[tauri::command]
+pub fn dismiss_selection_capture<R: Runtime>(
+    selection_state: State<'_, SelectionCaptureState>,
+    app: AppHandle<R>,
+) -> Option<SelectionCaptureIndicatorDto> {
+    selection_state.dismiss();
+    let _ = app.emit(crate::selection_capture::EVENT_SELECTION_CLEARED, serde_json::json!({}));
+    None
+}
+
+#[tauri::command]
+pub fn get_selection_bridge_status(
+    selection_state: State<'_, SelectionCaptureState>,
+) -> SelectionBridgeStatusDto {
+    selection_state.bridge_status()
+}
+
+#[tauri::command]
+pub fn capture_browser_selection<R: Runtime>(
+    app: AppHandle<R>,
+    request: BrowserSelectionCaptureRequestDto,
+) -> Result<SelectionCaptureIndicatorDto, String> {
+    crate::selection_capture::capture_browser_selection_request(&app, request).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn set_tts_voice(
+    state: State<'_, JeffState>,
+    ambient: State<'_, ambient::AmbientState>,
+    voice: String,
+) -> Result<PrivacyCenterDashboardDto, String> {
+    state.store.set_tts_voice(&voice).map_err(map_jeff_error)?;
+    build_privacy_center_dashboard(state.inner(), &ambient)
+}
+
+#[tauri::command]
+pub fn list_proactive_trigger_audit_log(
+    state: State<'_, JeffState>,
+    task_id: i64,
+) -> Result<Vec<ProactiveAuditEntryDto>, String> {
+    state
+        .store
+        .list_proactive_trigger_audit_log(task_id, 100)
+        .map_err(map_jeff_error)
+}
+
+fn request_cancel_all_subtasks(state: &JeffState) {
+    if let Ok(tasks) = state.store.list_tasks() {
+        for task in tasks {
+            if let Ok(subtasks) = state.store.list_subtasks(task.id) {
+                for subtask in subtasks {
+                    if matches!(subtask.status.as_str(), "pending" | "running") {
+                        let _ = state.subtasks.request_cancel(subtask.subtask_id);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub fn clear_active_task_data(
+    state: State<'_, JeffState>,
+    selection_state: State<'_, SelectionCaptureState>,
+) -> Result<DataClearResultDto, String> {
+    let Some(task) = state.store.get_active_task().map_err(map_jeff_error)? else {
+        return Ok(DataClearResultDto {
+            cleared: false,
+            active_task_id: None,
+            message: "No active task to clear.".to_string(),
+        });
+    };
+
+    if let Ok(subtasks) = state.store.list_subtasks(task.id) {
+        for subtask in subtasks {
+            if matches!(subtask.status.as_str(), "pending" | "running") {
+                let _ = state.subtasks.request_cancel(subtask.subtask_id);
+            }
+        }
+    }
+    crate::watcher::stop_watcher(state.watcher.clone(), task.id);
+    crate::watcher::stop_clipboard_poll(state.watcher.clone(), task.id);
+    selection_state.dismiss();
+    state.store.clear_task_data(task.id).map_err(map_jeff_error)?;
+
+    Ok(DataClearResultDto {
+        cleared: true,
+        active_task_id: Some(task.id),
+        message: "Active task data cleared. The task record was kept.".to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn clear_all_jeff_data(
+    state: State<'_, JeffState>,
+    ambient: State<'_, ambient::AmbientState>,
+    context_state: State<'_, ContextState>,
+    selection_state: State<'_, SelectionCaptureState>,
+) -> Result<DataClearResultDto, String> {
+    request_cancel_all_subtasks(state.inner());
+    crate::watcher::stop_all_except(state.watcher.clone(), None);
+    context_state.update(None);
+    selection_state.dismiss();
+    let _ = crate::login_item::set_login_item_enabled(false);
+    crate::secrets::delete_openai_api_key().map_err(map_jeff_error)?;
+    state.store.clear_all_data().map_err(map_jeff_error)?;
+
+    ambient.set_quiet_mode(false);
+    let now = unix_now_seconds().map_err(map_jeff_error)?;
+    if let Ok(mut runtime) = state.coworking.lock() {
+        runtime.set_proactive_mode(true, now);
+    }
+
+    Ok(DataClearResultDto {
+        cleared: true,
+        active_task_id: None,
+        message: "All Jeff data cleared. Jeff is back in first-run state.".to_string(),
+    })
+}
+
 #[tauri::command]
 pub fn start_subtask_chain(
     state: State<'_, JeffState>,
@@ -1552,48 +2047,78 @@ pub fn start_subtask_chain(
     .map_err(map_jeff_error)
 }
 
+// phase 20: active window context commands ------------------------------------
+
+/// returns the current frontmost-app context from ContextState (in-memory, polled
+/// every 3 s). returns null when permission is not granted or no context available.
+#[tauri::command]
+pub fn get_active_window_context(
+    state: State<'_, JeffState>,
+    context_state: State<'_, ContextState>,
+) -> Option<ActiveWindowContextDto> {
+    if !state
+        .store
+        .get_privacy_active_window_context_enabled()
+        .unwrap_or(true)
+    {
+        return None;
+    }
+    context_state.current().map(|ctx| ActiveWindowContextDto {
+        app_name: ctx.app_name,
+        document_title: ctx.document_title,
+        captured_at: ctx.captured_at,
+    })
+}
+
+/// returns true if the macOS Accessibility permission has been granted.
+#[tauri::command]
+pub fn get_accessibility_permission_status() -> bool {
+    context_observer::is_accessibility_trusted()
+}
+
+/// surfaces the macOS Accessibility permission dialog. no-op on non-macos.
+#[tauri::command]
+pub fn request_accessibility_permission() {
+    context_observer::request_accessibility_permission();
+}
+
 // phase 19: session persistence commands --------------------------------------
 
-/// returns the persisted launch-at-login preference. does not query the OS
-/// login-item registry; the setting is the source of truth for jeff's intent.
+/// returns the SMAppService-backed launch-at-login state.
+/// reads OS state directly and falls back to the persisted store value on error.
+/// does NOT write to the store — reconciliation happens only at startup and on
+/// explicit set, so this function is safe to call on every render.
 #[tauri::command]
 pub fn get_launch_at_login(state: State<'_, JeffState>) -> Result<bool, String> {
-    state.store.get_launch_at_login().map_err(map_jeff_error)
+    crate::login_item::login_item_enabled_or_pending()
+        .or_else(|_| state.store.get_launch_at_login().map_err(map_jeff_error))
 }
 
-/// persists the preference and syncs with the OS login-item registry via
-/// tauri-plugin-autostart, which uses the macOS LaunchAgent mechanism.
+/// syncs the macOS SMAppService main-app login item, then persists only after
+/// the OS state reaches the requested state or requires user approval.
 #[tauri::command]
-pub async fn set_launch_at_login<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, JeffState>,
-    enabled: bool,
-) -> Result<bool, String> {
+pub fn set_launch_at_login(state: State<'_, JeffState>, enabled: bool) -> Result<bool, String> {
+    let status = crate::login_item::set_login_item_enabled(enabled)?;
+    let persisted = if enabled {
+        status.is_enabled_or_pending()
+    } else {
+        false
+    };
     state
         .store
-        .set_launch_at_login(enabled)
+        .set_launch_at_login(persisted)
         .map_err(map_jeff_error)?;
-
-    use tauri_plugin_autostart::ManagerExt;
-    if enabled {
-        app.autolaunch().enable().map_err(|e| e.to_string())?;
-    } else {
-        app.autolaunch().disable().map_err(|e| e.to_string())?;
-    }
-
-    Ok(enabled)
+    Ok(persisted)
 }
 
-/// returns the restored session state so the frontend can apply it on startup.
-/// the backend already applies overlay_mode and quiet_mode to AmbientState
-/// in main.rs setup; this command is for the frontend to confirm and act on.
+/// returns the session state that was restored on startup, for the frontend to
+/// read and display. actual restoration (overlay mode, quiet mode, watcher) is
+/// performed by the backend in main.rs setup before any window is shown. this
+/// command is a pure read — it does not perform restoration itself.
 #[tauri::command]
-pub fn restore_session(state: State<'_, JeffState>) -> Result<SessionRestoreDto, String> {
+pub fn get_session_restore_state(state: State<'_, JeffState>) -> Result<SessionRestoreDto, String> {
     let active_task = state.store.get_active_task().map_err(map_jeff_error)?;
-    let overlay_expanded = state
-        .store
-        .get_overlay_expanded()
-        .map_err(map_jeff_error)?;
+    let overlay_expanded = state.store.get_overlay_expanded().map_err(map_jeff_error)?;
     let quiet_mode = state.store.get_quiet_mode().map_err(map_jeff_error)?;
 
     Ok(SessionRestoreDto {

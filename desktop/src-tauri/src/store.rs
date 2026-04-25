@@ -11,9 +11,10 @@ use crate::{
     message_kind::MessageKind,
     models::{
         ArtifactContentDto, ArtifactDto, ArtifactVersionDto, ChatMessageDto, EventLogEntryDto,
-        FileWriteProposalDto, OpenResourceDto, RecentlyLearnedItemDto, RevisionProposalDto,
-        SessionModeStateDto, SubTaskDto, SubTaskStepDto, SuggestionDto, TaskDto, TaskSummaryDto,
-        WatchedFileRegistryEntry, WatchedFolderDto, WorkspaceInfoDto, WriteAuditEntryDto,
+        FileWriteProposalDto, OpenResourceDto, ProactiveAuditEntryDto, RecentlyLearnedItemDto,
+        RevisionProposalDto, SessionModeStateDto, SubTaskDto, SubTaskStepDto, SuggestionDto,
+        TaskDto, TaskSummaryDto, WatchedFileRegistryEntry, WatchedFolderDto, WorkspaceInfoDto,
+        WriteAuditEntryDto,
     },
     onboarding::{
         APP_SETTING_ONBOARDING_COMPLETE, APP_SETTING_ONBOARDING_LAST_COMPLETED_AT,
@@ -29,6 +30,25 @@ pub const APP_SETTING_LAUNCH_AT_LOGIN: &str = "launch_at_login";
 pub const APP_SETTING_OVERLAY_MODE: &str = "overlay_mode";
 pub const APP_SETTING_QUIET_MODE: &str = "quiet_mode";
 pub const APP_SETTING_SESSION_RESTORED_AT: &str = "session_restored_at";
+
+// phase 21: privacy center app setting keys
+pub const APP_SETTING_PRIVACY_WORKSPACE_WATCHER_ENABLED: &str =
+    "privacy_workspace_watcher_enabled";
+pub const APP_SETTING_PRIVACY_CLIPBOARD_CAPTURE_ENABLED: &str =
+    "privacy_clipboard_capture_enabled";
+pub const APP_SETTING_PRIVACY_ACTIVE_WINDOW_CONTEXT_ENABLED: &str =
+    "privacy_active_window_context_enabled";
+pub const APP_SETTING_PRIVACY_PROACTIVE_TRIGGERS_ENABLED: &str =
+    "privacy_proactive_triggers_enabled";
+pub const APP_SETTING_PRIVACY_USER_PROFILE_MEMORY_ENABLED: &str =
+    "privacy_user_profile_memory_enabled";
+pub const APP_SETTING_PRIVACY_CALENDAR_CONTEXT_ENABLED: &str =
+    "privacy_calendar_context_enabled";
+pub const APP_SETTING_PRIVACY_SELECTION_CAPTURE_ENABLED: &str =
+    "privacy_selection_capture_enabled";
+pub const APP_SETTING_PRIVACY_TYPING_ACTIVITY_ENABLED: &str =
+    "privacy_typing_activity_enabled";
+pub const APP_SETTING_TTS_VOICE: &str = "tts_voice";
 
 #[derive(Debug, Clone)]
 pub struct StorePaths {
@@ -2607,6 +2627,125 @@ impl TaskStore {
         )
     }
 
+    // phase 21: privacy center settings --------------------------------------
+
+    pub fn get_privacy_workspace_watcher_enabled(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_PRIVACY_WORKSPACE_WATCHER_ENABLED)?
+            .unwrap_or(true))
+    }
+
+    pub fn set_privacy_workspace_watcher_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_PRIVACY_WORKSPACE_WATCHER_ENABLED,
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    pub fn get_privacy_clipboard_capture_enabled(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_PRIVACY_CLIPBOARD_CAPTURE_ENABLED)?
+            .unwrap_or(true))
+    }
+
+    pub fn set_privacy_clipboard_capture_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_PRIVACY_CLIPBOARD_CAPTURE_ENABLED,
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    pub fn get_privacy_active_window_context_enabled(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_PRIVACY_ACTIVE_WINDOW_CONTEXT_ENABLED)?
+            .unwrap_or(true))
+    }
+
+    pub fn set_privacy_active_window_context_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_PRIVACY_ACTIVE_WINDOW_CONTEXT_ENABLED,
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    pub fn get_privacy_proactive_triggers_enabled(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_PRIVACY_PROACTIVE_TRIGGERS_ENABLED)?
+            .unwrap_or_else(|| !self.get_quiet_mode().unwrap_or(false)))
+    }
+
+    pub fn set_privacy_proactive_triggers_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_PRIVACY_PROACTIVE_TRIGGERS_ENABLED,
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    pub fn get_privacy_user_profile_memory_enabled(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_PRIVACY_USER_PROFILE_MEMORY_ENABLED)?
+            .unwrap_or(false))
+    }
+
+    pub fn set_privacy_user_profile_memory_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_PRIVACY_USER_PROFILE_MEMORY_ENABLED,
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    pub fn get_privacy_calendar_context_enabled(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_PRIVACY_CALENDAR_CONTEXT_ENABLED)?
+            .unwrap_or(false))
+    }
+
+    pub fn set_privacy_calendar_context_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_PRIVACY_CALENDAR_CONTEXT_ENABLED,
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    pub fn get_privacy_selection_capture_enabled(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_PRIVACY_SELECTION_CAPTURE_ENABLED)?
+            .unwrap_or(true))
+    }
+
+    pub fn set_privacy_selection_capture_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_PRIVACY_SELECTION_CAPTURE_ENABLED,
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    pub fn get_privacy_typing_activity_enabled(&self) -> Result<bool> {
+        Ok(self
+            .get_app_setting_bool(APP_SETTING_PRIVACY_TYPING_ACTIVITY_ENABLED)?
+            .unwrap_or(true))
+    }
+
+    pub fn set_privacy_typing_activity_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_app_setting(
+            APP_SETTING_PRIVACY_TYPING_ACTIVITY_ENABLED,
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    pub fn get_tts_voice(&self) -> Result<String> {
+        let configured = self
+            .get_app_setting(APP_SETTING_TTS_VOICE)?
+            .unwrap_or_else(|| crate::voice_naturalness::DEFAULT_TTS_VOICE.to_string());
+        Ok(crate::voice_naturalness::normalize_tts_voice(&configured))
+    }
+
+    pub fn set_tts_voice(&self, voice: &str) -> Result<String> {
+        let normalized = crate::voice_naturalness::normalize_tts_voice(voice);
+        self.set_app_setting(APP_SETTING_TTS_VOICE, &normalized)?;
+        Ok(normalized)
+    }
+
     // returns true if this is NOT the first ever session (session_restored_at is set).
     pub fn get_session_restored_at(&self) -> Result<bool> {
         Ok(self
@@ -2757,6 +2896,18 @@ impl TaskStore {
         )
         .context("failed to remove watched file registry entry")?;
         Ok(())
+    }
+
+    pub fn count_watched_files(&self, task_id: i64) -> Result<i64> {
+        let conn = self.connect()?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM watched_file_registry WHERE task_id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .context("failed to count watched files")?;
+        Ok(count)
     }
 
     pub fn set_clipboard_capture(&self, task_id: i64, enabled: bool) -> Result<()> {
@@ -2920,6 +3071,198 @@ impl TaskStore {
         Ok(value)
     }
 
+    pub fn list_proactive_trigger_audit_log(
+        &self,
+        task_id: i64,
+        limit: usize,
+    ) -> Result<Vec<ProactiveAuditEntryDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, trigger_type, fired_at, suppressed
+                 FROM proactive_trigger_log
+                 WHERE task_id = ?1
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )
+            .context("failed to prepare proactive trigger audit query")?;
+
+        let rows = stmt
+            .query_map(params![task_id, limit as i64], proactive_audit_from_row)
+            .context("failed to query proactive trigger audit log")?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.context("failed to map proactive audit row")?);
+        }
+        Ok(entries)
+    }
+
+    // ---------------------------------------------------------------------
+    // phase 21 privacy/data controls
+    // ---------------------------------------------------------------------
+
+    pub fn count_user_profile_signals(&self) -> Result<i64> {
+        let conn = self.connect()?;
+        if !Self::table_exists(&conn, "user_profile")? {
+            return Ok(0);
+        }
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM user_profile", [], |row| row.get(0))
+            .context("failed to count user profile signals")?;
+        Ok(count)
+    }
+
+    pub fn clear_user_profile(&self) -> Result<()> {
+        let conn = self.connect()?;
+        if Self::table_exists(&conn, "user_profile")? {
+            conn.execute("DELETE FROM user_profile", [])
+                .context("failed to clear user profile")?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_task_data(&self, task_id: i64) -> Result<()> {
+        let task = self
+            .get_task_by_id(task_id)?
+            .ok_or_else(|| anyhow!("task id={} not found", task_id))?;
+
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start clear_task_data transaction")?;
+
+        tx.execute(
+            "DELETE FROM subtask_write_audit_log WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear subtask write audit")?;
+        tx.execute(
+            "DELETE FROM subtask_file_write_proposals WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear file write proposals")?;
+        tx.execute(
+            "DELETE FROM subtask_steps
+             WHERE subtask_id IN (SELECT subtask_id FROM subtasks WHERE task_id = ?1)",
+            params![task_id],
+        )
+        .context("failed to clear subtask steps")?;
+        tx.execute("DELETE FROM subtasks WHERE task_id = ?1", params![task_id])
+            .context("failed to clear subtasks")?;
+        tx.execute(
+            "DELETE FROM artifact_versions WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear artifact versions")?;
+        tx.execute(
+            "DELETE FROM artifact_revisions WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear artifact revisions")?;
+        tx.execute("DELETE FROM artifact_chunks WHERE task_id = ?1", params![task_id])
+            .context("failed to clear artifact chunks")?;
+        tx.execute("DELETE FROM artifacts WHERE task_id = ?1", params![task_id])
+            .context("failed to clear artifacts")?;
+        tx.execute("DELETE FROM chat_messages WHERE task_id = ?1", params![task_id])
+            .context("failed to clear chat messages")?;
+        tx.execute("DELETE FROM sessions WHERE task_id = ?1", params![task_id])
+            .context("failed to clear sessions")?;
+        tx.execute(
+            "DELETE FROM task_summaries WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear task summary")?;
+        tx.execute(
+            "DELETE FROM open_resources WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear open resources")?;
+        tx.execute("DELETE FROM event_log WHERE task_id = ?1", params![task_id])
+            .context("failed to clear event log")?;
+        tx.execute(
+            "DELETE FROM watched_file_registry WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear watched file registry")?;
+        tx.execute("DELETE FROM watched_folders WHERE task_id = ?1", params![task_id])
+            .context("failed to clear watched folders")?;
+        tx.execute(
+            "DELETE FROM clipboard_capture_settings WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear clipboard capture setting")?;
+        tx.execute(
+            "DELETE FROM recently_learned_log WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear recently learned log")?;
+        tx.execute("DELETE FROM suggestions WHERE task_id = ?1", params![task_id])
+            .context("failed to clear suggestions")?;
+        tx.execute(
+            "DELETE FROM session_mode_state WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear session mode state")?;
+        tx.execute(
+            "DELETE FROM proactive_trigger_log WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear proactive trigger log")?;
+        tx.execute(
+            "DELETE FROM task_focus_log WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear task focus log")?;
+        tx.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            params![format!("active_artifact_task_{task_id}")],
+        )
+        .context("failed to clear active artifact selection")?;
+
+        tx.commit()
+            .context("failed to commit clear_task_data transaction")?;
+
+        self.remove_internal_task_workspace_contents(&task.workspace_path)?;
+        Ok(())
+    }
+
+    pub fn clear_all_data(&self) -> Result<()> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start clear_all_data transaction")?;
+
+        tx.execute("DELETE FROM tasks", [])
+            .context("failed to clear tasks")?;
+        tx.execute("DELETE FROM app_settings", [])
+            .context("failed to clear app settings")?;
+        if Self::table_exists_tx(&tx, "user_profile")? {
+            tx.execute("DELETE FROM user_profile", [])
+                .context("failed to clear user profile")?;
+        }
+        let _ = tx.execute("DELETE FROM sqlite_sequence", []);
+
+        tx.commit()
+            .context("failed to commit clear_all_data transaction")?;
+
+        if self.paths.workspace_root.exists() {
+            fs::remove_dir_all(&self.paths.workspace_root).with_context(|| {
+                format!(
+                    "failed to remove workspace root {}",
+                    self.paths.workspace_root.display()
+                )
+            })?;
+        }
+        fs::create_dir_all(&self.paths.workspace_root).with_context(|| {
+            format!(
+                "failed to recreate workspace root {}",
+                self.paths.workspace_root.display()
+            )
+        })?;
+        Ok(())
+    }
+
     // ---------------------------------------------------------------------
     // shared helpers
     // ---------------------------------------------------------------------
@@ -3029,6 +3372,64 @@ impl TaskStore {
             .optional()
             .context("failed to query write audit entry by id")?;
         Ok(entry)
+    }
+
+    fn remove_internal_task_workspace_contents(&self, workspace_path: &str) -> Result<()> {
+        let workspace = PathBuf::from(workspace_path);
+        if workspace.as_os_str().is_empty() || !workspace.starts_with(&self.paths.workspace_root) {
+            return Ok(());
+        }
+
+        if workspace.exists() {
+            for entry in fs::read_dir(&workspace).with_context(|| {
+                format!("failed to read task workspace {}", workspace.display())
+            })? {
+                let path = entry
+                    .with_context(|| {
+                        format!("failed to read entry in task workspace {}", workspace.display())
+                    })?
+                    .path();
+                if path.is_dir() {
+                    fs::remove_dir_all(&path)
+                        .with_context(|| format!("failed to remove {}", path.display()))?;
+                } else {
+                    fs::remove_file(&path)
+                        .with_context(|| format!("failed to remove {}", path.display()))?;
+                }
+            }
+        } else {
+            fs::create_dir_all(&workspace).with_context(|| {
+                format!("failed to recreate task workspace {}", workspace.display())
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sqlite_master
+                 WHERE type = 'table' AND name = ?1",
+                params![table],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("failed to check whether table '{}' exists", table))?;
+        Ok(exists > 0)
+    }
+
+    fn table_exists_tx(tx: &Transaction<'_>, table: &str) -> Result<bool> {
+        let exists: i64 = tx
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sqlite_master
+                 WHERE type = 'table' AND name = ?1",
+                params![table],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("failed to check whether table '{}' exists", table))?;
+        Ok(exists > 0)
     }
 
     fn next_available_slug(tx: &Transaction<'_>, base_slug: &str) -> Result<String> {
@@ -3299,6 +3700,16 @@ fn write_audit_from_row(row: &Row<'_>) -> rusqlite::Result<WriteAuditEntryDto> {
         action: row.get(4)?,
         proposed_path: row.get(5)?,
         resolved_at: row.get(6)?,
+    })
+}
+
+fn proactive_audit_from_row(row: &Row<'_>) -> rusqlite::Result<ProactiveAuditEntryDto> {
+    Ok(ProactiveAuditEntryDto {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        trigger_type: row.get(2)?,
+        fired_at: row.get(3)?,
+        suppressed: row.get::<_, i64>(4)? != 0,
     })
 }
 
@@ -3845,5 +4256,121 @@ mod tests {
         // session_restored_at: absent = false, mark = true
         store.mark_session_restored().unwrap();
         assert!(store.get_session_restored_at().unwrap());
+    }
+
+    #[test]
+    fn privacy_settings_round_trip() {
+        let (_dir, store) = new_test_store();
+
+        assert!(store.get_privacy_workspace_watcher_enabled().unwrap());
+        assert!(store.get_privacy_clipboard_capture_enabled().unwrap());
+        assert!(store.get_privacy_active_window_context_enabled().unwrap());
+        assert!(store.get_privacy_proactive_triggers_enabled().unwrap());
+        assert!(!store.get_privacy_user_profile_memory_enabled().unwrap());
+        assert!(!store.get_privacy_calendar_context_enabled().unwrap());
+        assert!(store.get_privacy_selection_capture_enabled().unwrap());
+        assert!(store.get_privacy_typing_activity_enabled().unwrap());
+        assert_eq!(
+            store.get_tts_voice().unwrap(),
+            crate::voice_naturalness::DEFAULT_TTS_VOICE
+        );
+
+        store
+            .set_privacy_workspace_watcher_enabled(false)
+            .unwrap();
+        store.set_privacy_clipboard_capture_enabled(false).unwrap();
+        store
+            .set_privacy_active_window_context_enabled(false)
+            .unwrap();
+        store
+            .set_privacy_proactive_triggers_enabled(false)
+            .unwrap();
+        store.set_privacy_user_profile_memory_enabled(true).unwrap();
+        store.set_privacy_calendar_context_enabled(true).unwrap();
+        store.set_privacy_selection_capture_enabled(false).unwrap();
+        store.set_privacy_typing_activity_enabled(false).unwrap();
+        assert_eq!(store.set_tts_voice("nova").unwrap(), "nova");
+
+        assert!(!store.get_privacy_workspace_watcher_enabled().unwrap());
+        assert!(!store.get_privacy_clipboard_capture_enabled().unwrap());
+        assert!(!store.get_privacy_active_window_context_enabled().unwrap());
+        assert!(!store.get_privacy_proactive_triggers_enabled().unwrap());
+        assert!(store.get_privacy_user_profile_memory_enabled().unwrap());
+        assert!(store.get_privacy_calendar_context_enabled().unwrap());
+        assert!(!store.get_privacy_selection_capture_enabled().unwrap());
+        assert!(!store.get_privacy_typing_activity_enabled().unwrap());
+        assert_eq!(store.get_tts_voice().unwrap(), "nova");
+        assert_eq!(
+            store.set_tts_voice("invalid-voice").unwrap(),
+            crate::voice_naturalness::DEFAULT_TTS_VOICE
+        );
+    }
+
+    #[test]
+    fn clear_task_data_keeps_task_and_removes_task_content() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Privacy Clear").unwrap();
+
+        store
+            .append_chat_message(
+                task.id,
+                "user",
+                "text",
+                MessageKind::UserStatement,
+                "keep this private",
+            )
+            .unwrap();
+        store
+            .set_watched_folder(task.id, "/tmp/privacy-clear")
+            .unwrap();
+        store
+            .upsert_file_registry_entry(task.id, "/tmp/privacy-clear/a.md", None, "v1")
+            .unwrap();
+        store.set_clipboard_capture(task.id, true).unwrap();
+        store
+            .append_recently_learned(task.id, "file", "a.md", "preview")
+            .unwrap();
+        store.record_task_focus(task.id).unwrap();
+        store
+            .record_proactive_trigger(task.id, "resume", false)
+            .unwrap();
+
+        let task_workspace = PathBuf::from(&task.workspace_path);
+        fs::write(task_workspace.join("scratch.txt"), "private").unwrap();
+
+        store.clear_task_data(task.id).unwrap();
+
+        assert_eq!(store.list_tasks().unwrap().len(), 1);
+        assert!(store.get_active_task().unwrap().is_some());
+        assert!(store.list_chat_messages(task.id).unwrap().is_empty());
+        assert!(store.get_watched_folder(task.id).unwrap().is_none());
+        assert_eq!(store.count_watched_files(task.id).unwrap(), 0);
+        assert!(!store.get_clipboard_capture(task.id).unwrap());
+        assert!(store.list_recently_learned(task.id, 10).unwrap().is_empty());
+        assert!(store
+            .list_proactive_trigger_audit_log(task.id, 10)
+            .unwrap()
+            .is_empty());
+        assert!(!task_workspace.join("scratch.txt").exists());
+        assert!(task_workspace.exists());
+    }
+
+    #[test]
+    fn clear_all_data_resets_database_and_workspace_root() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Reset All").unwrap();
+        store.set_onboarding_complete(true).unwrap();
+        store
+            .set_privacy_workspace_watcher_enabled(false)
+            .unwrap();
+        fs::write(PathBuf::from(&task.workspace_path).join("scratch.txt"), "private").unwrap();
+
+        store.clear_all_data().unwrap();
+
+        assert!(store.list_tasks().unwrap().is_empty());
+        assert!(!store.get_onboarding_complete().unwrap());
+        assert!(store.get_privacy_workspace_watcher_enabled().unwrap());
+        assert!(store.paths.workspace_root.exists());
+        assert!(!PathBuf::from(task.workspace_path).exists());
     }
 }

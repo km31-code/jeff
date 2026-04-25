@@ -40,6 +40,10 @@ export function showWorkspace(): Promise<void> {
   return invoke("ambient_show_workspace");
 }
 
+export function openPrivacyCenter(): Promise<void> {
+  return invoke("ambient_open_privacy_center");
+}
+
 export function openOnboarding(): Promise<void> {
   return invoke("ambient_open_onboarding");
 }

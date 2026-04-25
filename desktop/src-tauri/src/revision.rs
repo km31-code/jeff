@@ -1046,6 +1046,7 @@ mod tests {
             task_id,
             "What is the primary source requirement?",
             "text",
+            None,
             || false,
         )
         .expect("failed to send ask/answer message");

@@ -1587,6 +1587,7 @@ mod tests {
             task_id,
             "What is the primary source requirement?",
             "text",
+            None,
             || false,
         )
         .expect("send_message failed while subtask was running");

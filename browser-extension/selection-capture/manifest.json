@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Jeff Selection Capture",
+  "version": "0.1.0",
+  "description": "Send explicitly selected text from supported editors to Jeff.",
+  "permissions": ["activeTab", "storage", "scripting"],
+  "host_permissions": [
+    "http://127.0.0.1:47832/*",
+    "https://storymaps.arcgis.com/*",
+    "https://docs.google.com/*"
+  ],
+  "action": {
+    "default_title": "Capture selection for Jeff"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://storymaps.arcgis.com/*", "https://docs.google.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "capture-selection-for-jeff": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+V",
+        "mac": "Command+Shift+V"
+      },
+      "description": "Capture selected text for Jeff"
+    }
+  },
+  "options_page": "options.html"
+}

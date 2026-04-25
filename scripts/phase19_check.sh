@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # phase 19 behavioral check script
-# verifies: login-item registration, setting round-trips, session-restore
+# verifies: SMAppService login-item registration, setting round-trips, session-restore
 # command, overlay/quiet persistence, no set_focus in startup path.
 # grep checks confirm symbol presence; cargo test checks confirm runtime behavior.
 
@@ -41,16 +41,30 @@ echo "=================================================================="
 echo ""
 echo "--- m19.1: login item registration ---"
 
-# tauri-plugin-autostart must be in Cargo.toml
-if grep -q "tauri-plugin-autostart" "$REPO_ROOT/desktop/src-tauri/Cargo.toml"; then
-    check "tauri-plugin-autostart in Cargo.toml" "ok"
+# SMAppService wrapper must be present
+if [ -f "$SRC/login_item.rs" ]; then
+    check "login_item.rs exists" "ok"
 else
-    check "tauri-plugin-autostart in Cargo.toml" "fail"
+    check "login_item.rs exists" "fail"
 fi
 
-# plugin must be initialized in main.rs
-grep_check "tauri_plugin_autostart::init in main.rs" \
-    "tauri_plugin_autostart::init" "$SRC/main.rs"
+grep_check "SMAppService mainAppService wrapper" \
+    "SMAppService" "$SRC/login_item.rs"
+
+grep_check "ServiceManagement framework linked" \
+    "ServiceManagement" "$SRC/login_item.rs"
+
+grep_check "set_login_item_enabled helper" \
+    "set_login_item_enabled" "$SRC/login_item.rs"
+
+grep_check "login item status helper" \
+    "login_item_status" "$SRC/login_item.rs"
+
+if grep -q "tauri-plugin-autostart" "$REPO_ROOT/desktop/src-tauri/Cargo.toml"; then
+    check "tauri-plugin-autostart removed from Cargo.toml" "fail"
+else
+    check "tauri-plugin-autostart removed from Cargo.toml" "ok"
+fi
 
 # store setting constants exist
 grep_check "APP_SETTING_LAUNCH_AT_LOGIN constant" \
@@ -63,12 +77,18 @@ grep_check "get_launch_at_login store method" \
 grep_check "set_launch_at_login store method" \
     "fn set_launch_at_login" "$SRC/store.rs"
 
-# commands exist
+# commands exist and call SMAppService helper
 grep_check "get_launch_at_login command" \
     "pub fn get_launch_at_login" "$SRC/commands.rs"
 
 grep_check "set_launch_at_login command" \
     "pub fn set_launch_at_login" "$SRC/commands.rs"
+
+grep_check "set_launch_at_login uses SMAppService helper" \
+    "set_login_item_enabled" "$SRC/commands.rs"
+
+grep_check "get_launch_at_login reconciles OS state" \
+    "login_item_enabled_or_pending" "$SRC/commands.rs"
 
 # commands registered in invoke_handler
 grep_check "get_launch_at_login registered in invoke_handler" \
@@ -83,6 +103,9 @@ echo "--- m19.2: tray menu toggle ---"
 # tray:launch_at_login menu item event handler
 grep_check "tray:launch_at_login menu event handler" \
     "tray:launch_at_login" "$SRC/ambient.rs"
+
+grep_check "tray launch toggle uses SMAppService helper" \
+    "set_login_item_enabled" "$SRC/ambient.rs"
 
 # CheckMenuItem import (visual checkmark)
 grep_check "CheckMenuItem imported in ambient.rs" \
@@ -141,11 +164,11 @@ grep_check "APP_SETTING_SESSION_RESTORED_AT constant" \
 grep_check "mark_session_restored store method" \
     "fn mark_session_restored" "$SRC/store.rs"
 
-grep_check "restore_session command" \
-    "pub fn restore_session" "$SRC/commands.rs"
+grep_check "get_session_restore_state command" \
+    "pub fn get_session_restore_state" "$SRC/commands.rs"
 
-grep_check "restore_session registered in invoke_handler" \
-    "commands::restore_session" "$SRC/main.rs"
+grep_check "get_session_restore_state registered in invoke_handler" \
+    "commands::get_session_restore_state" "$SRC/main.rs"
 
 grep_check "SessionRestoreDto in models.rs" \
     "SessionRestoreDto" "$SRC/models.rs"
@@ -156,6 +179,12 @@ grep_check "first-session notification in main.rs" \
 
 grep_check "mark_session_restored called in main.rs" \
     "mark_session_restored" "$SRC/main.rs"
+
+grep_check "getSessionRestoreState exported in tauriClient.ts" \
+    "getSessionRestoreState" "$REPO_ROOT/desktop/src/tauriClient.ts"
+
+grep_check "get_launch_at_login does not write-on-read" \
+    "reads OS state directly" "$SRC/commands.rs"
 
 echo ""
 echo "--- m19.5: no set_focus in startup path ---"
@@ -174,16 +203,21 @@ echo ""
 echo "--- behavioral: cargo test ---"
 
 echo "  running session_settings_round_trip..."
-if (cd "$REPO_ROOT/desktop/src-tauri" && \
-    cargo test --bin jeff-desktop session_settings_round_trip 2>&1 | grep -q "1 passed"); then
+if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --bin jeff-desktop session_settings_round_trip >/dev/null); then
     check "session_settings_round_trip passes" "ok"
 else
     check "session_settings_round_trip passes" "fail"
 fi
 
+echo "  running login_item status tests..."
+if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --bin jeff-desktop login_item >/dev/null); then
+    check "login_item tests pass" "ok"
+else
+    check "login_item tests pass" "fail"
+fi
+
 echo "  running all bin tests (regression check)..."
-if (cd "$REPO_ROOT/desktop/src-tauri" && \
-    cargo test --bin jeff-desktop 2>&1 | grep -q "0 failed"); then
+if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --bin jeff-desktop >/dev/null); then
     check "all bin tests pass (no regressions)" "ok"
 else
     check "all bin tests pass (no regressions)" "fail"

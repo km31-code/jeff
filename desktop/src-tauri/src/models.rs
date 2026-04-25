@@ -452,3 +452,89 @@ pub struct SessionRestoreDto {
     pub overlay_expanded: bool,
     pub quiet_mode: bool,
 }
+
+// phase 20: active window context DTO for frontend serialization.
+// i64 instead of f64 for captured_at so JSON serialization is exact.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveWindowContextDto {
+    pub app_name: String,
+    pub document_title: String,
+    pub captured_at: i64,
+}
+
+// phase 21: privacy and trust control center
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrivacyCenterDashboardDto {
+    pub active_task_id: Option<i64>,
+    pub active_task_title: Option<String>,
+    pub workspace_watcher_enabled: bool,
+    pub workspace_folder_path: Option<String>,
+    pub workspace_watched_file_count: i64,
+    pub workspace_watcher_running: bool,
+    pub clipboard_capture_enabled: bool,
+    pub clipboard_capture_reminder: String,
+    pub active_window_context_enabled: bool,
+    pub accessibility_permission_status: String,
+    pub proactive_triggers_enabled: bool,
+    pub user_profile_memory_enabled: bool,
+    pub user_profile_signal_count: i64,
+    pub calendar_context_enabled: bool,
+    pub calendar_permission_status: String,
+    pub selection_capture_enabled: bool,
+    pub typing_activity_enabled: bool,
+    pub tts_voice: String,
+    pub available_tts_voices: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProactiveAuditEntryDto {
+    pub id: i64,
+    pub task_id: i64,
+    pub trigger_type: String,
+    pub fired_at: String,
+    pub suppressed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DataClearResultDto {
+    pub cleared: bool,
+    pub active_task_id: Option<i64>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionCaptureStatus {
+    Captured,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectionCaptureIndicatorDto {
+    pub status: SelectionCaptureStatus,
+    pub app_name: String,
+    pub document_title: Option<String>,
+    pub captured_at: i64,
+    pub word_count: usize,
+    pub source_type: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserSelectionCaptureRequestDto {
+    pub token: String,
+    pub text: String,
+    pub app_name: String,
+    pub document_title: Option<String>,
+    pub source_url: Option<String>,
+    pub captured_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectionBridgeStatusDto {
+    pub enabled: bool,
+    pub port: u16,
+    pub token: String,
+}

@@ -1,5 +1,7 @@
 # Jeff — Phase 19 + Phase 20 Implementation Plan
 
+**Status:** Phase 19 complete; Phase 20 complete.
+
 ## Status legend
 - `[ ]` not started
 - `[~]` in progress
@@ -32,31 +34,35 @@ with no window stealing focus.
 ### M19.1 — Login Item Registration (backend)
 `[x]`
 
-**What this does:** Wires SMAppService via `tauri-plugin-autostart` so
-Jeff can register/deregister itself as a macOS login item. Adds the
-`launch_at_login` app_setting key for persistence.
+**What this does:** Wires macOS 13+ `SMAppService.mainAppService`
+through `login_item.rs` so Jeff can register/deregister the main app as
+a real Login Item. Adds the `launch_at_login` app_setting key for
+persistence, but only updates it after the OS state accepts the request
+or reports pending user approval.
 
 **Files touched:**
-- `desktop/src-tauri/Cargo.toml` — add `tauri-plugin-autostart = "2"`
+- `desktop/src-tauri/Cargo.toml` — add `objc2` for the Objective-C
+  runtime bridge used by ServiceManagement.
+- `desktop/src-tauri/src/login_item.rs` — native SMAppService wrapper:
+  `login_item_status()`, `login_item_enabled_or_pending()`, and
+  `set_login_item_enabled(enabled)`.
 - `desktop/src-tauri/src/store.rs` — add constant
   `APP_SETTING_LAUNCH_AT_LOGIN = "launch_at_login"`, plus
   `get_launch_at_login() -> Result<bool>` and
   `set_launch_at_login(enabled: bool) -> Result<()>`
 - `desktop/src-tauri/src/commands.rs` — two new commands:
-  `get_launch_at_login` (reads store), `set_launch_at_login(enabled: bool)`
-  which calls `tauri_plugin_autostart::ManagerExt::autolaunch()` to
-  enable/disable the login item AND persists the bool to app_settings.
-- `desktop/src-tauri/src/main.rs` — register `tauri_plugin_autostart`
-  plugin in the Tauri builder. On startup: read `launch_at_login` from
-  store and call the plugin to sync its state (so SMAppService state
-  reflects persisted setting even after an app reinstall).
-- `desktop/src-tauri/src/lib.rs` — no change needed if commands are
-  wired via the existing export pattern.
+  `get_launch_at_login` reconciles the app_setting with SMAppService
+  state, and `set_launch_at_login(enabled: bool)` calls
+  `set_login_item_enabled` before persisting.
+- `desktop/src-tauri/src/main.rs` — on startup: read `launch_at_login`
+  from store and sync SMAppService state. If registration fails, clear
+  the setting so the tray checkmark cannot lie.
+- `desktop/src-tauri/src/lib.rs` — expose `login_item` for tests.
 
 **Exit criteria for this milestone:**
 - `get_launch_at_login` command round-trips correctly.
-- `set_launch_at_login(true)` then checking SMAppService via
-  `autolaunch().is_enabled()` returns true.
+- `set_launch_at_login(true)` registers SMAppService mainAppService or
+  returns a clear OS error without updating persisted state.
 - `set_launch_at_login(false)` removes the login item.
 
 ---
@@ -164,17 +170,16 @@ Jeff set to launch at login.
 **What this does:** Writes the behavioral check script.
 
 **Verifications:**
-1. `grep -r "SMAppService\|AutolaunchManagerExt\|tauri_plugin_autostart"` finds at least one hit in `src/`.
+1. `grep "SMAppService"` in `login_item.rs`.
 2. `grep "APP_SETTING_LAUNCH_AT_LOGIN"` exists in `store.rs`.
 3. `grep "APP_SETTING_OVERLAY_MODE\|APP_SETTING_QUIET_MODE"` exist in `store.rs`.
 4. `grep "restore_session"` exists in `commands.rs`.
 5. `grep "set_focus" desktop/src-tauri/src/main.rs` returns nothing
    (no set_focus in main startup path).
 6. `grep "session_restored_at"` exists in `main.rs` or `commands.rs`.
-7. Behavioral: run `cargo test -p jeff-desktop restore_session` (unit
-   test for the store round-trips added in M19.3).
-8. Behavioral: `cargo test -p jeff-desktop launch_at_login` for the
-   store methods.
+7. Behavioral: run `cargo test --bin jeff-desktop session_settings_round_trip`.
+8. Behavioral: run `cargo test --bin jeff-desktop login_item`.
+9. Regression: run `cargo test --bin jeff-desktop`.
 
 **Files touched:**
 - `scripts/phase19_check.sh` (new file)
@@ -189,17 +194,15 @@ content). Full graceful degradation when the macOS Accessibility
 permission is not granted.
 
 ### M20.1 — `context_observer.rs` Module + Permission Check
-`[ ]`
+`[x]`
 
 **What this does:** Creates the new module that polls NSWorkspace and
 AXUIElement. No UI yet — pure backend plumbing and permission gate.
 
 **Files touched:**
 - `desktop/src-tauri/Cargo.toml` — add:
-  - `objc2 = "0.5"`
-  - `objc2-app-kit = { version = "0.2", features = ["NSRunningApplication", "NSWorkspace"] }`
-  - `objc2-foundation = "0.2"`
-  These provide NSWorkspace and NSRunningApplication access. AXUIElement
+  - `objc2 = "0.6.4"`
+  This provides Objective-C runtime access for NSWorkspace. AXUIElement
   is accessed via raw FFI against `ApplicationServices` framework
   (already linked on macOS; no new Cargo dep needed).
 - `desktop/src-tauri/src/context_observer.rs` (new file):
@@ -230,7 +233,7 @@ AXUIElement. No UI yet — pure backend plumbing and permission gate.
 ---
 
 ### M20.2 — ContextState + Polling Task + Tauri Commands
-`[ ]`
+`[x]`
 
 **What this does:** Manages the active context state in memory, starts
 the 3-second polling loop, and exposes it via Tauri commands.
@@ -243,13 +246,14 @@ the 3-second polling loop, and exposes it via Tauri commands.
   }
   struct ContextStateInner {
       current: Option<ActiveWindowContext>,
-      last_nudged_title: Option<String>,
+      nudged_titles: HashSet<String>,
   }
   impl ContextState {
       pub fn new() -> Self { ... }
       pub fn update(&self, ctx: Option<ActiveWindowContext>) { ... }
       pub fn current(&self) -> Option<ActiveWindowContext> { ... }
       pub fn should_nudge(&self, title: &str) -> bool { ... }
+      pub fn should_nudge_for_switch(&self, title: &str) -> bool { ... }
       pub fn mark_nudged(&self, title: String) { ... }
   }
   ```
@@ -280,7 +284,7 @@ the 3-second polling loop, and exposes it via Tauri commands.
 ---
 
 ### M20.3 — Companion Header Showing Active Context
-`[ ]`
+`[x]`
 
 **What this does:** Frontend shows the active app and document title in
 the companion/overlay header. Renders nothing when context is absent.
@@ -306,7 +310,7 @@ the companion/overlay header. Renders nothing when context is absent.
 ---
 
 ### M20.4 — LLM System Prompt Injection
-`[ ]`
+`[x]`
 
 **What this does:** All three LLM call paths (chat, reorientation,
 drift) receive the active window context as a prefix line in the
@@ -336,7 +340,7 @@ system prompt when context is available. Under 30 tokens.
 ---
 
 ### M20.5 — Document-Switch Nudge
-`[ ]`
+`[x]`
 
 **What this does:** When the frontmost document title changes to
 something that does not match the active task, Jeff surfaces one soft
@@ -350,15 +354,16 @@ prompt. One prompt per unique document title, never repeated.
   active task's title AND `ContextState.should_nudge(new_title)` is true,
   emit a Tauri event `context://document-switch` with payload
   `{ app_name, document_title }` to all windows. Call
-  `ContextState.mark_nudged(new_title)` immediately so the nudge cannot
-  fire again for the same title.
+  `ContextState.mark_nudged(new_title)` after emitting so the nudge cannot
+  fire again for the same title. First observation is not treated as a
+  switch.
   Emit only when `is_accessibility_trusted()` is true.
 - `desktop/src/Overlay.tsx` — subscribe to `context://document-switch`.
   On event: show a dismissible inline banner (same style as the drift
   notice banner, 8-second auto-dismiss):
   `"You switched to [document_title]. Want to start or switch tasks?"`
-  with a "Switch task" CTA that opens the task picker. If the user
-  dismisses, do nothing — nudge is already marked in backend state.
+  with start/switch task CTAs. If the user dismisses, do nothing — the
+  emitted nudge is already marked in backend state.
 - `desktop/src/App.tsx` — same subscription and banner in the companion
   view.
 
@@ -372,7 +377,7 @@ prompt. One prompt per unique document title, never repeated.
 ---
 
 ### M20.6 — `scripts/phase20_check.sh`
-`[ ]`
+`[x]`
 
 **What this does:** Writes the behavioral check script.
 
@@ -390,8 +395,9 @@ prompt. One prompt per unique document title, never repeated.
    `grep "active app\|document_title" proactive.rs`.
 8. SQLite safety: `grep -r "INSERT.*context\|context.*INSERT" store.rs`
    returns nothing (context is never written to SQLite).
-9. Behavioral: `cargo test -p jeff-desktop context_state` for
-   `should_nudge` / `mark_nudged` unit tests.
+9. Behavioral: `cargo test --bin jeff-desktop context_state` for
+   `should_nudge`, `should_nudge_for_switch`, and `mark_nudged` unit tests.
+10. Frontend regression: `npm run test`.
 
 **Files touched:**
 - `scripts/phase20_check.sh` (new file)
@@ -403,7 +409,7 @@ prompt. One prompt per unique document title, never repeated.
 ```
 Phase 19                  Phase 20
 --------                  --------
-M19.1 (store + plugin)    M20.1 (context_observer module)
+M19.1 (SMAppService)      M20.1 (context_observer module)
   |                         |
 M19.2 (tray toggle)       M20.2 (ContextState + polling + commands)
   |                         |

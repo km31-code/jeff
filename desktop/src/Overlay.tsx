@@ -27,17 +27,25 @@ import {
   showWorkspace
 } from "./ambientClient";
 import {
+  ActiveWindowContextDto,
   ApiKeyValidationDto,
   ChatMessageDto,
   OnboardingStatusDto,
+  SelectionCaptureIndicatorDto,
   TaskDto,
   cancelStreamingTurn,
   clearPreferredWorkspaceFolder,
   completeOnboarding,
   createTask,
+  dismissSelectionCapture,
   getActiveTask,
+  getActiveWindowContext,
+  getAccessibilityPermissionStatus,
   getOnboardingStatus,
+  getSelectionCaptureIndicator,
+  listTasks,
   listMessages,
+  requestAccessibilityPermission,
   sendMessage,
   sendMessageStreaming,
   setActiveTask,
@@ -51,7 +59,7 @@ import {
 // full workspace — it is the always-there companion surface.
 
 type PendingNotificationContext = { kind: string | null; id: number | null };
-type OnboardingStep = 1 | 2 | 3 | 4;
+type OnboardingStep = 1 | 2 | 3 | 4 | 5;
 
 function describeStatus(status: TrayStatus): string {
   switch (status) {
@@ -120,6 +128,19 @@ export default function Overlay(): JSX.Element {
   const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
   const [streamingText, setStreamingText] = useState("");
 
+  // phase 20: active window context driven by backend context://context-updated events.
+  const [activeContext, setActiveContext] = useState<ActiveWindowContextDto | null>(null);
+  const [docSwitchBanner, setDocSwitchBanner] = useState<{ app_name: string; document_title: string } | null>(null);
+  const [tasks, setTasks] = useState<TaskDto[]>([]);
+  const [accessibilityPermissionGranted, setAccessibilityPermissionGranted] = useState<boolean | null>(null);
+  const [accessibilityPromptDismissed, setAccessibilityPromptDismissed] = useState(false);
+  const docSwitchTimerRef = useRef<number | null>(null);
+
+  // phase 22: selected-text capture indicator. shown between messages and the
+  // input box so the user sees what context is loaded before sending a message.
+  const [selectionCaptureIndicator, setSelectionCaptureIndicator] =
+    useState<SelectionCaptureIndicatorDto | null>(null);
+
   const [onboardingStatus, setOnboardingStatus] =
     useState<OnboardingStatusDto | null>(null);
   const [onboardingVisible, setOnboardingVisible] = useState(false);
@@ -131,6 +152,10 @@ export default function Overlay(): JSX.Element {
   const [workspaceFolder, setWorkspaceFolder] = useState<string | null>(null);
 
   const activeTaskRef = useRef<TaskDto | null>(null);
+  const docSwitchTaskCandidates = useMemo(
+    () => tasks.filter((task) => !activeTask || task.id !== activeTask.id).slice(0, 3),
+    [activeTask, tasks]
+  );
   const streamingTurnIdRef = useRef<string | null>(null);
   const pendingExpandRef = useRef(false);
   const onboardingSnoozedRef = useRef(false);
@@ -159,6 +184,7 @@ export default function Overlay(): JSX.Element {
     try {
       const task = await getActiveTask();
       setActiveTaskState(task);
+      setTasks(await listTasks().catch(() => []));
       if (task) {
         await refreshMessages(task.id);
       } else {
@@ -338,6 +364,120 @@ export default function Overlay(): JSX.Element {
     }
   }, [notificationContext]);
 
+  // phase 20: poll active window context every 3 seconds.
+  // phase 20: subscribe to backend context://context-updated events.
+  // the backend emits this after every 3-second poll so no client-side interval
+  // is needed. fetch once on mount for the initial state (first event may not
+  // have fired yet if the overlay opens within the first poll window).
+  useEffect(() => {
+    let cancelled = false;
+    void getActiveWindowContext()
+      .then((ctx) => { if (!cancelled) setActiveContext(ctx); })
+      .catch(() => undefined);
+    const unsub = listen<ActiveWindowContextDto | null>(
+      "context://context-updated",
+      (event) => {
+        if (!cancelled) setActiveContext(event.payload ?? null);
+      }
+    );
+    return () => {
+      cancelled = true;
+      unsub.then((fn) => fn()).catch(() => undefined);
+    };
+  }, []);
+
+  // phase 22: load any in-flight selection capture on mount, then subscribe to
+  // capture/failed/cleared events for the lifetime of the overlay window.
+  // the overlay is the primary surface that opens after Cmd+Shift+V fires, so
+  // this is where the indicator must be shown first.
+  useEffect(() => {
+    let cancelled = false;
+    void getSelectionCaptureIndicator()
+      .then((indicator) => { if (!cancelled) setSelectionCaptureIndicator(indicator); })
+      .catch(() => undefined);
+
+    const unsubscribers: Promise<UnlistenFn>[] = [];
+
+    unsubscribers.push(
+      listen<SelectionCaptureIndicatorDto>("selection://captured", (event) => {
+        if (!cancelled) {
+          setSelectionCaptureIndicator(event.payload);
+          // ensure the overlay is expanded so the indicator is visible
+          setMode("expanded");
+          void setOverlayMode("expanded").catch(() => undefined);
+        }
+      })
+    );
+
+    unsubscribers.push(
+      listen<SelectionCaptureIndicatorDto>("selection://capture-failed", (event) => {
+        if (!cancelled) {
+          setSelectionCaptureIndicator(event.payload);
+          setMode("expanded");
+          void setOverlayMode("expanded").catch(() => undefined);
+        }
+      })
+    );
+
+    unsubscribers.push(
+      listen("selection://cleared", () => {
+        if (!cancelled) setSelectionCaptureIndicator(null);
+      })
+    );
+
+    return () => {
+      cancelled = true;
+      unsubscribers.forEach((p) => p.then((fn) => fn()).catch(() => undefined));
+    };
+  }, []);
+
+  // phase 20: check accessibility status without showing the macOS prompt.
+  useEffect(() => {
+    let cancelled = false;
+    const refreshPermission = async () => {
+      try {
+        const granted = await getAccessibilityPermissionStatus();
+        if (!cancelled) {
+          setAccessibilityPermissionGranted(granted);
+        }
+      } catch {
+        if (!cancelled) {
+          setAccessibilityPermissionGranted(false);
+        }
+      }
+    };
+    void refreshPermission();
+    const id = window.setInterval(() => void refreshPermission(), 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // phase 20: subscribe to document-switch nudge events from the backend.
+  useEffect(() => {
+    const unsubscribe = listen<{ app_name: string; document_title: string }>(
+      "context://document-switch",
+      (event) => {
+        setDocSwitchBanner(event.payload);
+        // auto-dismiss after 8 seconds.
+        if (docSwitchTimerRef.current !== null) {
+          window.clearTimeout(docSwitchTimerRef.current);
+        }
+        docSwitchTimerRef.current = window.setTimeout(() => {
+          setDocSwitchBanner(null);
+          docSwitchTimerRef.current = null;
+        }, 8000);
+      }
+    );
+    return () => {
+      unsubscribe.then((fn) => fn()).catch(() => undefined);
+      if (docSwitchTimerRef.current !== null) {
+        window.clearTimeout(docSwitchTimerRef.current);
+      }
+    };
+  }, []);
+
   const probeNotificationPermission = useCallback(async () => {
     try {
       if (typeof Notification === "undefined") {
@@ -389,6 +529,53 @@ export default function Overlay(): JSX.Element {
       setErrorMessage(String(error));
     }
   }, [ambient]);
+
+  const handleRequestAccessibilityPermission = useCallback(async () => {
+    setErrorMessage(null);
+    try {
+      await requestAccessibilityPermission();
+      window.setTimeout(() => {
+        getAccessibilityPermissionStatus()
+          .then((granted) => setAccessibilityPermissionGranted(granted))
+          .catch(() => setAccessibilityPermissionGranted(false));
+      }, 800);
+    } catch (error) {
+      setErrorMessage(String(error));
+    }
+  }, []);
+
+  const handleSwitchTask = useCallback(
+    async (taskId: number) => {
+      setErrorMessage(null);
+      try {
+        const next = await setActiveTask(taskId);
+        setActiveTaskState(next);
+        activeTaskRef.current = next;
+        setTasks(await listTasks().catch(() => []));
+        await refreshMessages(next.id);
+        setDocSwitchBanner(null);
+      } catch (error) {
+        setErrorMessage(String(error));
+      }
+    },
+    [refreshMessages]
+  );
+
+  const handleStartTaskFromDocumentTitle = useCallback(async (documentTitle: string) => {
+    const title = deriveTaskTitleFromPrompt(documentTitle);
+    setErrorMessage(null);
+    try {
+      const created = await createTask(title);
+      const next = await setActiveTask(created.id).catch(() => created);
+      setActiveTaskState(next);
+      activeTaskRef.current = next;
+      setTasks(await listTasks().catch(() => []));
+      await refreshMessages(next.id);
+      setDocSwitchBanner(null);
+    } catch (error) {
+      setErrorMessage(String(error));
+    }
+  }, [refreshMessages]);
 
   const handleSubmit = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
@@ -565,6 +752,15 @@ export default function Overlay(): JSX.Element {
     void openOnboardingWizard(2);
   }, [openOnboardingWizard]);
 
+  const handleDismissSelectionCapture = useCallback(async () => {
+    try {
+      await dismissSelectionCapture();
+      setSelectionCaptureIndicator(null);
+    } catch {
+      setSelectionCaptureIndicator(null);
+    }
+  }, []);
+
   const hotkeyLabel = useMemo(
     () => (ambient ? formatHotkey(ambient.hotkey) : ""),
     [ambient]
@@ -646,6 +842,62 @@ export default function Overlay(): JSX.Element {
             </button>
           </div>
 
+          {activeContext && activeContext.document_title ? (
+            <div className="overlay-context-line">
+              {activeContext.app_name} &mdash; {activeContext.document_title}
+            </div>
+          ) : null}
+
+          {onboardingStatus?.onboarding_complete &&
+          accessibilityPermissionGranted === false &&
+          !accessibilityPromptDismissed &&
+          !activeContext ? (
+            <div className="overlay-banner overlay-banner-info" data-testid="accessibility-context-prompt">
+              <span>Jeff needs accessibility permission to know which document you have open.</span>
+              <div className="overlay-banner-actions">
+                <button
+                  type="button"
+                  onClick={() => void handleRequestAccessibilityPermission()}
+                  data-testid="request-accessibility-permission"
+                >
+                  enable
+                </button>
+                <button type="button" onClick={() => setAccessibilityPromptDismissed(true)}>
+                  not now
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {docSwitchBanner ? (
+            <div className="overlay-banner overlay-banner-info" data-testid="doc-switch-banner">
+              <span>
+                You switched to {docSwitchBanner.document_title}. Want to start or switch tasks?
+              </span>
+              <div className="overlay-banner-actions">
+                <button
+                  type="button"
+                  onClick={() => void handleStartTaskFromDocumentTitle(docSwitchBanner.document_title)}
+                  data-testid="doc-switch-start-task"
+                >
+                  start task
+                </button>
+                {docSwitchTaskCandidates.map((task) => (
+                  <button
+                    type="button"
+                    key={task.id}
+                    onClick={() => void handleSwitchTask(task.id)}
+                  >
+                    switch
+                  </button>
+                ))}
+                <button type="button" onClick={() => setDocSwitchBanner(null)}>
+                  dismiss
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           {notificationContext ? (
             <div className="overlay-banner overlay-banner-info">
               <span>
@@ -666,7 +918,7 @@ export default function Overlay(): JSX.Element {
           {onboardingVisible ? (
             <section className="overlay-onboarding" data-testid="overlay-onboarding">
               <div className="overlay-onboarding-meta" data-testid="overlay-onboarding-step-count">
-                Step {onboardingStep} of 4
+                Step {onboardingStep} of 5
               </div>
 
               {onboardingStep === 1 ? (
@@ -779,6 +1031,47 @@ export default function Overlay(): JSX.Element {
 
               {onboardingStep === 4 ? (
                 <div data-testid="onboarding-step-4" className="overlay-onboarding-step">
+                  <h3>Window context</h3>
+                  <p>
+                    Jeff can see which app and document you have open to give better
+                    answers without you describing your screen. This requires macOS
+                    Accessibility permission.
+                  </p>
+                  {accessibilityPermissionGranted ? (
+                    <p
+                      className="overlay-meta"
+                      data-testid="onboarding-accessibility-granted"
+                    >
+                      Permission granted. Jeff will track your active window.
+                    </p>
+                  ) : (
+                    <div className="overlay-onboarding-actions">
+                      <button
+                        type="button"
+                        onClick={() => void handleRequestAccessibilityPermission()}
+                        data-testid="onboarding-enable-accessibility"
+                      >
+                        Enable
+                      </button>
+                    </div>
+                  )}
+                  <div className="overlay-onboarding-actions">
+                    <button
+                      type="button"
+                      onClick={() => setOnboardingStep(5)}
+                      data-testid="onboarding-continue-step-4"
+                    >
+                      {accessibilityPermissionGranted ? "Continue" : "Skip for now"}
+                    </button>
+                    <button type="button" onClick={handleOnboardingCancel}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {onboardingStep === 5 ? (
+                <div data-testid="onboarding-step-5" className="overlay-onboarding-step">
                   <h3>Ready</h3>
                   <p>
                     You are ready to use Jeff. Press {hotkeyLabel || "Cmd/Ctrl Shift J"} any time to summon it.
@@ -831,6 +1124,35 @@ export default function Overlay(): JSX.Element {
                 ) : null}
               </div>
 
+              {selectionCaptureIndicator ? (
+                <div
+                  className={`overlay-banner ${
+                    selectionCaptureIndicator.status === "failed"
+                      ? "overlay-banner-warn"
+                      : "overlay-banner-info"
+                  }`}
+                  data-testid="overlay-selection-capture-indicator"
+                >
+                  <span className="overlay-selection-capture-message">
+                    {selectionCaptureIndicator.message}
+                    {selectionCaptureIndicator.document_title ? (
+                      <span className="overlay-selection-capture-doc">
+                        {" "}— {selectionCaptureIndicator.document_title}
+                      </span>
+                    ) : null}
+                  </span>
+                  <div className="overlay-banner-actions">
+                    <button
+                      type="button"
+                      onClick={() => void handleDismissSelectionCapture()}
+                      data-testid="overlay-selection-capture-dismiss"
+                    >
+                      dismiss
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
               <form className="overlay-input-row" onSubmit={handleSubmit}>
                 <input
                   className="overlay-input"
@@ -838,7 +1160,9 @@ export default function Overlay(): JSX.Element {
                   type="text"
                   placeholder={
                     activeTask
-                      ? "Say something to Jeff"
+                      ? selectionCaptureIndicator?.status === "captured"
+                        ? "Ask about the captured text"
+                        : "Say something to Jeff"
                       : "Tell me what you're working on"
                   }
                   value={input}
@@ -881,6 +1205,11 @@ export default function Overlay(): JSX.Element {
           >
             {activeTask ? activeTask.title : "Tap to start"}
           </button>
+          {activeContext && activeContext.document_title ? (
+            <span className="overlay-context-hint">
+              {activeContext.app_name} &mdash; {activeContext.document_title}
+            </span>
+          ) : null}
           {hotkeyLabel ? (
             <span className="overlay-hotkey-hint">{hotkeyLabel}</span>
           ) : null}

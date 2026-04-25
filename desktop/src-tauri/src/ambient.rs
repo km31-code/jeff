@@ -299,6 +299,12 @@ pub fn show_workspace<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+pub fn open_privacy_center<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    show_workspace(app)?;
+    let _ = app.emit("privacy://open", serde_json::json!({}));
+    Ok(())
+}
+
 pub fn open_onboarding_flow<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     open_onboarding_flow_at_step(app, 1)
 }
@@ -313,7 +319,10 @@ pub fn open_onboarding_flow_at_step<R: Runtime>(app: &AppHandle<R>, step: u8) ->
         let _ = resize_overlay_for_mode(app, OverlayMode::Expanded);
         let _ = app.emit("ambient://state-changed", &state.snapshot());
     }
-    let _ = app.emit("ambient://open-onboarding", serde_json::json!({ "step": step }));
+    let _ = app.emit(
+        "ambient://open-onboarding",
+        serde_json::json!({ "step": step }),
+    );
     Ok(())
 }
 
@@ -344,6 +353,11 @@ pub fn ambient_hide_overlay<R: Runtime>(app: AppHandle<R>) -> Result<(), String>
 #[tauri::command]
 pub fn ambient_show_workspace<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     show_workspace(&app).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn ambient_open_privacy_center<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    open_privacy_center(&app).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -453,8 +467,10 @@ fn build_tray_menu<R: Runtime>(
         true,
         None::<&str>,
     )?;
-    let setup_item =
-        MenuItem::with_id(app, "tray:setup", "Set up Jeff again", true, None::<&str>)?;
+    let setup_item = MenuItem::with_id(app, "tray:setup", "Set up Jeff again", true, None::<&str>)?;
+    let privacy_item =
+        MenuItem::with_id(app, "tray:privacy", "What Jeff Knows", true, None::<&str>)?;
+    let voice_item = MenuItem::with_id(app, "tray:voice", "Voice Settings", true, None::<&str>)?;
     let quiet_item = CheckMenuItem::with_id(
         app,
         "tray:quiet",
@@ -478,6 +494,8 @@ fn build_tray_menu<R: Runtime>(
             &show_item,
             &workspace_item,
             &setup_item,
+            &privacy_item,
+            &voice_item,
             &quiet_item,
             &launch_item,
             &quit_item,
@@ -530,6 +548,12 @@ pub fn install_tray<R: Runtime>(
             "tray:setup" => {
                 let _ = open_onboarding_flow(app);
             }
+            "tray:privacy" => {
+                let _ = open_privacy_center(app);
+            }
+            "tray:voice" => {
+                let _ = open_privacy_center(app);
+            }
             "tray:quiet" => {
                 if let Some(ambient) = app.try_state::<AmbientState>() {
                     let new_value = !ambient.is_quiet_mode();
@@ -546,13 +570,17 @@ pub fn install_tray<R: Runtime>(
                 if let Some(jeff) = app.try_state::<crate::state::JeffState>() {
                     let current = jeff.store.get_launch_at_login().unwrap_or(false);
                     let new_value = !current;
-                    let _ = jeff.store.set_launch_at_login(new_value);
-                    // sync with the OS login-item registry (phase 19)
-                    use tauri_plugin_autostart::ManagerExt;
-                    if new_value {
-                        let _ = app.autolaunch().enable();
-                    } else {
-                        let _ = app.autolaunch().disable();
+                    // sync through SMAppService first; persist only after the
+                    // OS state accepts the request or reports pending approval.
+                    match crate::login_item::set_login_item_enabled(new_value) {
+                        Ok(status) => {
+                            let persisted = new_value && status.is_enabled_or_pending();
+                            let _ = jeff.store.set_launch_at_login(persisted);
+                        }
+                        Err(err) => {
+                            eprintln!("[jeff login-item] tray toggle failed: {err}");
+                            let _ = jeff.store.set_launch_at_login(current);
+                        }
                     }
                     refresh_tray_menu(app);
                 }
@@ -592,7 +620,7 @@ pub fn register_global_hotkey<R: Runtime>(app: &AppHandle<R>) -> Result<bool, St
         }
     };
 
-    match app.global_shortcut().register(shortcut) {
+    let default_result = match app.global_shortcut().register(shortcut) {
         Ok(_) => {
             if let Some(state) = app.try_state::<AmbientState>() {
                 state.set_hotkey_registered(true);
@@ -610,7 +638,40 @@ pub fn register_global_hotkey<R: Runtime>(app: &AppHandle<R>) -> Result<bool, St
             );
             Err(err.to_string())
         }
+    };
+
+    let selection_shortcut: Result<Shortcut, _> =
+        crate::selection_capture::SELECTION_CAPTURE_HOTKEY.parse();
+    match selection_shortcut {
+        Ok(selection_shortcut) => {
+            if let Err(err) = app.global_shortcut().register(selection_shortcut) {
+                let _ = app.emit(
+                    "selection://hotkey-conflict",
+                    &serde_json::json!({
+                        "hotkey": crate::selection_capture::SELECTION_CAPTURE_HOTKEY,
+                        "error": err.to_string()
+                    }),
+                );
+            }
+        }
+        Err(err) => {
+            let _ = app.emit(
+                "selection://hotkey-conflict",
+                &serde_json::json!({
+                    "hotkey": crate::selection_capture::SELECTION_CAPTURE_HOTKEY,
+                    "error": err.to_string()
+                }),
+            );
+        }
     }
+
+    default_result
+}
+
+pub fn shortcut_matches(shortcut: &tauri_plugin_global_shortcut::Shortcut, spec: &str) -> bool {
+    spec.parse::<tauri_plugin_global_shortcut::Shortcut>()
+        .map(|expected| shortcut == &expected)
+        .unwrap_or(false)
 }
 
 // ---- notifications ----------------------------------------------------------
@@ -715,5 +776,9 @@ mod tests {
     #[test]
     fn default_hotkey_is_cmd_shift_j() {
         assert_eq!(DEFAULT_HOTKEY, "CmdOrCtrl+Shift+J");
+        assert_eq!(
+            crate::selection_capture::SELECTION_CAPTURE_HOTKEY,
+            "CmdOrCtrl+Shift+V"
+        );
     }
 }

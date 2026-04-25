@@ -855,3 +855,157 @@ export async function startSubtaskChain(
     instructionSource: instructionSource ?? "text",
   });
 }
+
+// phase 19: session restore state
+// the backend restores session (overlay mode, quiet mode, watcher) in main.rs
+// setup before any window is shown. this command is a pure read for the
+// frontend to learn what was restored and adapt its initial display.
+
+export interface SessionRestoreDto {
+  had_active_task: boolean;
+  overlay_expanded: boolean;
+  quiet_mode: boolean;
+}
+
+export async function getSessionRestoreState(): Promise<SessionRestoreDto> {
+  return invoke<SessionRestoreDto>("get_session_restore_state");
+}
+
+// phase 20: active window context
+
+export interface ActiveWindowContextDto {
+  app_name: string;
+  document_title: string;
+  captured_at: number;
+}
+
+export async function getActiveWindowContext(): Promise<ActiveWindowContextDto | null> {
+  return invoke<ActiveWindowContextDto | null>("get_active_window_context");
+}
+
+export async function getAccessibilityPermissionStatus(): Promise<boolean> {
+  return invoke<boolean>("get_accessibility_permission_status");
+}
+
+export async function requestAccessibilityPermission(): Promise<void> {
+  return invoke<void>("request_accessibility_permission");
+}
+
+// phase 21: privacy and trust control center
+
+export interface PrivacyCenterDashboardDto {
+  active_task_id: number | null;
+  active_task_title: string | null;
+  workspace_watcher_enabled: boolean;
+  workspace_folder_path: string | null;
+  workspace_watched_file_count: number;
+  workspace_watcher_running: boolean;
+  clipboard_capture_enabled: boolean;
+  clipboard_capture_reminder: string;
+  active_window_context_enabled: boolean;
+  accessibility_permission_status: string;
+  proactive_triggers_enabled: boolean;
+  user_profile_memory_enabled: boolean;
+  user_profile_signal_count: number;
+  calendar_context_enabled: boolean;
+  calendar_permission_status: string;
+  selection_capture_enabled: boolean;
+  typing_activity_enabled: boolean;
+  tts_voice: string;
+  available_tts_voices: string[];
+}
+
+export type SelectionCaptureStatus = "captured" | "failed";
+
+export interface SelectionCaptureIndicatorDto {
+  status: SelectionCaptureStatus;
+  app_name: string;
+  document_title: string | null;
+  captured_at: number;
+  word_count: number;
+  source_type: string;
+  message: string;
+}
+
+export interface BrowserSelectionCaptureRequestDto {
+  token: string;
+  text: string;
+  app_name: string;
+  document_title: string | null;
+  source_url: string | null;
+  captured_at: number | null;
+}
+
+export interface SelectionBridgeStatusDto {
+  enabled: boolean;
+  port: number;
+  token: string;
+}
+
+export interface ProactiveAuditEntryDto {
+  id: number;
+  task_id: number;
+  trigger_type: string;
+  fired_at: string;
+  suppressed: boolean;
+}
+
+export interface DataClearResultDto {
+  cleared: boolean;
+  active_task_id: number | null;
+  message: string;
+}
+
+export async function getPrivacyCenterDashboard(): Promise<PrivacyCenterDashboardDto> {
+  return invoke<PrivacyCenterDashboardDto>("get_privacy_center_dashboard");
+}
+
+export async function setPrivacySurfaceEnabled(
+  surface: string,
+  enabled: boolean
+): Promise<PrivacyCenterDashboardDto> {
+  return invoke<PrivacyCenterDashboardDto>("set_privacy_surface_enabled", {
+    surface,
+    enabled,
+  });
+}
+
+export async function getSelectionCaptureIndicator(): Promise<SelectionCaptureIndicatorDto | null> {
+  return invoke<SelectionCaptureIndicatorDto | null>("get_selection_capture_indicator");
+}
+
+export async function dismissSelectionCapture(): Promise<SelectionCaptureIndicatorDto | null> {
+  return invoke<SelectionCaptureIndicatorDto | null>("dismiss_selection_capture");
+}
+
+export async function getSelectionBridgeStatus(): Promise<SelectionBridgeStatusDto> {
+  return invoke<SelectionBridgeStatusDto>("get_selection_bridge_status");
+}
+
+export async function captureBrowserSelection(
+  request: BrowserSelectionCaptureRequestDto
+): Promise<SelectionCaptureIndicatorDto> {
+  return invoke<SelectionCaptureIndicatorDto>("capture_browser_selection", { request });
+}
+
+export async function setTtsVoice(voice: string): Promise<PrivacyCenterDashboardDto> {
+  return invoke<PrivacyCenterDashboardDto>("set_tts_voice", { voice });
+}
+
+export async function clearUserProfileMemory(): Promise<PrivacyCenterDashboardDto> {
+  return invoke<PrivacyCenterDashboardDto>("clear_user_profile_memory");
+}
+
+export async function listProactiveTriggerAuditLog(
+  taskId: number
+): Promise<ProactiveAuditEntryDto[]> {
+  return invoke<ProactiveAuditEntryDto[]>("list_proactive_trigger_audit_log", { taskId });
+}
+
+export async function clearActiveTaskData(): Promise<DataClearResultDto> {
+  return invoke<DataClearResultDto>("clear_active_task_data");
+}
+
+export async function clearAllJeffData(): Promise<DataClearResultDto> {
+  return invoke<DataClearResultDto>("clear_all_jeff_data");
+}

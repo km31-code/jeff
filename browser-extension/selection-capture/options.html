@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jeff Selection Capture</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 24px;
+        max-width: 640px;
+      }
+      label {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 14px;
+      }
+      input {
+        font: inherit;
+        padding: 8px;
+      }
+      button {
+        font: inherit;
+        padding: 8px 12px;
+      }
+      #status {
+        min-height: 1.5em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Jeff Selection Capture</h1>
+    <label>
+      Bridge token
+      <input id="token" autocomplete="off" />
+    </label>
+    <label>
+      Bridge port
+      <input id="port" type="number" min="1" max="65535" />
+    </label>
+    <button id="save" type="button">Save</button>
+    <p id="status"></p>
+    <script src="options.js"></script>
+  </body>
+</html>

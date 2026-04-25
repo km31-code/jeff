@@ -52,6 +52,7 @@ type OverlayMockOptions = {
   hasStoredKey?: boolean;
   preferredWorkspaceFolder?: string | null;
   activeTask?: { id: number; title: string } | null;
+  accessibilityGranted?: boolean;
 };
 
 function setupInvokeMock(options: OverlayMockOptions = {}) {
@@ -104,6 +105,35 @@ function setupInvokeMock(options: OverlayMockOptions = {}) {
 
     if (command === "list_messages") {
       return [];
+    }
+
+    if (command === "list_tasks") {
+      if (!activeTask) {
+        return [];
+      }
+      return [
+        {
+          id: activeTask.id,
+          title: activeTask.title,
+          slug: "demo-task",
+          workspace_path: "/tmp/demo",
+          created_at: "2026-04-22T00:00:00Z",
+          updated_at: "2026-04-22T00:00:00Z",
+          is_active: true
+        }
+      ];
+    }
+
+    if (command === "get_active_window_context") {
+      return null;
+    }
+
+    if (command === "get_accessibility_permission_status") {
+      return options.accessibilityGranted ?? true;
+    }
+
+    if (command === "request_accessibility_permission") {
+      return null;
     }
 
     if (command === "mark_notification_permission") {
@@ -176,21 +206,27 @@ function setupInvokeMock(options: OverlayMockOptions = {}) {
 }
 
 describe("Overlay onboarding", () => {
-  it("renders the four-step onboarding wizard and completes it", async () => {
+  it("renders the five-step onboarding wizard and completes it", async () => {
     const user = userEvent.setup();
     openDialogMock.mockResolvedValue("/Users/tester/Documents");
     setupInvokeMock({ onboardingComplete: false, activeTask: null });
 
     render(<Overlay />);
 
+    // step 1: intro
     await screen.findByTestId("onboarding-step-1");
+    expect(screen.getByTestId("overlay-onboarding-step-count")).toHaveTextContent("Step 1 of 5");
     await user.click(screen.getByTestId("onboarding-continue-step-1"));
 
+    // step 2: api key
     await screen.findByTestId("onboarding-step-2");
+    expect(screen.getByTestId("overlay-onboarding-step-count")).toHaveTextContent("Step 2 of 5");
     await user.type(screen.getByTestId("onboarding-api-key-input"), "sk-test-key");
     await user.click(screen.getByTestId("onboarding-continue-step-2"));
 
+    // step 3: workspace folder
     await screen.findByTestId("onboarding-step-3");
+    expect(screen.getByTestId("overlay-onboarding-step-count")).toHaveTextContent("Step 3 of 5");
     await user.click(screen.getByTestId("onboarding-choose-folder"));
     await waitFor(() =>
       expect(screen.getByTestId("onboarding-workspace-selection").textContent).toContain(
@@ -199,7 +235,15 @@ describe("Overlay onboarding", () => {
     );
     await user.click(screen.getByTestId("onboarding-continue-step-3"));
 
+    // step 4: accessibility permission (mock returns granted by default)
     await screen.findByTestId("onboarding-step-4");
+    expect(screen.getByTestId("overlay-onboarding-step-count")).toHaveTextContent("Step 4 of 5");
+    await screen.findByTestId("onboarding-accessibility-granted");
+    await user.click(screen.getByTestId("onboarding-continue-step-4"));
+
+    // step 5: ready
+    await screen.findByTestId("onboarding-step-5");
+    expect(screen.getByTestId("overlay-onboarding-step-count")).toHaveTextContent("Step 5 of 5");
     await user.click(screen.getByTestId("onboarding-complete"));
 
     await waitFor(() => {
@@ -233,5 +277,24 @@ describe("Overlay onboarding", () => {
     expect(await screen.findByTestId("overlay-no-active-task")).toHaveTextContent(
       "Tell me what you're working on."
     );
+  });
+
+  it("requests accessibility permission only after explicit click", async () => {
+    const user = userEvent.setup();
+    setupInvokeMock({
+      onboardingComplete: true,
+      activeTask: { id: 1, title: "history storymap" },
+      accessibilityGranted: false
+    });
+
+    render(<Overlay />);
+
+    expect(await screen.findByTestId("accessibility-context-prompt")).toHaveTextContent(
+      "Jeff needs accessibility permission to know which document you have open."
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith("request_accessibility_permission");
+
+    await user.click(screen.getByTestId("request-accessibility-permission"));
+    expect(invokeMock).toHaveBeenCalledWith("request_accessibility_permission");
   });
 });

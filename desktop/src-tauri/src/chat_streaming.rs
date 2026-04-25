@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ambient,
-    chat::build_user_prompt,
+    chat::{build_system_prompt, build_user_prompt},
     coworking::unix_now_seconds,
     embedding::EmbeddingProvider,
     message_kind::MessageKind,
@@ -34,14 +34,15 @@ use crate::{
 
 // synthesize one phrase via openai tts, return base64-encoded mp3.
 // non-fatal: caller should ignore errors and continue.
-async fn synthesize_phrase_async(api_key: &str, text: &str) -> Result<String> {
+async fn synthesize_phrase_async(api_key: &str, text: &str, voice: &str) -> Result<String> {
     let client = reqwest::Client::new();
+    let voice = crate::voice_naturalness::normalize_tts_voice(voice);
     let response = client
         .post("https://api.openai.com/v1/audio/speech")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
             "model": "gpt-4o-mini-tts",
-            "voice": "alloy",
+            "voice": voice,
             "input": text,
             "format": "mp3"
         }))
@@ -80,6 +81,7 @@ fn phrase_needs_synthesis(buf: &str) -> bool {
 fn spawn_tts_chunk<R: Runtime + 'static>(
     api_key: String,
     text: String,
+    voice: String,
     phrase_id: u32,
     app: AppHandle<R>,
     turn_id: String,
@@ -91,7 +93,12 @@ fn spawn_tts_chunk<R: Runtime + 'static>(
         if cancel.is_cancelled() {
             return;
         }
-        match synthesize_phrase_async(&api_key, &text).await {
+        let spoken_text =
+            crate::voice_naturalness::prepare_tts_text(&text, &format!("{turn_id}:{phrase_id}"));
+        if spoken_text.trim().is_empty() {
+            return;
+        }
+        match synthesize_phrase_async(&api_key, &spoken_text, &voice).await {
             Ok(audio_b64) => {
                 if cancel.is_cancelled() {
                     return;
@@ -121,10 +128,6 @@ fn spawn_tts_chunk<R: Runtime + 'static>(
     });
 }
 
-const GROUNDING_SYSTEM_PROMPT: &str =
-    "You are Jeff, a task-focused assistant. Use only the provided context chunks to answer. \
-     If the answer is not in context, explicitly say you don't know based on available materials.";
-
 // entry point called from the send_message_streaming tauri command.
 // this function is async because the tauri command is async; it spawns
 // the streaming work and returns immediately with the turn_id.
@@ -136,6 +139,8 @@ pub async fn start_streaming_turn(
     message_source: String,
     token: InteractionToken,
     registry: SharedRegistry,
+    // phase 20: optional context prefix for the system prompt.
+    active_context: Option<String>,
 ) -> Result<()> {
     use crate::message_kind::classify_user_message_kind;
 
@@ -170,6 +175,7 @@ pub async fn start_streaming_turn(
     let store = state.store.clone();
     let embeddings = state.embeddings.clone();
     let reasoning = OpenAiStreamingReasoningProvider::from_env();
+    let tts_voice = state.store.get_tts_voice()?;
 
     // capture everything needed to run the async pipeline.
     tokio::spawn(run_llm_stream(
@@ -182,6 +188,8 @@ pub async fn start_streaming_turn(
         placeholder_id,
         token,
         registry,
+        active_context,
+        tts_voice,
     ));
 
     Ok(())
@@ -197,6 +205,8 @@ async fn run_llm_stream<R: Runtime + 'static>(
     placeholder_id: i64,
     token: InteractionToken,
     registry: SharedRegistry,
+    active_context: Option<String>,
+    tts_voice: String,
 ) {
     let turn_start = Instant::now();
     let turn_id = token.turn_id.clone();
@@ -242,9 +252,12 @@ async fn run_llm_stream<R: Runtime + 'static>(
 
     let user_prompt = build_user_prompt(&message, &context_pack);
 
+    // phase 20: prepend active window context to system prompt when available.
+    let effective_system_prompt = build_system_prompt(active_context.as_deref());
+
     // open the streaming LLM channel.
     let mut rx = match reasoning.stream_response(
-        GROUNDING_SYSTEM_PROMPT,
+        &effective_system_prompt,
         &user_prompt,
         token.cancel.clone(),
     ) {
@@ -331,6 +344,7 @@ async fn run_llm_stream<R: Runtime + 'static>(
                                     spawn_tts_chunk(
                                         key.clone(),
                                         phrase,
+                                        tts_voice.clone(),
                                         phrase_id,
                                         app.clone(),
                                         turn_id.clone(),
@@ -355,6 +369,7 @@ async fn run_llm_stream<R: Runtime + 'static>(
             spawn_tts_chunk(
                 key.clone(),
                 remaining,
+                tts_voice.clone(),
                 phrase_id,
                 app.clone(),
                 turn_id.clone(),

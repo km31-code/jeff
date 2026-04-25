@@ -26,10 +26,11 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-autostart = "2"
 notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
 arboard = "3"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+# objective-c runtime for macos ServiceManagement and NSWorkspace calls.
+objc2 = "0.6.4"
 
 [dev-dependencies]
 tauri = { version = "2.0.0", features = ["test", "tray-icon", "image-png"] }
