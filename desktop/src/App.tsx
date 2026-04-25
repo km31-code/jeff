@@ -3699,6 +3699,11 @@ function App() {
                             <code>{selectionBridgeStatus.token}</code>
                           </p>
                         ) : null}
+                        <p className="task-meta" data-testid="extension-install-instructions">
+                          To enable text capture in Chrome or Google Docs: download the Jeff browser
+                          extension, open <code>chrome://extensions</code>, enable Developer Mode,
+                          click Load unpacked, and select the unzipped extension folder.
+                        </p>
                       </li>
 
                       <li data-testid="privacy-surface-typing-activity">

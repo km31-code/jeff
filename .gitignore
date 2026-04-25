@@ -10,3 +10,6 @@ desktop/src-tauri/target/
 
 # Env files
 .env
+
+# Distribution artifacts (generated locally, uploaded via CI)
+dist/
