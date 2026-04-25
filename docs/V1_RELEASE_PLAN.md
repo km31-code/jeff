@@ -9,21 +9,21 @@ number, the last completed sub-item, and run the regression gate first.
 
 ---
 
-## Current state snapshot (2026-04-25)
+## Current state snapshot (2026-04-25, updated)
 
-- Phase checks 17–24: all pass, 0 failures
-- Backend: `cargo build` clean, all unit tests pass
-- Frontend: TypeScript build clean, all frontend tests pass
-- Uncommitted work: 23 modified files (Phase 23+24 implementation) + 1
-  untracked file (docs/PHASES_25_26_PLAN.md) — nothing from Phases 23+24
-  is committed yet
-- PHASES.md: shows Phase 22 as the last complete phase (23+24 missing)
-- ARCHITECTURE.md: last updated at Phase 14 (six phases of modules undocumented)
-- tauri.conf.json: version 0.1.0, signingIdentity null (CI injects from secrets),
-  updater endpoint points to github.com/km31-code/jeff/releases
-- Updater keypair: not yet generated
-- GitHub Actions secrets: not yet configured (10 required)
-- Release branch: does not exist
+- Phase checks 17–24: all pass, 371 individual checks, 0 failures
+- Backend: `cargo test` clean (166 unit tests pass)
+- Frontend: 28 tests pass
+- All Phase 23+24 work committed at 81c8e15, pushed to origin master
+- PHASES.md: phases 23 and 24 marked complete at ab1a44f
+- ARCHITECTURE.md: phases 15–19 documented at 11f732f
+- Tauri release build: Jeff.app + Jeff_0.1.0_aarch64.dmg produced locally (unsigned)
+- Updater keypair: generated (keys provided to user; not committed)
+- dist/jeff-extension-chrome.zip: built locally, gitignored
+- Extension install instructions: added to Privacy Center in App.tsx
+- GitHub Actions secrets: **not yet configured — human action required**
+- Release branch: **does not exist — human action required (M-V1.6)**
+- Runtime smoke test: **not yet run — human action required (M-V1.8)**
 
 ---
 
@@ -68,7 +68,7 @@ M-V1.10: Human — pushes release branch, monitors CI pipeline.
 
 ## M-V1.1: Commit Phase 23+24 implementation
 
-**Status: [ ]**
+**Status: [x] done — commit 81c8e15, pushed to origin master**
 **Who:** Codex / Claude
 **Depends on:** nothing
 
@@ -151,7 +151,7 @@ Phase 24:
 
 ## M-V1.2: Update PHASES.md to mark 23+24 complete
 
-**Status: [ ]**
+**Status: [x] done — commit ab1a44f**
 **Who:** Codex / Claude
 **Depends on:** M-V1.1
 
@@ -182,7 +182,7 @@ current last complete phase, consistent with the existing pattern).
 
 ## M-V1.3: Update ARCHITECTURE.md for Phase 23+24
 
-**Status: [ ]**
+**Status: [x] done — commit 11f732f, layers 15–19 added**
 **Who:** Codex / Claude
 **Depends on:** M-V1.1
 
@@ -245,7 +245,7 @@ docs/ARCHITECTURE.md, after the existing entry 14 (Richer parallel work):
 
 ## M-V1.4: Verify Tauri release build locally (unsigned)
 
-**Status: [ ]**
+**Status: [x] done — Jeff.app (7.8MB arm64) + Jeff_0.1.0_aarch64.dmg produced; human launch verification pending (M-V1.8)**
 **Who:** Codex / Claude (build command); Human (app launch verification)
 **Depends on:** M-V1.1
 
@@ -292,7 +292,7 @@ This is expected. The signed CI build (M-V1.10) will pass Gatekeeper.
 
 ## M-V1.5: Generate Tauri updater keypair
 
-**Status: [ ]**
+**Status: [x] done — keypair generated; keys provided to user (see below); not committed**
 **Who:** Codex runs command; Human stores output
 **Depends on:** M-V1.1
 
@@ -400,7 +400,7 @@ Under Settings → Actions → General:
 
 ## M-V1.7: Browser extension distribution
 
-**Status: [ ]**
+**Status: [x] done — dist/jeff-extension-chrome.zip built; install instructions added to Privacy Center; commit 57c3940**
 **Who:** Codex packages; Human submits to Chrome Web Store (or documents manual install)
 **Depends on:** M-V1.1
 
@@ -580,7 +580,7 @@ Run these in order. Check off each one when confirmed working.
 
 ## M-V1.9: Final regression gate
 
-**Status: [ ]**
+**Status: [x] done — phases 17–24: 371 checks, 0 failures; cargo test: 166 pass; npm test: 28 pass**
 **Who:** Codex / Claude
 **Depends on:** M-V1.1
 
