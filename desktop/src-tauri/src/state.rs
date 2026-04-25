@@ -255,8 +255,4 @@ impl CalendarState {
     pub fn current(&self) -> Option<CalendarEventDto> {
         self.inner.lock().ok()?.next_event.clone()
     }
-
-    pub fn last_polled(&self) -> Option<Instant> {
-        self.inner.lock().ok()?.last_polled
-    }
 }

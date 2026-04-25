@@ -13,8 +13,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use crate::{
     context_observer::ActiveWindowContext,
     models::{
-        BrowserSelectionCaptureRequestDto, SelectionBridgeStatusDto,
-        SelectionCaptureIndicatorDto, SelectionCaptureStatus,
+        BrowserSelectionCaptureRequestDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
+        SelectionCaptureStatus,
     },
     state::JeffState,
     voice_naturalness::word_count,
@@ -29,6 +29,7 @@ pub const EVENT_SELECTION_CLEARED: &str = "selection://cleared";
 // phase 23: live app action events
 pub const EVENT_LIVE_ACTION_APPROVED: &str = "live_action://approved";
 pub const EVENT_LIVE_ACTION_FALLBACK: &str = "live_action://fallback_triggered";
+pub const EVENT_LIVE_ACTION_RESULT: &str = "live_action://result";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedSelection {
@@ -248,12 +249,8 @@ pub fn capture_selection_from_hotkey<R: Runtime>(app: &AppHandle<R>) {
                 .trim()
                 .to_string();
             let message = error.user_message();
-            let indicator = selection_state.set_failed(
-                app_name,
-                None,
-                "native_accessibility",
-                message,
-            );
+            let indicator =
+                selection_state.set_failed(app_name, None, "native_accessibility", message);
             let _ = app.emit(EVENT_SELECTION_FAILED, &indicator);
             let _ = crate::ambient::show_overlay(app);
         }
@@ -339,7 +336,11 @@ fn handle_bridge_stream<R: Runtime>(app: &AppHandle<R>, mut stream: TcpStream) {
     let request = match read_http_request(&mut stream) {
         Ok(request) => request,
         Err(err) => {
-            let _ = write_http_response(&mut stream, 400, &serde_json::json!({ "ok": false, "error": err }));
+            let _ = write_http_response(
+                &mut stream,
+                400,
+                &serde_json::json!({ "ok": false, "error": err }),
+            );
             return;
         }
     };
@@ -389,10 +390,13 @@ fn handle_bridge_stream<R: Runtime>(app: &AppHandle<R>, mut stream: TcpStream) {
         ("POST", "/apply-fallback") => {
             handle_apply_fallback_request(app, &mut stream, &request.body);
         }
+        ("POST", "/apply-result") => {
+            handle_apply_result_request(app, &mut stream, &request.body);
+        }
         // phase 23: long-poll endpoint — extension polls for approval of a receipt.
         ("GET", path) if path.starts_with("/pending-approval/") => {
-            let receipt_id_str = path.trim_start_matches("/pending-approval/");
-            handle_pending_approval_poll(app, &mut stream, receipt_id_str);
+            let path_parts = path.trim_start_matches("/pending-approval/");
+            handle_pending_approval_poll(app, &mut stream, path_parts);
         }
         _ => {
             let _ = write_http_response(
@@ -416,14 +420,19 @@ struct ApplyEditRequest {
 
 #[derive(serde::Deserialize)]
 struct ApplyFallbackRequest {
+    token: String,
     receipt_id: i64,
 }
 
-fn handle_apply_edit_request<R: Runtime>(
-    app: &AppHandle<R>,
-    stream: &mut TcpStream,
-    body: &[u8],
-) {
+#[derive(serde::Deserialize)]
+struct ApplyResultRequest {
+    token: String,
+    receipt_id: i64,
+    status: String,
+    error: Option<String>,
+}
+
+fn handle_apply_edit_request<R: Runtime>(app: &AppHandle<R>, stream: &mut TcpStream, body: &[u8]) {
     let parsed: ApplyEditRequest = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(err) => {
@@ -453,12 +462,16 @@ fn handle_apply_edit_request<R: Runtime>(
         return;
     }
 
-    // compute after_hash
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    parsed.after_text.hash(&mut h);
-    let after_hash = format!("{:x}", h.finish());
+    let before_hash = sha256_hex(&parsed.before_text);
+    if parsed.selection_anchor_hash.trim().to_ascii_lowercase() != before_hash {
+        let _ = write_http_response(
+            stream,
+            400,
+            &serde_json::json!({ "ok": false, "error": "selection anchor hash does not match before_text" }),
+        );
+        return;
+    }
+    let after_hash = sha256_hex(&parsed.after_text);
 
     // create receipt
     let jeff_state = match app.try_state::<JeffState>() {
@@ -468,10 +481,17 @@ fn handle_apply_edit_request<R: Runtime>(
             return;
         }
     };
+    let task_id = jeff_state
+        .store
+        .get_active_task()
+        .ok()
+        .flatten()
+        .map(|task| task.id);
     let receipt_id = match jeff_state.store.create_live_edit_receipt(
+        task_id,
         &parsed.editor_surface,
         &parsed.document_title,
-        &parsed.selection_anchor_hash,
+        &before_hash,
         &after_hash,
         &parsed.before_text,
         &parsed.after_text,
@@ -500,6 +520,12 @@ fn handle_apply_edit_request<R: Runtime>(
     );
 }
 
+fn valid_live_action_token<R: Runtime>(app: &AppHandle<R>, token: &str) -> bool {
+    app.try_state::<SelectionCaptureState>()
+        .map(|state| state.token_matches(token))
+        .unwrap_or(false)
+}
+
 fn handle_apply_fallback_request<R: Runtime>(
     app: &AppHandle<R>,
     stream: &mut TcpStream,
@@ -516,6 +542,15 @@ fn handle_apply_fallback_request<R: Runtime>(
             return;
         }
     };
+
+    if !valid_live_action_token(app, &parsed.token) {
+        let _ = write_http_response(
+            stream,
+            403,
+            &serde_json::json!({ "ok": false, "error": "invalid token" }),
+        );
+        return;
+    }
 
     let jeff_state = match app.try_state::<JeffState>() {
         Some(s) => s,
@@ -536,11 +571,95 @@ fn handle_apply_fallback_request<R: Runtime>(
     let _ = write_http_response(stream, 200, &serde_json::json!({ "ok": true }));
 }
 
+fn handle_apply_result_request<R: Runtime>(
+    app: &AppHandle<R>,
+    stream: &mut TcpStream,
+    body: &[u8],
+) {
+    let parsed: ApplyResultRequest = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = write_http_response(
+                stream,
+                400,
+                &serde_json::json!({ "ok": false, "error": err.to_string() }),
+            );
+            return;
+        }
+    };
+
+    if !valid_live_action_token(app, &parsed.token) {
+        let _ = write_http_response(
+            stream,
+            403,
+            &serde_json::json!({ "ok": false, "error": "invalid token" }),
+        );
+        return;
+    }
+
+    let status = match parsed.status.as_str() {
+        "applied" => "applied",
+        "failed" => "failed",
+        _ => {
+            let _ = write_http_response(
+                stream,
+                400,
+                &serde_json::json!({ "ok": false, "error": "status must be applied or failed" }),
+            );
+            return;
+        }
+    };
+
+    let jeff_state = match app.try_state::<JeffState>() {
+        Some(s) => s,
+        None => {
+            let _ = write_http_response(stream, 500, &serde_json::json!({ "ok": false }));
+            return;
+        }
+    };
+
+    let update = jeff_state
+        .store
+        .update_live_edit_status(parsed.receipt_id, status);
+    match update {
+        Ok(_) => {
+            let _ = app.emit(
+                EVENT_LIVE_ACTION_RESULT,
+                serde_json::json!({
+                    "receipt_id": parsed.receipt_id,
+                    "status": status,
+                    "error": parsed.error,
+                }),
+            );
+            let _ = write_http_response(stream, 200, &serde_json::json!({ "ok": true }));
+        }
+        Err(err) => {
+            let _ = write_http_response(
+                stream,
+                404,
+                &serde_json::json!({ "ok": false, "error": err.to_string() }),
+            );
+        }
+    }
+}
+
 fn handle_pending_approval_poll<R: Runtime>(
     app: &AppHandle<R>,
     stream: &mut TcpStream,
-    receipt_id_str: &str,
+    path_parts: &str,
 ) {
+    let mut parts = path_parts.splitn(2, '/');
+    let token = parts.next().unwrap_or_default();
+    let receipt_id_str = parts.next().unwrap_or_default();
+    if !valid_live_action_token(app, token) {
+        let _ = write_http_response(
+            stream,
+            403,
+            &serde_json::json!({ "ok": false, "error": "invalid token" }),
+        );
+        return;
+    }
+
     let receipt_id: i64 = match receipt_id_str.trim().parse() {
         Ok(id) => id,
         Err(_) => {
@@ -564,7 +683,7 @@ fn handle_pending_approval_poll<R: Runtime>(
     // poll up to 20 seconds (40 × 500ms)
     for _ in 0..40 {
         // check current status
-        if let Ok(receipts) = jeff_state.store.list_live_edit_receipts() {
+        if let Ok(receipts) = jeff_state.store.list_live_edit_receipts(None) {
             if let Some(receipt) = receipts.iter().find(|r| r.id == receipt_id) {
                 if receipt.status == "approved" {
                     let _ = write_http_response(
@@ -574,7 +693,10 @@ fn handle_pending_approval_poll<R: Runtime>(
                     );
                     return;
                 }
-                if receipt.status == "rejected" || receipt.status == "fallback" {
+                if matches!(
+                    receipt.status.as_str(),
+                    "rejected" | "fallback" | "applied" | "failed"
+                ) {
                     let _ = write_http_response(
                         stream,
                         200,
@@ -699,6 +821,14 @@ fn normalize_selected_text(text: &str) -> String {
         .join("\n")
         .trim()
         .to_string()
+}
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    let digest = hasher.finalize();
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn truncate_selection(text: &str) -> (String, bool) {

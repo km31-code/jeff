@@ -20,7 +20,7 @@ Four tracks executed in this order:
 
 ### M23.1 — User Profile DB + Injection Foundation
 
-**Status: [ ]**
+**Status: [x]**
 
 Goal: create the user_profile table and the inject-on-every-prompt path.
 No signal collection yet — just the plumbing that signals will write into.
@@ -71,7 +71,7 @@ Verification:
 
 ### M23.2 — Personalization Signal Collection + "Jeff Remembers" UI
 
-**Status: [ ]**
+**Status: [x]**
 
 Goal: populate the user_profile table from real interaction events and
 expose those signals in the companion view.
@@ -144,7 +144,7 @@ Verification:
 
 ### M23.3 — Workload Awareness
 
-**Status: [ ]**
+**Status: [x]**
 
 Goal: show the user all active tasks in one view, support task switching,
 and notify about stale tasks with unreviewed work.
@@ -213,7 +213,7 @@ Verification:
 
 ### M23.4 — Calendar Context (EventKit)
 
-**Status: [ ]**
+**Status: [x]**
 
 Goal: surface upcoming calendar events as ambient context in the companion
 header and re-orientation prompts.
@@ -275,7 +275,7 @@ Verification:
 
 ### M23.5 — Live App Actions
 
-**Status: [ ]**
+**Status: [x]**
 
 Goal: extend the Phase 22 browser-extension bridge with a write path so Jeff
 can apply approved edits directly in supported web editors.
@@ -385,7 +385,7 @@ Verification:
 
 ### M23.6 — phase23_check.sh
 
-**Status: [ ]**
+**Status: [x]**
 
 Write `scripts/phase23_check.sh` covering:
 

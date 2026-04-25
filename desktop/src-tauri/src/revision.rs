@@ -14,6 +14,7 @@ use crate::{
     reasoning::ReasoningProvider,
     retrieval::build_task_context_pack,
     store::{ChunkEmbeddingInput, NewArtifactVersionInput, NewRevisionProposalInput, TaskStore},
+    user_model,
 };
 
 const REVISION_SYSTEM_PROMPT: &str = "You are Jeff, a grounded revision assistant. Rewrite ONLY the target text while preserving intent and factual grounding from provided context. Return strict JSON with keys: proposed_text (string), rationale (string), confidence (number 0-1), grounding_notes (string). If context is weak, keep edits conservative and clearly mark weak grounding_notes.";
@@ -127,7 +128,8 @@ pub fn propose_artifact_revision(
             .join("\n\n"),
     );
 
-    let raw_candidate = reasoning.generate_response(REVISION_SYSTEM_PROMPT, &revision_prompt)?;
+    let revision_system_prompt = build_revision_system_prompt(store);
+    let raw_candidate = reasoning.generate_response(&revision_system_prompt, &revision_prompt)?;
     let generated = parse_generated_revision(
         &raw_candidate,
         &resolved_target.original_text,
@@ -446,6 +448,18 @@ fn build_revision_prompt(
         },
         artifact_preview
     )
+}
+
+fn build_revision_system_prompt(store: &TaskStore) -> String {
+    if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        if let Some(profile) = user_model::build_profile_injection(store) {
+            return format!("{profile}\n\n{REVISION_SYSTEM_PROMPT}");
+        }
+    }
+    REVISION_SYSTEM_PROMPT.to_string()
 }
 
 fn resolve_target(content: &str, target: Option<&RevisionTargetDto>) -> Result<ResolvedTarget> {

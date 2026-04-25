@@ -1,18 +1,19 @@
 # jeff release pipeline
 # triggers on push to the `release` branch only.
-# job order: test → build → sign → notarize → release
-# all secrets are resolved from GitHub Actions secrets — no values committed here.
+# job order: test -> build -> sign -> notarize -> release
+# all secrets are resolved from GitHub Actions secrets; no values are committed here.
 #
 # required secrets:
-#   APPLE_CERTIFICATE          — base64-encoded .p12 developer id cert
-#   APPLE_CERTIFICATE_PASSWORD — password for the .p12
-#   APPLE_SIGNING_IDENTITY     — "Developer ID Application: ..."
-#   APPLE_ID                   — apple id email for notarytool
-#   APPLE_APP_PASSWORD         — app-specific password for notarytool
-#   APPLE_TEAM_ID              — apple team id
-#   APPLE_PROVIDER_SHORT_NAME  — provider short name for codesign
-#   TAURI_PRIVATE_KEY          — minisign private key for updater payload signing
-#   TAURI_KEY_PASSWORD         — password for the minisign private key
+#   APPLE_CERTIFICATE          - base64-encoded .p12 developer id cert
+#   APPLE_CERTIFICATE_PASSWORD - password for the .p12
+#   APPLE_SIGNING_IDENTITY     - "Developer ID Application: ..."
+#   APPLE_ID                   - apple id email for notarytool
+#   APPLE_APP_PASSWORD         - app-specific password for notarytool
+#   APPLE_TEAM_ID              - apple team id
+#   APPLE_PROVIDER_SHORT_NAME  - provider short name, kept for Apple account clarity
+#   TAURI_PUBLIC_KEY           - public updater key embedded into tauri.conf.json at build time
+#   TAURI_PRIVATE_KEY          - private updater key, mapped to TAURI_SIGNING_PRIVATE_KEY
+#   TAURI_KEY_PASSWORD         - updater private key password
 
 name: release
 
@@ -25,9 +26,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # --- job 1: test ---
-  # runs all unit tests and the phase 17 latency regression gate.
-  # if any test fails, the pipeline stops here — no signing proceeds.
   test:
     runs-on: macos-14
     steps:
@@ -58,9 +56,6 @@ jobs:
       - name: frontend tests
         run: npm --prefix desktop test -- --run
 
-  # --- job 2: build ---
-  # produces the universal binary .app and unsigned .dmg.
-  # depends on: test
   build:
     needs: test
     runs-on: macos-14
@@ -83,29 +78,32 @@ jobs:
       - name: install frontend dependencies
         run: npm --prefix desktop ci
 
-      - name: install tauri cli
-        run: cargo install tauri-cli --version "^2.0" --locked
+      - name: inject updater public key
+        env:
+          TAURI_PUBLIC_KEY: ${{ secrets.TAURI_PUBLIC_KEY }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          config = Path("desktop/src-tauri/tauri.conf.json")
+          text = config.read_text()
+          public_key = os.environ["TAURI_PUBLIC_KEY"].strip()
+          if not public_key:
+              raise SystemExit("TAURI_PUBLIC_KEY is empty")
+          config.write_text(text.replace("{{TAURI_PUBLIC_KEY}}", public_key))
+          PY
 
       - name: build universal binary (universal-apple-darwin)
-        run: cargo tauri build --target universal-apple-darwin
-        env:
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
+        run: npm --prefix desktop run tauri -- build --target universal-apple-darwin --bundles app --no-sign --ci
 
-      - name: upload build artifacts
+      - name: upload unsigned app bundle
         uses: actions/upload-artifact@v4
         with:
           name: jeff-unsigned
-          path: |
-            desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+          path: desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
           retention-days: 1
 
-  # --- job 3: sign ---
-  # imports the developer id certificate and signs the .app bundle.
-  # depends on: build
   sign:
     needs: build
     runs-on: macos-14
@@ -113,7 +111,7 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
 
-      - name: download build artifacts
+      - name: download unsigned app bundle
         uses: actions/download-artifact@v4
         with:
           name: jeff-unsigned
@@ -138,8 +136,10 @@ jobs:
       - name: codesign app bundle
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
         run: |
-          APP=$(find artifacts/ -name "*.app" | head -1)
+          APP=$(find artifacts -name "*.app" -type d | head -1)
+          test -n "$APP"
           codesign --deep --force --options runtime \
             --entitlements desktop/src-tauri/entitlements.plist \
             --sign "$APPLE_SIGNING_IDENTITY" "$APP"
@@ -147,27 +147,24 @@ jobs:
 
       - name: create signed dmg
         run: |
-          APP=$(find artifacts/ -name "*.app" | head -1)
-          DMG_NAME="Jeff_signed.dmg"
+          APP=$(find artifacts -name "*.app" -type d | head -1)
           hdiutil create -volname "Jeff" -srcfolder "$APP" \
-            -ov -format UDZO "$DMG_NAME"
-          echo "DMG_PATH=$DMG_NAME" >> "$GITHUB_ENV"
+            -ov -format UDZO Jeff_signed.dmg
 
-      - name: upload signed dmg
+      - name: upload signed artifacts
         uses: actions/upload-artifact@v4
         with:
           name: jeff-signed
-          path: Jeff_signed.dmg
+          path: |
+            Jeff_signed.dmg
+            artifacts/**/*.app
           retention-days: 1
 
-  # --- job 4: notarize ---
-  # submits the signed dmg to apple notary api and staples the ticket.
-  # depends on: sign
   notarize:
     needs: sign
     runs-on: macos-14
     steps:
-      - name: download signed dmg
+      - name: download signed artifacts
         uses: actions/download-artifact@v4
         with:
           name: jeff-signed
@@ -179,7 +176,8 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          DMG=$(find artifacts/ -name "*.dmg" | head -1)
+          DMG=$(find artifacts -name "*.dmg" | head -1)
+          test -n "$DMG"
           xcrun notarytool submit "$DMG" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_PASSWORD" \
@@ -188,21 +186,20 @@ jobs:
 
       - name: staple notarization ticket
         run: |
-          DMG=$(find artifacts/ -name "*.dmg" | head -1)
+          DMG=$(find artifacts -name "*.dmg" | head -1)
           xcrun stapler staple "$DMG"
           xcrun stapler validate "$DMG"
 
-      - name: upload notarized dmg
+      - name: upload notarized artifacts
         uses: actions/upload-artifact@v4
         with:
           name: jeff-notarized
-          path: artifacts/*.dmg
+          path: |
+            artifacts/*.dmg
+            artifacts/**/*.dmg
+            artifacts/**/*.app
           retention-days: 7
 
-  # --- job 5: release ---
-  # generates latest.json for the auto-updater feed, uploads the dmg as
-  # a github release asset, and publishes the release.
-  # depends on: notarize
   release:
     needs: notarize
     runs-on: macos-14
@@ -212,7 +209,17 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
 
-      - name: download notarized dmg
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: install frontend dependencies
+        run: npm --prefix desktop ci
+
+      - name: download notarized artifacts
         uses: actions/download-artifact@v4
         with:
           name: jeff-notarized
@@ -224,23 +231,26 @@ jobs:
           VERSION=$(grep '^version' desktop/src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: generate updater latest.json
+      - name: create updater archive and latest.json
         env:
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          DMG=$(find artifacts/ -name "*.dmg" | head -1)
-          DMG_NAME=$(basename "$DMG")
-          REPO_URL="https://github.com/$GITHUB_REPOSITORY"
-          DMG_URL="$REPO_URL/releases/download/v$VERSION/$DMG_NAME"
+          APP=$(find artifacts -name "*.app" -type d | head -1)
+          DMG=$(find artifacts -name "*.dmg" | head -1)
+          test -n "$APP"
+          test -n "$DMG"
 
-          # generate minisign signature for the dmg
-          echo "$TAURI_PRIVATE_KEY" | base64 --decode > tauri.key
-          SIG=$(minisign -Sm "$DMG" -s tauri.key -W <<< "$TAURI_KEY_PASSWORD" 2>/dev/null \
-            || cat "${DMG}.minisig" 2>/dev/null || echo "")
-          rm -f tauri.key
+          UPDATER_ARCHIVE="Jeff_${VERSION}_universal.app.tar.gz"
+          tar -czf "$UPDATER_ARCHIVE" -C "$(dirname "$APP")" "$(basename "$APP")"
+          SIGN_OUTPUT=$(npm --prefix desktop run tauri -- signer sign "$UPDATER_ARCHIVE")
+          SIG=$(printf '%s\n' "$SIGN_OUTPUT" | awk '/Public signature:/{getline; print}')
+          test -n "$SIG"
+
+          REPO_URL="https://github.com/$GITHUB_REPOSITORY"
+          UPDATER_URL="$REPO_URL/releases/download/v$VERSION/$UPDATER_ARCHIVE"
 
           cat > latest.json <<JSON
           {
@@ -250,7 +260,7 @@ jobs:
             "platforms": {
               "darwin-universal": {
                 "signature": "$SIG",
-                "url": "$DMG_URL"
+                "url": "$UPDATER_URL"
               }
             }
           }
@@ -261,9 +271,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          DMG=$(find artifacts/ -name "*.dmg" | head -1)
+          DMG=$(find artifacts -name "*.dmg" | head -1)
+          UPDATER_ARCHIVE="Jeff_${VERSION}_universal.app.tar.gz"
           gh release create "v$VERSION" \
             --title "Jeff v$VERSION" \
             --notes "Jeff v$VERSION release" \
             "$DMG" \
+            "$UPDATER_ARCHIVE" \
             latest.json

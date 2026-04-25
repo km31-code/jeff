@@ -1041,6 +1041,7 @@ export interface CalendarEventDto {
 
 export interface LiveEditReceiptDto {
   id: number;
+  task_id: number | null;
   editor_surface: string;
   document_title: string;
   before_hash: string;
@@ -1051,11 +1052,13 @@ export interface LiveEditReceiptDto {
 
 export interface PendingLiveEditDto {
   receipt_id: number;
+  task_id: number | null;
   editor_surface: string;
   document_title: string;
   before_text: string;
   after_text: string;
   timestamp: string;
+  status: "pending_approval" | "fallback" | "failed";
 }
 
 export async function getUserProfileSignals(): Promise<UserProfileSignalDto[]> {

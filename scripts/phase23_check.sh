@@ -102,6 +102,12 @@ grep_check "signal writes wired in commands.rs on trigger dismiss" \
     "record_trigger_dismissed" "$SRC/commands.rs"
 grep_check "signal writes wired in commands.rs on task focus" \
     "record_focus_hour" "$SRC/commands.rs"
+grep_check "response length preference wired on completed responses" \
+    "record_response_length" "$SRC/commands.rs" "$SRC/chat_streaming.rs"
+grep_check "profile signal collection gated by privacy setting" \
+    "user_profile_memory_enabled" "$SRC/commands.rs"
+grep_check "quality rubrics/profile context injected into revision prompts" \
+    "build_revision_system_prompt\|build_profile_injection" "$SRC/revision.rs"
 
 echo ""
 echo "--- m23.2: jeff remembers ui ---"
@@ -140,6 +146,8 @@ grep_check "switch_active_task_from_companion command registered" \
     "switch_active_task_from_companion" "$SRC/commands.rs" "$SRC/main.rs"
 grep_check "stale notification called at startup" \
     "check_stale_task_notifications" "$SRC/main.rs"
+grep_check "stale notification checked on task focus events" \
+    "check_stale_task_notifications" "$SRC/commands.rs"
 grep_check "cross-task collision detection in commands.rs" \
     "subtask://collision-detected" "$SRC/commands.rs"
 grep_check "collision check uses cosine_similarity" \
@@ -178,6 +186,8 @@ grep_check "calendar poll respects privacy gate" \
     "privacy_calendar_context_enabled" "$SRC/main.rs"
 grep_check "calendar event emitted to frontend" \
     "calendar://event-updated" "$SRC/main.rs"
+grep_check "calendar event cleared when privacy or quiet mode disables polling" \
+    "serde_json::Value::Null" "$SRC/main.rs"
 grep_check "request_calendar_permission command registered" \
     "request_calendar_permission" "$SRC/commands.rs" "$SRC/main.rs"
 grep_check "get_calendar_permission_status command registered" \
@@ -188,6 +198,8 @@ grep_check "calendar event in companion header" \
     "calendarEvent\|calendar_context_enabled" "$FRONTEND/App.tsx"
 grep_check "calendar header shows minutes until" \
     "minutes_until" "$FRONTEND/App.tsx"
+grep_check "calendar permission request exposed in Privacy Center" \
+    "requestCalendarPermission\|request-calendar-permission" "$FRONTEND/App.tsx"
 grep_check "calendar context in reorientation prompt" \
     "calendar_event\|CalendarEvent\|minutes_until\|meeting in" "$SRC/proactive.rs"
 
@@ -202,8 +214,12 @@ grep_check "apply-edit route in selection_capture.rs" \
     "/apply-edit" "$SRC/selection_capture.rs"
 grep_check "apply-fallback route in selection_capture.rs" \
     "/apply-fallback" "$SRC/selection_capture.rs"
+grep_check "apply-result route updates applied/failed status" \
+    "/apply-result\|EVENT_LIVE_ACTION_RESULT" "$SRC/selection_capture.rs"
 grep_check "pending-approval poll route" \
     "/pending-approval" "$SRC/selection_capture.rs"
+grep_check "pending-approval and fallback routes validate bridge token" \
+    "valid_live_action_token" "$SRC/selection_capture.rs"
 grep_check "live_action apply_requested event emitted" \
     "live_action://apply_requested" "$SRC/selection_capture.rs"
 grep_check "live_action approved event constant" \
@@ -219,13 +235,15 @@ grep_check "list_live_edit_receipts command registered" \
 grep_check "get_pending_live_edits command registered" \
     "get_pending_live_edits" "$SRC/commands.rs" "$SRC/main.rs"
 grep_check "anchor validation in content.js" \
-    "normalizeText\|anchorMismatch\|anchor.*no longer matches" "$EXT/content.js"
+    "sha256Hex\|anchorMismatch\|anchor.*no longer matches" "$EXT/content.js"
 grep_check "apply edit in place in content.js" \
     "applyEditInPlace" "$EXT/content.js"
 grep_check "apply edit message handler in content.js" \
     "JEFF_APPLY_EDIT" "$EXT/content.js"
 grep_check "apply-fallback fetch on anchor mismatch in content.js" \
     "apply-fallback" "$EXT/content.js"
+grep_check "extension reports applied or failed result" \
+    "apply-result" "$EXT/content.js"
 grep_check "approval poll loop in background.js" \
     "pollForLiveEditApproval" "$EXT/background.js"
 grep_check "apply edit dispatch from background.js" \
@@ -242,6 +260,8 @@ grep_check "reject button in live edit preview" \
     "reject.*live.*edit\|rejectLiveEdit" "$FRONTEND/App.tsx"
 grep_check "guided-apply fallback render in App.tsx" \
     "guided-apply-fallback" "$FRONTEND/App.tsx"
+grep_check "guided fallback is visible for unresolved fallback status" \
+    "edit.status.*fallback\|Manual apply needed" "$FRONTEND/App.tsx"
 grep_check "before_text and after_text rendered in preview" \
     "before_text\|after_text" "$FRONTEND/App.tsx"
 grep_check "live edit event subscribed in App.tsx" \
@@ -250,6 +270,8 @@ grep_check "live edit approved event subscribed in App.tsx" \
     "live_action://approved" "$FRONTEND/App.tsx"
 grep_check "live edit fallback event subscribed in App.tsx" \
     "live_action://fallback_triggered" "$FRONTEND/App.tsx"
+grep_check "live edit result event subscribed in App.tsx" \
+    "live_action://result" "$FRONTEND/App.tsx"
 
 echo ""
 echo "--- behavioral tests ---"

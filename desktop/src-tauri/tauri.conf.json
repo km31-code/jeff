@@ -28,18 +28,19 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
+    "createUpdaterArtifacts": false,
     "macOS": {
       "minimumSystemVersion": "13.0",
-      "signingIdentity": "$(APPLE_SIGNING_IDENTITY)",
-      "providerShortName": "$(APPLE_PROVIDER_SHORT_NAME)",
+      "signingIdentity": null,
+      "providerShortName": null,
       "entitlements": "./entitlements.plist"
     }
   },
   "plugins": {
     "updater": {
-      "endpoints": ["https://github.com/OWNER/REPO/releases/latest/download/latest.json"],
+      "endpoints": ["https://github.com/km31-code/jeff/releases/latest/download/latest.json"],
       "dialog": false,
-      "pubkey": "TAURI_PUBLIC_KEY"
+      "pubkey": "{{TAURI_PUBLIC_KEY}}"
     }
   }
 }

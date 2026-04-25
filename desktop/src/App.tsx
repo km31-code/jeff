@@ -139,6 +139,7 @@ import {
   switchActiveTaskFromCompanion,
   CalendarEventDto,
   getCalendarNextEvent,
+  requestCalendarPermission,
   PendingLiveEditDto,
   getPendingLiveEdits,
   approveLiveEdit,
@@ -934,6 +935,14 @@ function App() {
           .catch(() => undefined);
       }
     );
+    const unlistenResult = listen<{ receipt_id: number; status: string }>(
+      "live_action://result",
+      (_event) => {
+        void getPendingLiveEdits()
+          .then(setPendingLiveEdits)
+          .catch(() => undefined);
+      }
+    );
     const unlistenCalendar = listen<CalendarEventDto | null>(
       "calendar://event-updated",
       (event) => {
@@ -953,6 +962,7 @@ function App() {
         unlisten,
         unlistenApproved,
         unlistenFallback,
+        unlistenResult,
         unlistenCalendar,
         unlistenCollision,
       ]).then((unlisteners) => unlisteners.forEach((u) => u()));
@@ -1018,6 +1028,12 @@ function App() {
       setClipboardCaptureEnabled(dashboard.clipboard_capture_enabled);
       setAccessibilityPermissionGranted(dashboard.accessibility_permission_status === "granted");
       setQuietModeState(!dashboard.proactive_triggers_enabled);
+      if (!dashboard.user_profile_memory_enabled) {
+        setUserProfileSignals([]);
+      }
+      if (!dashboard.calendar_context_enabled) {
+        setCalendarEvent(null);
+      }
       if (dashboard.active_task_id !== null) {
         const [triggerLog, writeLog] = await Promise.all([
           listProactiveTriggerAuditLog(dashboard.active_task_id),
@@ -1341,6 +1357,20 @@ function App() {
         getAccessibilityPermissionStatus()
           .then((granted) => setAccessibilityPermissionGranted(granted))
           .catch(() => setAccessibilityPermissionGranted(false));
+      }, 800);
+    } catch (error) {
+      setErrorMessage(formatError(error));
+    }
+  }
+
+  async function handleRequestCalendarPermission() {
+    setErrorMessage(null);
+
+    try {
+      await requestCalendarPermission();
+      window.setTimeout(() => {
+        void refreshPrivacyCenter();
+        void getCalendarNextEvent().then(setCalendarEvent).catch(() => undefined);
       }, 800);
     } catch (error) {
       setErrorMessage(formatError(error));
@@ -1886,6 +1916,16 @@ function App() {
       setQuietModeState(!dashboard.proactive_triggers_enabled);
       if (!dashboard.typing_activity_enabled) {
         userIsTypingRef.current = false;
+      }
+      if (!dashboard.user_profile_memory_enabled) {
+        setUserProfileSignals([]);
+      } else {
+        void getUserProfileSignals().then(setUserProfileSignals).catch(() => undefined);
+      }
+      if (!dashboard.calendar_context_enabled) {
+        setCalendarEvent(null);
+      } else if (surface === "calendar_context") {
+        void getCalendarNextEvent().then(setCalendarEvent).catch(() => undefined);
       }
       if (dashboard.active_task_id !== null) {
         const [triggerLog, writeLog] = await Promise.all([
@@ -3726,6 +3766,16 @@ function App() {
                           Calendar context
                         </label>
                         <p className="task-meta">Permission: {privacyDashboard.calendar_permission_status}</p>
+                        {privacyDashboard.calendar_context_enabled &&
+                        privacyDashboard.calendar_permission_status !== "granted" ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleRequestCalendarPermission()}
+                            data-testid="request-calendar-permission"
+                          >
+                            Enable calendar permission
+                          </button>
+                        ) : null}
                       </li>
 
                       <li data-testid="privacy-surface-voice">
@@ -3833,7 +3883,11 @@ function App() {
                 data-testid="live-edit-preview-card"
               >
                 <p>
-                  <strong>Apply edit in {edit.editor_surface}</strong> &mdash; {edit.document_title}
+                  <strong>
+                    {edit.status === "pending_approval" ? "Apply edit" : "Manual apply needed"} in{" "}
+                    {edit.editor_surface}
+                  </strong>{" "}
+                  &mdash; {edit.document_title}
                 </p>
                 <div className="live-edit-diff" data-testid="live-edit-diff">
                   <div className="live-edit-before">
@@ -3845,33 +3899,62 @@ function App() {
                     <pre>{edit.after_text}</pre>
                   </div>
                 </div>
-                <div className="row-actions">
-                  <button
-                    type="button"
-                    data-testid="live-edit-approve"
-                    onClick={() => {
-                      void approveLiveEdit(edit.receipt_id).then(() =>
-                        getPendingLiveEdits().then(setPendingLiveEdits)
-                      ).catch(() => undefined);
-                    }}
-                  >
-                    Apply
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="live-edit-reject"
-                    onClick={() => {
-                      void rejectLiveEdit(edit.receipt_id).then(() =>
-                        getPendingLiveEdits().then(setPendingLiveEdits)
-                      ).catch(() => undefined);
-                    }}
-                  >
-                    Reject
-                  </button>
-                </div>
-                <p className="task-meta" data-testid="guided-apply-fallback" style={{ display: "none" }}>
-                  The document changed &mdash; paste this manually where it belongs.
-                </p>
+                {edit.status === "pending_approval" ? (
+                  <div className="row-actions">
+                    <button
+                      type="button"
+                      data-testid="live-edit-approve"
+                      onClick={() => {
+                        void approveLiveEdit(edit.receipt_id).then(() =>
+                          getPendingLiveEdits().then(setPendingLiveEdits)
+                        ).catch(() => undefined);
+                      }}
+                    >
+                      Apply
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="live-edit-reject"
+                      onClick={() => {
+                        void rejectLiveEdit(edit.receipt_id).then(() =>
+                          getPendingLiveEdits().then(setPendingLiveEdits)
+                        ).catch(() => undefined);
+                      }}
+                    >
+                      Reject
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <p className="task-meta" data-testid="guided-apply-fallback">
+                      The document changed. Paste this manually where it belongs.
+                    </p>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        data-testid="live-edit-copy"
+                        onClick={() => {
+                          if (navigator.clipboard) {
+                            void navigator.clipboard.writeText(edit.after_text).catch(() => undefined);
+                          }
+                        }}
+                      >
+                        Copy replacement
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="live-edit-dismiss-fallback"
+                        onClick={() => {
+                          void rejectLiveEdit(edit.receipt_id).then(() =>
+                            getPendingLiveEdits().then(setPendingLiveEdits)
+                          ).catch(() => undefined);
+                        }}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             ))}
 

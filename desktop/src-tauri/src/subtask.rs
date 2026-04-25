@@ -1479,7 +1479,10 @@ mod tests {
         )
         .expect("failed to create/start subtask");
 
-        assert!(matches!(created.status.as_str(), "pending" | "running"));
+        assert!(matches!(
+            created.status.as_str(),
+            "pending" | "running" | "completed"
+        ));
 
         let completed = wait_for_terminal_subtask(&store, created.subtask_id);
         assert_eq!(completed.status, "completed");

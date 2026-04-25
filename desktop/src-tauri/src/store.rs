@@ -32,22 +32,17 @@ pub const APP_SETTING_QUIET_MODE: &str = "quiet_mode";
 pub const APP_SETTING_SESSION_RESTORED_AT: &str = "session_restored_at";
 
 // phase 21: privacy center app setting keys
-pub const APP_SETTING_PRIVACY_WORKSPACE_WATCHER_ENABLED: &str =
-    "privacy_workspace_watcher_enabled";
-pub const APP_SETTING_PRIVACY_CLIPBOARD_CAPTURE_ENABLED: &str =
-    "privacy_clipboard_capture_enabled";
+pub const APP_SETTING_PRIVACY_WORKSPACE_WATCHER_ENABLED: &str = "privacy_workspace_watcher_enabled";
+pub const APP_SETTING_PRIVACY_CLIPBOARD_CAPTURE_ENABLED: &str = "privacy_clipboard_capture_enabled";
 pub const APP_SETTING_PRIVACY_ACTIVE_WINDOW_CONTEXT_ENABLED: &str =
     "privacy_active_window_context_enabled";
 pub const APP_SETTING_PRIVACY_PROACTIVE_TRIGGERS_ENABLED: &str =
     "privacy_proactive_triggers_enabled";
 pub const APP_SETTING_PRIVACY_USER_PROFILE_MEMORY_ENABLED: &str =
     "privacy_user_profile_memory_enabled";
-pub const APP_SETTING_PRIVACY_CALENDAR_CONTEXT_ENABLED: &str =
-    "privacy_calendar_context_enabled";
-pub const APP_SETTING_PRIVACY_SELECTION_CAPTURE_ENABLED: &str =
-    "privacy_selection_capture_enabled";
-pub const APP_SETTING_PRIVACY_TYPING_ACTIVITY_ENABLED: &str =
-    "privacy_typing_activity_enabled";
+pub const APP_SETTING_PRIVACY_CALENDAR_CONTEXT_ENABLED: &str = "privacy_calendar_context_enabled";
+pub const APP_SETTING_PRIVACY_SELECTION_CAPTURE_ENABLED: &str = "privacy_selection_capture_enabled";
+pub const APP_SETTING_PRIVACY_TYPING_ACTIVITY_ENABLED: &str = "privacy_typing_activity_enabled";
 pub const APP_SETTING_TTS_VOICE: &str = "tts_voice";
 
 #[derive(Debug, Clone)]
@@ -488,6 +483,7 @@ impl TaskStore {
             );
             CREATE TABLE IF NOT EXISTS live_edit_receipts (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id        INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
                 editor_surface TEXT NOT NULL,
                 document_title TEXT NOT NULL,
                 before_hash    TEXT NOT NULL,
@@ -499,6 +495,15 @@ impl TaskStore {
             );",
         )
         .context("failed to create phase 23 tables")?;
+
+        // idempotent migration for databases created by the first phase 23 pass.
+        let _ = conn.execute_batch("ALTER TABLE live_edit_receipts ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL;");
+        let _ = conn.execute_batch(
+            "ALTER TABLE live_edit_receipts ADD COLUMN before_text TEXT NOT NULL DEFAULT '';",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE live_edit_receipts ADD COLUMN after_text TEXT NOT NULL DEFAULT '';",
+        );
 
         Ok(())
     }
@@ -2627,10 +2632,7 @@ impl TaskStore {
     }
 
     pub fn set_quiet_mode(&self, quiet: bool) -> Result<()> {
-        self.set_app_setting(
-            APP_SETTING_QUIET_MODE,
-            if quiet { "true" } else { "false" },
-        )
+        self.set_app_setting(APP_SETTING_QUIET_MODE, if quiet { "true" } else { "false" })
     }
 
     // stores overlay mode as the string "expanded" or "collapsed".
@@ -3247,6 +3249,7 @@ impl TaskStore {
 
     pub fn create_live_edit_receipt(
         &self,
+        task_id: Option<i64>,
         editor_surface: &str,
         document_title: &str,
         before_hash: &str,
@@ -3257,9 +3260,9 @@ impl TaskStore {
         let conn = self.connect()?;
         conn.execute(
             "INSERT INTO live_edit_receipts
-             (editor_surface, document_title, before_hash, after_hash, before_text, after_text)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![editor_surface, document_title, before_hash, after_hash, before_text, after_text],
+             (task_id, editor_surface, document_title, before_hash, after_hash, before_text, after_text)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![task_id, editor_surface, document_title, before_hash, after_hash, before_text, after_text],
         )
         .context("failed to create live edit receipt")?;
         Ok(conn.last_insert_rowid())
@@ -3270,26 +3273,37 @@ impl TaskStore {
         receipt_id: i64,
         status: &str,
     ) -> Result<crate::models::LiveEditReceiptDto> {
+        if !matches!(
+            status,
+            "pending_approval" | "approved" | "rejected" | "applied" | "failed" | "fallback"
+        ) {
+            return Err(anyhow!("invalid live edit status: {status}"));
+        }
         let conn = self.connect()?;
-        conn.execute(
-            "UPDATE live_edit_receipts SET status = ?1 WHERE id = ?2",
-            params![status, receipt_id],
-        )
-        .context("failed to update live edit receipt status")?;
+        let changed = conn
+            .execute(
+                "UPDATE live_edit_receipts SET status = ?1 WHERE id = ?2",
+                params![status, receipt_id],
+            )
+            .context("failed to update live edit receipt status")?;
+        if changed == 0 {
+            return Err(anyhow!("live edit receipt id={receipt_id} not found"));
+        }
         let receipt = conn
             .query_row(
-                "SELECT id, editor_surface, document_title, before_hash, after_hash, timestamp, status
+                "SELECT id, task_id, editor_surface, document_title, before_hash, after_hash, timestamp, status
                  FROM live_edit_receipts WHERE id = ?1",
                 params![receipt_id],
                 |row| {
                     Ok(crate::models::LiveEditReceiptDto {
                         id: row.get(0)?,
-                        editor_surface: row.get(1)?,
-                        document_title: row.get(2)?,
-                        before_hash: row.get(3)?,
-                        after_hash: row.get(4)?,
-                        timestamp: row.get(5)?,
-                        status: row.get(6)?,
+                        task_id: row.get(1)?,
+                        editor_surface: row.get(2)?,
+                        document_title: row.get(3)?,
+                        before_hash: row.get(4)?,
+                        after_hash: row.get(5)?,
+                        timestamp: row.get(6)?,
+                        status: row.get(7)?,
                     })
                 },
             )
@@ -3297,22 +3311,30 @@ impl TaskStore {
         Ok(receipt)
     }
 
-    pub fn list_live_edit_receipts(&self) -> Result<Vec<crate::models::LiveEditReceiptDto>> {
+    pub fn list_live_edit_receipts(
+        &self,
+        task_id: Option<i64>,
+    ) -> Result<Vec<crate::models::LiveEditReceiptDto>> {
         let conn = self.connect()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, editor_surface, document_title, before_hash, after_hash, timestamp, status
-             FROM live_edit_receipts ORDER BY timestamp DESC LIMIT 100",
-        )?;
+        let sql = if task_id.is_some() {
+            "SELECT id, task_id, editor_surface, document_title, before_hash, after_hash, timestamp, status
+             FROM live_edit_receipts WHERE task_id = ?1 ORDER BY timestamp DESC LIMIT 100"
+        } else {
+            "SELECT id, task_id, editor_surface, document_title, before_hash, after_hash, timestamp, status
+             FROM live_edit_receipts ORDER BY timestamp DESC LIMIT 100"
+        };
+        let mut stmt = conn.prepare(sql)?;
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(task_id), |row| {
                 Ok(crate::models::LiveEditReceiptDto {
                     id: row.get(0)?,
-                    editor_surface: row.get(1)?,
-                    document_title: row.get(2)?,
-                    before_hash: row.get(3)?,
-                    after_hash: row.get(4)?,
-                    timestamp: row.get(5)?,
-                    status: row.get(6)?,
+                    task_id: row.get(1)?,
+                    editor_surface: row.get(2)?,
+                    document_title: row.get(3)?,
+                    before_hash: row.get(4)?,
+                    after_hash: row.get(5)?,
+                    timestamp: row.get(6)?,
+                    status: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -3320,25 +3342,29 @@ impl TaskStore {
         Ok(rows)
     }
 
-    pub fn get_pending_live_edits(&self) -> Result<Vec<crate::models::PendingLiveEditDto>> {
+    pub fn get_unresolved_live_edits(&self) -> Result<Vec<crate::models::PendingLiveEditDto>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
-            "SELECT id, editor_surface, document_title, before_text, after_text, timestamp
-             FROM live_edit_receipts WHERE status = 'pending_approval' ORDER BY timestamp ASC",
+            "SELECT id, task_id, editor_surface, document_title, before_text, after_text, timestamp, status
+             FROM live_edit_receipts
+             WHERE status IN ('pending_approval', 'fallback', 'failed')
+             ORDER BY timestamp ASC",
         )?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(crate::models::PendingLiveEditDto {
                     receipt_id: row.get(0)?,
-                    editor_surface: row.get(1)?,
-                    document_title: row.get(2)?,
-                    before_text: row.get(3)?,
-                    after_text: row.get(4)?,
-                    timestamp: row.get(5)?,
+                    task_id: row.get(1)?,
+                    editor_surface: row.get(2)?,
+                    document_title: row.get(3)?,
+                    before_text: row.get(4)?,
+                    after_text: row.get(5)?,
+                    timestamp: row.get(6)?,
+                    status: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect pending live edits")?;
+            .context("failed to collect unresolved live edits")?;
         Ok(rows)
     }
 
@@ -3404,12 +3430,18 @@ impl TaskStore {
             params![task_id],
         )
         .context("failed to clear artifact revisions")?;
-        tx.execute("DELETE FROM artifact_chunks WHERE task_id = ?1", params![task_id])
-            .context("failed to clear artifact chunks")?;
+        tx.execute(
+            "DELETE FROM artifact_chunks WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear artifact chunks")?;
         tx.execute("DELETE FROM artifacts WHERE task_id = ?1", params![task_id])
             .context("failed to clear artifacts")?;
-        tx.execute("DELETE FROM chat_messages WHERE task_id = ?1", params![task_id])
-            .context("failed to clear chat messages")?;
+        tx.execute(
+            "DELETE FROM chat_messages WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear chat messages")?;
         tx.execute("DELETE FROM sessions WHERE task_id = ?1", params![task_id])
             .context("failed to clear sessions")?;
         tx.execute(
@@ -3429,8 +3461,11 @@ impl TaskStore {
             params![task_id],
         )
         .context("failed to clear watched file registry")?;
-        tx.execute("DELETE FROM watched_folders WHERE task_id = ?1", params![task_id])
-            .context("failed to clear watched folders")?;
+        tx.execute(
+            "DELETE FROM watched_folders WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear watched folders")?;
         tx.execute(
             "DELETE FROM clipboard_capture_settings WHERE task_id = ?1",
             params![task_id],
@@ -3441,8 +3476,11 @@ impl TaskStore {
             params![task_id],
         )
         .context("failed to clear recently learned log")?;
-        tx.execute("DELETE FROM suggestions WHERE task_id = ?1", params![task_id])
-            .context("failed to clear suggestions")?;
+        tx.execute(
+            "DELETE FROM suggestions WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear suggestions")?;
         tx.execute(
             "DELETE FROM session_mode_state WHERE task_id = ?1",
             params![task_id],
@@ -3625,12 +3663,15 @@ impl TaskStore {
         }
 
         if workspace.exists() {
-            for entry in fs::read_dir(&workspace).with_context(|| {
-                format!("failed to read task workspace {}", workspace.display())
-            })? {
+            for entry in fs::read_dir(&workspace)
+                .with_context(|| format!("failed to read task workspace {}", workspace.display()))?
+            {
                 let path = entry
                     .with_context(|| {
-                        format!("failed to read entry in task workspace {}", workspace.display())
+                        format!(
+                            "failed to read entry in task workspace {}",
+                            workspace.display()
+                        )
                     })?
                     .path();
                 if path.is_dir() {
@@ -4451,14 +4492,13 @@ mod tests {
 
     #[test]
     fn store_cold_open_is_fast() {
+        use crate::latency::STARTUP_BUDGET_MS;
         use std::time::Instant;
         use tempfile::TempDir;
-        use crate::latency::STARTUP_BUDGET_MS;
 
         let dir = TempDir::new().expect("failed to create temp dir");
         let started = Instant::now();
-        let _store = TaskStore::initialize(dir.path())
-            .expect("failed to initialize store");
+        let _store = TaskStore::initialize(dir.path()).expect("failed to initialize store");
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         assert!(
@@ -4519,16 +4559,12 @@ mod tests {
             crate::voice_naturalness::DEFAULT_TTS_VOICE
         );
 
-        store
-            .set_privacy_workspace_watcher_enabled(false)
-            .unwrap();
+        store.set_privacy_workspace_watcher_enabled(false).unwrap();
         store.set_privacy_clipboard_capture_enabled(false).unwrap();
         store
             .set_privacy_active_window_context_enabled(false)
             .unwrap();
-        store
-            .set_privacy_proactive_triggers_enabled(false)
-            .unwrap();
+        store.set_privacy_proactive_triggers_enabled(false).unwrap();
         store.set_privacy_user_profile_memory_enabled(true).unwrap();
         store.set_privacy_calendar_context_enabled(true).unwrap();
         store.set_privacy_selection_capture_enabled(false).unwrap();
@@ -4604,10 +4640,12 @@ mod tests {
         let (_dir, store) = new_test_store();
         let task = store.create_task("Reset All").unwrap();
         store.set_onboarding_complete(true).unwrap();
-        store
-            .set_privacy_workspace_watcher_enabled(false)
-            .unwrap();
-        fs::write(PathBuf::from(&task.workspace_path).join("scratch.txt"), "private").unwrap();
+        store.set_privacy_workspace_watcher_enabled(false).unwrap();
+        fs::write(
+            PathBuf::from(&task.workspace_path).join("scratch.txt"),
+            "private",
+        )
+        .unwrap();
 
         store.clear_all_data().unwrap();
 

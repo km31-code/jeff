@@ -97,6 +97,9 @@ echo "--- m24.2: updater config in tauri.conf.json ---"
 grep_check "updater endpoints https url in tauri.conf.json" \
     "https://github.com" "$CONF/tauri.conf.json"
 
+grep_check "updater endpoint is not OWNER/REPO placeholder" \
+    "km31-code/jeff" "$CONF/tauri.conf.json"
+
 grep_check "updater pubkey references TAURI_PUBLIC_KEY in tauri.conf.json" \
     "TAURI_PUBLIC_KEY" "$CONF/tauri.conf.json"
 
@@ -157,6 +160,12 @@ grep_check "release job depends on notarize" \
 grep_check "phase17_check.sh called in ci test job" \
     "phase17_check.sh" "$CI/release.yml"
 
+grep_check "tauri cli runs from desktop package in build job" \
+    "npm --prefix desktop run tauri -- build" "$CI/release.yml"
+
+grep_check "updater public key injected before release build" \
+    "TAURI_PUBLIC_KEY.*tauri.conf.json\|inject updater public key" "$CI/release.yml"
+
 grep_check "apple_certificate secret referenced correctly" \
     "secrets.APPLE_CERTIFICATE" "$CI/release.yml"
 
@@ -180,6 +189,12 @@ grep_check "no hardcoded apple_id value (only secret reference allowed)" \
 
 grep_check "latest.json generated in release job" \
     "latest.json" "$CI/release.yml"
+
+grep_check "release job signs updater archive with tauri signer" \
+    "signer sign" "$CI/release.yml"
+
+grep_check "latest.json points at signed updater archive, not dmg" \
+    "app.tar.gz" "$CI/release.yml"
 
 echo ""
 echo "--- m24.4: architecture note ---"

@@ -11,14 +11,17 @@ use crate::store::TaskStore;
 // core get/set (thin wrappers around store)
 // -------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub fn get_profile_value(store: &TaskStore, key: &str) -> Result<Option<String>> {
     store.get_profile_value(key)
 }
 
+#[allow(dead_code)]
 pub fn set_profile_value(store: &TaskStore, key: &str, value: &str) -> Result<()> {
     store.set_profile_value(key, value)
 }
 
+#[allow(dead_code)]
 pub fn clear_all_profile(store: &TaskStore) -> Result<()> {
     store.clear_user_profile()
 }
@@ -187,26 +190,33 @@ pub fn record_focus_hour(store: &TaskStore) -> Result<()> {
     let hour = chrono::Local::now().hour();
     // store a comma-separated history and pick the mode
     let key = "work_rhythm_focus_hours";
-    let existing = store
-        .get_profile_value(key)?
-        .unwrap_or_default();
-    let mut hours: Vec<u8> = existing
-        .split(',')
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    let existing = store.get_profile_value(key)?.unwrap_or_default();
+    let mut hours: Vec<u8> = existing.split(',').filter_map(|s| s.parse().ok()).collect();
     hours.push(hour as u8);
     // keep last 100 entries to bound storage
     if hours.len() > 100 {
         hours.drain(0..hours.len() - 100);
     }
-    store.set_profile_value(key, &hours.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(","))?;
+    store.set_profile_value(
+        key,
+        &hours
+            .iter()
+            .map(|h| h.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    )?;
 
     // compute mode
     let mut counts = [0u32; 24];
     for h in &hours {
         counts[*h as usize] += 1;
     }
-    let peak = counts.iter().enumerate().max_by_key(|(_, &c)| c).map(|(i, _)| i).unwrap_or(9);
+    let peak = counts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &c)| c)
+        .map(|(i, _)| i)
+        .unwrap_or(9);
     store.set_profile_value("work_rhythm_peak_hour", &peak.to_string())?;
 
     Ok(())
@@ -221,6 +231,21 @@ pub fn record_response_length(store: &TaskStore, word_count: usize) -> Result<()
     let new_val = (current * 0.8) + (word_count as f64 * 0.2);
     store.set_profile_value("response_length_preference", &format!("{:.1}", new_val))?;
     Ok(())
+}
+
+/// word-level rewrite ratio based on longest common subsequence distance.
+/// 0.0 means effectively unchanged; 1.0 means no word overlap in order.
+pub fn word_level_diff_ratio(original: &str, edited: &str) -> f64 {
+    let original_words = normalized_words(original);
+    let edited_words = normalized_words(edited);
+    if original_words.is_empty() && edited_words.is_empty() {
+        return 0.0;
+    }
+    if original_words.is_empty() || edited_words.is_empty() {
+        return 1.0;
+    }
+    let lcs = lcs_len(&original_words, &edited_words);
+    1.0 - (lcs as f64 / original_words.len().max(edited_words.len()) as f64)
 }
 
 /// called when a proactive trigger is dismissed; down-weights the trigger type.
@@ -293,15 +318,25 @@ fn readable_label(key: &str, value: &str) -> String {
     }
     if key == "work_rhythm_peak_hour" {
         let h: u8 = value.parse().unwrap_or(9);
-        let period = if h < 12 { "morning" } else if h < 17 { "afternoon" } else { "evening" };
+        let period = if h < 12 {
+            "morning"
+        } else if h < 17 {
+            "afternoon"
+        } else {
+            "evening"
+        };
         return format!("You tend to focus work in the {}.", period);
     }
     if key.starts_with("delegation_accepted_") {
-        let et = key.trim_start_matches("delegation_accepted_").replace('_', " ");
+        let et = key
+            .trim_start_matches("delegation_accepted_")
+            .replace('_', " ");
         return format!("You often accept {} subtasks.", et);
     }
     if key.starts_with("delegation_rejected_") {
-        let et = key.trim_start_matches("delegation_rejected_").replace('_', " ");
+        let et = key
+            .trim_start_matches("delegation_rejected_")
+            .replace('_', " ");
         return format!("You often decline {} subtasks.", et);
     }
     if key.starts_with("rubric_") {
@@ -333,11 +368,41 @@ fn count_contractions(text: &str) -> usize {
     let bytes = text.as_bytes();
     let mut count = 0usize;
     for i in 1..bytes.len().saturating_sub(1) {
-        if bytes[i] == b'\'' && bytes[i - 1].is_ascii_alphabetic() && bytes[i + 1].is_ascii_alphabetic() {
+        if bytes[i] == b'\''
+            && bytes[i - 1].is_ascii_alphabetic()
+            && bytes[i + 1].is_ascii_alphabetic()
+        {
             count += 1;
         }
     }
     count
+}
+
+fn normalized_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'')
+                .to_ascii_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn lcs_len(left: &[String], right: &[String]) -> usize {
+    let mut prev = vec![0usize; right.len() + 1];
+    let mut curr = vec![0usize; right.len() + 1];
+    for left_word in left {
+        for (j, right_word) in right.iter().enumerate() {
+            curr[j + 1] = if left_word == right_word {
+                prev[j] + 1
+            } else {
+                curr[j].max(prev[j + 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut curr);
+        curr.fill(0);
+    }
+    prev[right.len()]
 }
 
 // -------------------------------------------------------------------------
@@ -411,5 +476,13 @@ mod tests {
         let v = get_profile_value(&store, "trigger_weight_reorientation").unwrap();
         let weight: f64 = v.unwrap().parse().unwrap();
         assert!((weight - 0.90).abs() < 0.01);
+    }
+
+    #[test]
+    fn word_level_diff_ratio_detects_same_length_rewrite() {
+        let original = "This claim describes the source but does not analyze citizenship.";
+        let edited = "Evidence connects citizenship debates to policy choices and legal power.";
+        assert!(word_level_diff_ratio(original, edited) > 0.30);
+        assert!(word_level_diff_ratio(original, original) < 0.01);
     }
 }

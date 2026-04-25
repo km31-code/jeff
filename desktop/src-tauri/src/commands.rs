@@ -14,19 +14,18 @@ use crate::{
     message_kind::classify_user_message_kind,
     models::{
         ActiveWindowContextDto, ApiKeyValidationDto, ArtifactContentDto, ArtifactDto,
-        ArtifactVersionDto, BrowserSelectionCaptureRequestDto, CalendarEventDto,
-        ChatMessageDto, CoworkingStatusDto, DataClearResultDto, DriftFlagDto,
-        EventLogEntryDto, FileWriteProposalDto, IntentClassificationDto, IntentLabel,
-        IntentSlotsDto, LiveEditReceiptDto, OnboardingStatusDto, OpenResourceDto,
-        PendingLiveEditDto, PrivacyCenterDashboardDto, ProactiveAuditEntryDto,
-        ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto,
-        RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto,
-        RevisionTargetDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
-        SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
-        SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto,
-        SuggestionDto, SuggestionEvaluationDto, TaskContextPackDto, TaskDto, TaskSummaryDto,
-        TranscriptionResultDto, UserProfileSignalDto, WatcherStatusDto, WorkloadSummaryDto,
-        WorkspaceInfoDto, WriteAuditEntryDto,
+        ArtifactVersionDto, BrowserSelectionCaptureRequestDto, CalendarEventDto, ChatMessageDto,
+        CoworkingStatusDto, DataClearResultDto, DriftFlagDto, EventLogEntryDto,
+        FileWriteProposalDto, IntentClassificationDto, IntentLabel, IntentSlotsDto,
+        LiveEditReceiptDto, OnboardingStatusDto, OpenResourceDto, PendingLiveEditDto,
+        PrivacyCenterDashboardDto, ProactiveAuditEntryDto, ProactiveEvaluationDto,
+        RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto, RevisionApplyResultDto,
+        RevisionProposalDto, RevisionProposalResultDto, RevisionTargetDto,
+        SelectionBridgeStatusDto, SelectionCaptureIndicatorDto, SendMessageResponseDto,
+        SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto, SubTaskDto, SubTaskStepDto,
+        SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto, SuggestionEvaluationDto,
+        TaskContextPackDto, TaskDto, TaskSummaryDto, TranscriptionResultDto, UserProfileSignalDto,
+        WatcherStatusDto, WorkloadSummaryDto, WorkspaceInfoDto, WriteAuditEntryDto,
     },
     retrieval::{
         auto_ingest_file_for_task, build_task_context_pack, import_artifact_for_task,
@@ -40,6 +39,7 @@ use crate::{
         revert_artifact_to_version as revert_artifact_by_version,
     },
     selection_capture::SelectionCaptureState,
+    similarity::cosine_similarity,
     state::{ContextState, JeffState},
     subtask::{
         accept_subtask_result as accept_subtask_result_by_id,
@@ -48,13 +48,18 @@ use crate::{
         refine_subtask_and_start, reject_subtask_result as reject_subtask_result_by_id,
         suggest_subtask_for_task,
     },
-    similarity::cosine_similarity,
-    user_model,
-    workload,
+    user_model, workload,
 };
 
 fn map_jeff_error<E: ToString>(error: E) -> String {
     crate::errors::map_error_message(&error.to_string())
+}
+
+fn user_profile_memory_enabled(state: &JeffState) -> bool {
+    state
+        .store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
 }
 
 // phase 20: build the context prefix string from ContextState.
@@ -70,10 +75,7 @@ fn active_context_string(ctx_state: &ContextState) -> Option<String> {
     ))
 }
 
-fn active_context_string_if_enabled(
-    state: &JeffState,
-    ctx_state: &ContextState,
-) -> Option<String> {
+fn active_context_string_if_enabled(state: &JeffState, ctx_state: &ContextState) -> Option<String> {
     if !state
         .store
         .get_privacy_active_window_context_enabled()
@@ -93,7 +95,10 @@ fn next_message_context<R: Runtime>(
     let active_context = active_context_string_if_enabled(state, ctx_state);
     let selection_context = selection_state.take_prompt_context();
     if selection_context.is_some() {
-        let _ = app.emit(crate::selection_capture::EVENT_SELECTION_CLEARED, serde_json::json!({}));
+        let _ = app.emit(
+            crate::selection_capture::EVENT_SELECTION_CLEARED,
+            serde_json::json!({}),
+        );
     }
 
     match (active_context, selection_context) {
@@ -406,6 +411,10 @@ pub fn send_message<R: Runtime>(
                 runtime.note_interruption(now);
             } else {
                 runtime.note_assistant_answer(now);
+                if user_profile_memory_enabled(state.inner()) {
+                    let word_count = value.assistant_response.split_whitespace().count();
+                    let _ = user_model::record_response_length(&state.store, word_count);
+                }
                 notify_if_backgrounded(
                     &app,
                     "Jeff finished a response",
@@ -770,28 +779,21 @@ pub fn apply_revision(
     // signals toward the user's edits rather than the raw suggestion.
     user_edited_text: Option<String>,
 ) -> Result<RevisionApplyResultDto, String> {
-    let result =
-        apply_artifact_revision(&state.store, state.embeddings.as_ref(), revision_id)
-            .map_err(map_jeff_error)?;
+    let result = apply_artifact_revision(&state.store, state.embeddings.as_ref(), revision_id)
+        .map_err(map_jeff_error)?;
 
-    // phase 23: update style signals from the accepted text
-    let accepted_text = &result.artifact_content.content;
-    if let Some(edited) = user_edited_text {
-        // compute word-level diff ratio to detect significant rewrites
-        let original_words = accepted_text.split_whitespace().count();
-        let edited_words = edited.split_whitespace().count();
-        let diff_ratio = if original_words == 0 {
-            1.0
+    if user_profile_memory_enabled(state.inner()) {
+        // phase 23: update style signals from the accepted text.
+        let accepted_text = &result.artifact_content.content;
+        if let Some(edited) = user_edited_text {
+            if user_model::word_level_diff_ratio(accepted_text, &edited) > 0.30 {
+                let _ = user_model::record_revision_rewrite(&state.store, &edited);
+            } else {
+                let _ = user_model::record_revision_accepted(&state.store, &edited);
+            }
         } else {
-            (original_words.abs_diff(edited_words)) as f64 / original_words as f64
-        };
-        if diff_ratio > 0.30 {
-            let _ = user_model::record_revision_rewrite(&state.store, &edited);
-        } else {
-            let _ = user_model::record_revision_accepted(&state.store, &edited);
+            let _ = user_model::record_revision_accepted(&state.store, accepted_text);
         }
-    } else {
-        let _ = user_model::record_revision_accepted(&state.store, accepted_text);
     }
 
     Ok(result)
@@ -861,8 +863,10 @@ pub fn accept_subtask_result(
     subtask_id: i64,
 ) -> Result<SubTaskDto, String> {
     let result = accept_subtask_result_by_id(&state.store, subtask_id).map_err(map_jeff_error)?;
-    // phase 23: record delegation acceptance pattern
-    let _ = user_model::record_subtask_accepted(&state.store, &result.execution_type);
+    if user_profile_memory_enabled(state.inner()) {
+        // phase 23: record delegation acceptance pattern
+        let _ = user_model::record_subtask_accepted(&state.store, &result.execution_type);
+    }
     Ok(result)
 }
 
@@ -872,8 +876,10 @@ pub fn reject_subtask_result(
     subtask_id: i64,
 ) -> Result<SubTaskDto, String> {
     let result = reject_subtask_result_by_id(&state.store, subtask_id).map_err(map_jeff_error)?;
-    // phase 23: record delegation rejection pattern
-    let _ = user_model::record_subtask_rejected(&state.store, &result.execution_type);
+    if user_profile_memory_enabled(state.inner()) {
+        // phase 23: record delegation rejection pattern
+        let _ = user_model::record_subtask_rejected(&state.store, &result.execution_type);
+    }
     Ok(result)
 }
 
@@ -1431,20 +1437,29 @@ pub fn dismiss_proactive_trigger(
         .record_proactive_trigger(task_id, &trigger_type, true)
         .map(|_| ())
         .map_err(map_jeff_error)?;
-    // phase 23: down-weight the trigger type so dismissals reduce future frequency
-    let _ = user_model::record_trigger_dismissed(&state.store, &trigger_type);
+    if user_profile_memory_enabled(state.inner()) {
+        // phase 23: down-weight the trigger type so dismissals reduce future frequency
+        let _ = user_model::record_trigger_dismissed(&state.store, &trigger_type);
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub fn record_task_focus(state: State<'_, JeffState>, task_id: i64) -> Result<(), String> {
+pub fn record_task_focus<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, JeffState>,
+    ambient: State<'_, crate::ambient::AmbientState>,
+    task_id: i64,
+) -> Result<(), String> {
     state
         .store
         .record_task_focus(task_id)
         .map_err(map_jeff_error)?;
-    // phase 23: update work-rhythm profile signal and check stale notifications
-    let _ = user_model::record_focus_hour(&state.store);
-    let _ = workload::check_stale_task_notifications_noop(&state.store);
+    if user_profile_memory_enabled(state.inner()) {
+        // phase 23: update work-rhythm profile signal
+        let _ = user_model::record_focus_hour(&state.store);
+    }
+    let _ = workload::check_stale_task_notifications(&state.store, &app, ambient.is_quiet_mode());
     Ok(())
 }
 
@@ -1954,7 +1969,10 @@ pub fn dismiss_selection_capture<R: Runtime>(
     app: AppHandle<R>,
 ) -> Option<SelectionCaptureIndicatorDto> {
     selection_state.dismiss();
-    let _ = app.emit(crate::selection_capture::EVENT_SELECTION_CLEARED, serde_json::json!({}));
+    let _ = app.emit(
+        crate::selection_capture::EVENT_SELECTION_CLEARED,
+        serde_json::json!({}),
+    );
     None
 }
 
@@ -1970,7 +1988,8 @@ pub fn capture_browser_selection<R: Runtime>(
     app: AppHandle<R>,
     request: BrowserSelectionCaptureRequestDto,
 ) -> Result<SelectionCaptureIndicatorDto, String> {
-    crate::selection_capture::capture_browser_selection_request(&app, request).map_err(map_jeff_error)
+    crate::selection_capture::capture_browser_selection_request(&app, request)
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -2031,7 +2050,10 @@ pub fn clear_active_task_data(
     crate::watcher::stop_watcher(state.watcher.clone(), task.id);
     crate::watcher::stop_clipboard_poll(state.watcher.clone(), task.id);
     selection_state.dismiss();
-    state.store.clear_task_data(task.id).map_err(map_jeff_error)?;
+    state
+        .store
+        .clear_task_data(task.id)
+        .map_err(map_jeff_error)?;
 
     Ok(DataClearResultDto {
         cleared: true,
@@ -2204,6 +2226,9 @@ pub fn get_session_restore_state(state: State<'_, JeffState>) -> Result<SessionR
 pub fn get_user_profile_signals(
     state: State<'_, JeffState>,
 ) -> Result<Vec<UserProfileSignalDto>, String> {
+    if !user_profile_memory_enabled(state.inner()) {
+        return Ok(Vec::new());
+    }
     let signals = user_model::get_readable_signals(&state.store).map_err(map_jeff_error)?;
     Ok(signals
         .into_iter()
@@ -2221,6 +2246,9 @@ pub fn add_quality_rubric(
     state: State<'_, JeffState>,
     text: String,
 ) -> Result<Vec<UserProfileSignalDto>, String> {
+    if !user_profile_memory_enabled(state.inner()) {
+        return Err("user profile memory is off in Privacy Center".to_string());
+    }
     user_model::add_quality_rubric(&state.store, text.trim()).map_err(map_jeff_error)?;
     get_user_profile_signals(state)
 }
@@ -2252,9 +2280,7 @@ pub fn delete_user_profile_signal(
 // phase 23: workload commands --------------------------------------------------
 
 #[tauri::command]
-pub fn get_workload_summary(
-    state: State<'_, JeffState>,
-) -> Result<WorkloadSummaryDto, String> {
+pub fn get_workload_summary(state: State<'_, JeffState>) -> Result<WorkloadSummaryDto, String> {
     workload::compute_workload_summary(&state.store).map_err(map_jeff_error)
 }
 
@@ -2330,7 +2356,7 @@ pub fn get_calendar_next_event(
     if !enabled {
         return Ok(None);
     }
-    Ok(calendar_state.current())
+    crate::calendar::get_cached_next_event(&calendar_state).map_err(map_jeff_error)
 }
 
 // phase 23: live app action commands ------------------------------------------
@@ -2368,9 +2394,10 @@ pub fn list_live_edit_receipts(
     state: State<'_, JeffState>,
     task_id: i64,
 ) -> Result<Vec<LiveEditReceiptDto>, String> {
-    // receipts are not per-task scoped in the DB, but we return all for now
-    let _ = task_id;
-    state.store.list_live_edit_receipts().map_err(map_jeff_error)
+    state
+        .store
+        .list_live_edit_receipts(Some(task_id))
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -2379,7 +2406,7 @@ pub fn get_pending_live_edits(
 ) -> Result<Vec<PendingLiveEditDto>, String> {
     state
         .store
-        .get_pending_live_edits()
+        .get_unresolved_live_edits()
         .map_err(map_jeff_error)
 }
 

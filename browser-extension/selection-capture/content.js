@@ -19,7 +19,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         fetch(`http://127.0.0.1:${message.port}/apply-fallback`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ receipt_id: message.receiptId })
+          body: JSON.stringify({ token: message.token, receipt_id: message.receiptId })
+        }).catch(() => {});
+      } else {
+        fetch(`http://127.0.0.1:${message.port}/apply-result`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: message.token,
+            receipt_id: message.receiptId,
+            status: result.ok ? "applied" : "failed",
+            error: result.reason || null
+          })
         }).catch(() => {});
       }
     });
@@ -29,17 +40,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
-// compute a simple djb2-style hash of a string for anchor validation.
-// matches the backend SHA-256 only conceptually; the full SHA-256 comparison
-// happens in the backend. here we compare the current selection against the
-// before_text directly (string equality after normalization) since we have
-// the full text, not just the hash.
-function normalizeText(text) {
-  return text.replace(/\s+/g, " ").trim();
+async function sha256Hex(text) {
+  const bytes = new TextEncoder().encode(String(text || ""));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function applyEditInPlace(message) {
-  const { beforeText, afterText, receiptId } = message;
+  const { beforeText, afterText, anchorHash } = message;
 
   // get the current selection
   const sel = window.getSelection();
@@ -49,22 +57,34 @@ async function applyEditInPlace(message) {
 
   const currentText = sel.toString();
 
-  // anchor validation: compare current selected text to before_text
-  if (normalizeText(currentText) !== normalizeText(beforeText)) {
+  // anchor validation: compare current selected text's SHA-256 to the
+  // original anchor, preventing silent writes to shifted selections.
+  const currentHash = await sha256Hex(currentText);
+  const expectedHash = String(anchorHash || await sha256Hex(beforeText)).toLowerCase();
+  if (currentHash !== expectedHash) {
     return { ok: false, anchorMismatch: true, reason: "anchor text no longer matches" };
   }
 
-  // apply the replacement using execCommand (supported in content editable areas)
-  const range = sel.getRangeAt(0);
-  range.deleteContents();
-  const textNode = document.createTextNode(afterText);
-  range.insertNode(textNode);
+  if (document.queryCommandSupported && document.queryCommandSupported("insertText")) {
+    const inserted = document.execCommand("insertText", false, afterText);
+    if (inserted) {
+      return { ok: true };
+    }
+  }
 
-  // move cursor to end of inserted text
-  range.setStartAfter(textNode);
-  range.setEndAfter(textNode);
-  sel.removeAllRanges();
-  sel.addRange(range);
+  try {
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    const textNode = document.createTextNode(afterText);
+    range.insertNode(textNode);
 
-  return { ok: true };
+    // move cursor to end of inserted text
+    range.setStartAfter(textNode);
+    range.setEndAfter(textNode);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: String(error && error.message ? error.message : error) };
+  }
 }

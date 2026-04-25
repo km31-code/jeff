@@ -221,10 +221,8 @@ fn main() {
 
                         if quiet {
                             // still emit a null context so the frontend clears stale display.
-                            let _ = poll_handle.emit(
-                                "context://context-updated",
-                                serde_json::Value::Null,
-                            );
+                            let _ = poll_handle
+                                .emit("context://context-updated", serde_json::Value::Null);
                             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                             continue;
                         }
@@ -246,10 +244,8 @@ fn main() {
                             if let Some(ctx_state) = poll_handle.try_state::<ContextState>() {
                                 ctx_state.update(None);
                             }
-                            let _ = poll_handle.emit(
-                                "context://context-updated",
-                                serde_json::Value::Null,
-                            );
+                            let _ = poll_handle
+                                .emit("context://context-updated", serde_json::Value::Null);
                             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                             continue;
                         }
@@ -328,7 +324,9 @@ fn main() {
 
                         let enabled = typing_handle
                             .try_state::<JeffState>()
-                            .and_then(|state| state.store.get_privacy_typing_activity_enabled().ok())
+                            .and_then(|state| {
+                                state.store.get_privacy_typing_activity_enabled().ok()
+                            })
                             .unwrap_or(true);
                         typing_state.set_enabled(enabled);
                         let is_typing = enabled && typing_state.is_typing();
@@ -365,13 +363,18 @@ fn main() {
                 let cal_poll_handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
                     loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-
                         let quiet = cal_poll_handle
                             .try_state::<AmbientState>()
                             .map(|s| s.is_quiet_mode())
                             .unwrap_or(false);
                         if quiet {
+                            if let Some(cs) = cal_poll_handle.try_state::<CalendarState>() {
+                                cs.update(None);
+                            }
+                            use tauri::Emitter;
+                            let _ = cal_poll_handle
+                                .emit("calendar://event-updated", serde_json::Value::Null);
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                             continue;
                         }
 
@@ -385,6 +388,10 @@ fn main() {
                             if let Some(cs) = cal_poll_handle.try_state::<CalendarState>() {
                                 cs.update(None);
                             }
+                            use tauri::Emitter;
+                            let _ = cal_poll_handle
+                                .emit("calendar://event-updated", serde_json::Value::Null);
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                             continue;
                         }
 
@@ -399,6 +406,8 @@ fn main() {
                             "calendar://event-updated",
                             serde_json::to_value(&next_event).unwrap_or(serde_json::Value::Null),
                         );
+
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     }
                 });
             }

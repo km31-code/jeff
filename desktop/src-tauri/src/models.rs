@@ -575,6 +575,7 @@ pub struct CalendarEventDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LiveEditReceiptDto {
     pub id: i64,
+    pub task_id: Option<i64>,
     pub editor_surface: String,
     pub document_title: String,
     pub before_hash: String,
@@ -586,9 +587,11 @@ pub struct LiveEditReceiptDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingLiveEditDto {
     pub receipt_id: i64,
+    pub task_id: Option<i64>,
     pub editor_surface: String,
     pub document_title: String,
     pub before_text: String,
     pub after_text: String,
     pub timestamp: String,
+    pub status: String,
 }

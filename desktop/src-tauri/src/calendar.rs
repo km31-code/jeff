@@ -111,8 +111,9 @@ mod inner {
             // authorizationStatusForEntityType: — EKEntityTypeEvent = 0
             // method returns NSInteger (isize on 64-bit)
             type ObjcMsgSendInt = unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> isize;
-            let imp: ObjcMsgSendInt =
-                std::mem::transmute(objc_msgSend as unsafe extern "C" fn(*mut c_void, *mut c_void, ...) -> *mut c_void);
+            let imp: ObjcMsgSendInt = std::mem::transmute(
+                objc_msgSend as unsafe extern "C" fn(*mut c_void, *mut c_void, ...) -> *mut c_void,
+            );
             let s = sel(b"authorizationStatusForEntityType:\0");
             let status = imp(ek_class, s, 0 /* EKEntityTypeEvent */);
             match status {
@@ -138,13 +139,23 @@ mod inner {
             if !store.is_null() {
                 // requestAccessToEntityType:completion: — fire and forget
                 // we pass a nil completion block; the OS will still show the dialog
-                type MsgSendEntityCompletion =
-                    unsafe extern "C" fn(*mut c_void, *mut c_void, usize, *mut c_void) -> *mut c_void;
+                type MsgSendEntityCompletion = unsafe extern "C" fn(
+                    *mut c_void,
+                    *mut c_void,
+                    usize,
+                    *mut c_void,
+                ) -> *mut c_void;
                 let imp: MsgSendEntityCompletion = std::mem::transmute(
-                    objc_msgSend as unsafe extern "C" fn(*mut c_void, *mut c_void, ...) -> *mut c_void,
+                    objc_msgSend
+                        as unsafe extern "C" fn(*mut c_void, *mut c_void, ...) -> *mut c_void,
                 );
                 let s = sel(b"requestAccessToEntityType:completion:\0");
-                imp(store, s, 0 /* EKEntityTypeEvent */, std::ptr::null_mut());
+                imp(
+                    store,
+                    s,
+                    0, /* EKEntityTypeEvent */
+                    std::ptr::null_mut(),
+                );
             }
         }
         Ok(false)
@@ -230,8 +241,7 @@ mod inner {
             }
 
             // count
-            type MsgSendCount =
-                unsafe extern "C" fn(*mut c_void, *mut c_void) -> usize;
+            type MsgSendCount = unsafe extern "C" fn(*mut c_void, *mut c_void) -> usize;
             let count_imp: MsgSendCount = std::mem::transmute(
                 objc_msgSend as unsafe extern "C" fn(*mut c_void, *mut c_void, ...) -> *mut c_void,
             );

@@ -72,17 +72,6 @@ fn count_pending_items(store: &TaskStore, task_id: i64) -> Result<i64> {
     store.count_pending_items_for_task(task_id)
 }
 
-/// check for stale tasks with unreviewed subtask results and fire notifications.
-/// this is called at app startup and on every record_task_focus event.
-/// suppressed when quiet mode is active.
-pub fn check_stale_task_notifications_noop(store: &TaskStore) -> Result<()> {
-    // notification firing requires app_handle (Tauri runtime). the noop variant
-    // is called from synchronous command context; actual notification dispatch
-    // happens from the background poll task in main.rs where app_handle is available.
-    let _ = store;
-    Ok(())
-}
-
 /// check for stale tasks and fire one notification per task per 24h.
 /// called from the background poll task in main.rs.
 pub fn check_stale_task_notifications<R: tauri::Runtime>(
@@ -131,7 +120,9 @@ pub fn check_stale_task_notifications<R: tauri::Runtime>(
                 context_id: Some(task.id),
             },
         );
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
         let _ = store.set_app_setting(&setting_key, &now);
     }
     Ok(())
@@ -139,15 +130,10 @@ pub fn check_stale_task_notifications<R: tauri::Runtime>(
 
 fn days_since_iso(iso: &str) -> i64 {
     use chrono::{DateTime, Utc};
-    let parsed = iso
-        .parse::<DateTime<Utc>>()
-        .ok()
-        .or_else(|| {
-            // try with space separator
-            iso.replace(' ', "T")
-                .parse::<DateTime<Utc>>()
-                .ok()
-        });
+    let parsed = iso.parse::<DateTime<Utc>>().ok().or_else(|| {
+        // try with space separator
+        iso.replace(' ', "T").parse::<DateTime<Utc>>().ok()
+    });
     match parsed {
         Some(dt) => {
             let now = Utc::now();

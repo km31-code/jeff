@@ -401,6 +401,14 @@ async fn run_llm_stream<R: Runtime + 'static>(
         return;
     }
 
+    if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        let _ =
+            crate::user_model::record_response_length(&store, full_text.split_whitespace().count());
+    }
+
     let _ = app.emit(
         EVENT_LLM_COMPLETE,
         &LlmCompletePayload {

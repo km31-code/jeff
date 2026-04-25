@@ -8,6 +8,12 @@ async function getConfig() {
   };
 }
 
+async function sha256Hex(text) {
+  const bytes = new TextEncoder().encode(String(text || ""));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 async function captureFromActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.id) return;
@@ -57,12 +63,12 @@ async function captureFromActiveTab() {
 // phase 23: poll for approval of a pending live edit and dispatch to the
 // active content script when approved. falls back to guided apply on rejection
 // or anchor mismatch.
-async function pollForLiveEditApproval(receiptId, beforeText, afterText, tabId, port) {
+async function pollForLiveEditApproval(receiptId, beforeText, afterText, anchorHash, tabId, port, token) {
   const MAX_POLLS = 40; // 20 seconds at 500ms intervals
   for (let i = 0; i < MAX_POLLS; i++) {
     await new Promise(resolve => setTimeout(resolve, 500));
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/pending-approval/${receiptId}`);
+      const resp = await fetch(`http://127.0.0.1:${port}/pending-approval/${encodeURIComponent(token)}/${receiptId}`);
       if (!resp.ok) continue;
       const data = await resp.json();
       if (data.status === "approved") {
@@ -72,6 +78,8 @@ async function pollForLiveEditApproval(receiptId, beforeText, afterText, tabId, 
           receiptId,
           beforeText,
           afterText,
+          anchorHash,
+          token,
           port
         });
         return;
@@ -95,11 +103,12 @@ async function pollForLiveEditApproval(receiptId, beforeText, afterText, tabId, 
 async function handleLiveEditProposal(proposal) {
   const config = await getConfig();
   if (!config.token) return;
+  const anchorHash = proposal.anchorHash || await sha256Hex(proposal.beforeText);
 
   const payload = {
     token: config.token,
     editor_surface: proposal.editorSurface || "unknown",
-    selection_anchor_hash: proposal.anchorHash,
+    selection_anchor_hash: anchorHash,
     before_text: proposal.beforeText,
     after_text: proposal.afterText,
     document_title: proposal.documentTitle || ""
@@ -119,8 +128,10 @@ async function handleLiveEditProposal(proposal) {
       data.receipt_id,
       proposal.beforeText,
       proposal.afterText,
+      anchorHash,
       proposal.tabId,
-      config.port
+      config.port,
+      config.token
     );
   }
 }
