@@ -216,6 +216,104 @@ the full workspace window.
 - UI additions: file-write-approval cards in companion view (Approve/Reject); subtask step progress list under running subtasks in workspace view; write audit log section; 3s polling for pending proposals; 1.5s step-status polling for running subtasks
 - SQLite concurrency fix: `connect()` now uses `PRAGMA busy_timeout = 10000` (via `execute_batch`) and `BEGIN IMMEDIATE` transactions for write operations; eliminates SQLITE_BUSY flakiness under concurrent subtask + chat writes
 
+15. User model layer (`desktop/src-tauri/src/user_model.rs`)
+- `user_profile` table: key-value pairs with `updated_at`; incremental update after
+  each session; never transmitted off-device
+- signals captured: writing style (`style_avg_sentence_length`, `style_formality_score`
+  derived from accepted revision text via contraction ratio), delegation patterns
+  (`delegation_accepted_<type>`, `delegation_rejected_<type>`), work rhythm
+  (`work_rhythm_focus_hours` ring buffer → `work_rhythm_peak_hour` mode),
+  response length preference (exponential moving average), quality rubrics
+  (`rubric_N` keys stored verbatim), trigger weights (`trigger_weight_<type>`)
+- `build_profile_injection(store)`: returns compact (< 100 token) block prepended to
+  chat, revision, and reorientation system prompts; returns `None` when table is empty
+- signal writers: `record_revision_accepted`, `record_revision_rewrite` (LCS word-diff
+  ratio detects significant rewrites), `record_subtask_accepted/rejected`,
+  `record_focus_hour`, `record_response_length`, `record_trigger_dismissed`,
+  `add_quality_rubric`
+- `get_readable_signals`: produces `Vec<SignalSummary>` with plain-language labels for
+  the "Jeff remembers" panel; each signal has a delete button, clear-all wipes table
+- tauri commands: `get_user_profile_signals`, `delete_profile_signal`,
+  `clear_user_profile`, `add_quality_rubric`, `get_profile_injection_preview`
+
+16. Workload awareness layer (`desktop/src-tauri/src/workload.rs`)
+- `compute_workload_summary(store)`: returns `WorkloadSummaryDto` with `active_tasks`
+  (focused within 14 days, sorted most-recent first) and `stale_tasks` (> 14 days,
+  sorted least-recent first); caller caches for 5 minutes
+- `WorkloadTaskDto`: id, title, last_focused_at, days_since_focus, pending_item_count,
+  is_active; pending count = pending file write proposals + running subtasks +
+  unreviewed speculative results
+- `check_stale_task_notifications`: fires one native OS notification per stale task
+  per 24 hours when unreviewed speculative results exist; respects quiet mode;
+  throttled via `stale_notify_<task_id>` app_setting timestamp
+- cross-task collision check: before starting a new subtask, cosine similarity >
+  0.8 against recent completed subtasks across all tasks triggers a soft companion
+  notice ("similar work exists in [task]"); never auto-merges
+- tauri commands: `get_workload_summary`, `switch_active_task`
+
+17. Calendar context layer (`desktop/src-tauri/src/calendar.rs`)
+- macOS EventKit integration via direct Objective-C runtime bridge
+  (`#[cfg(target_os = "macos")]`); non-macOS builds compile to no-ops
+- `fetch_next_event(hours)`: queries EKEventStore for events starting within the next
+  `hours` hours (production default: 8); returns the soonest event as
+  `CalendarEventDto { title, starts_at, minutes_until }`
+- permission flow: `request_calendar_permission()` calls
+  `requestAccessToEntityType:completion:` asynchronously (OS shows native dialog);
+  `get_calendar_permission_status()` maps EKAuthorizationStatus to
+  "granted" | "denied" | "not_determined"
+- `CalendarState` mutex in AppState: caches current `Option<CalendarEventDto>`;
+  background poll task in main.rs updates it every 60 seconds when
+  `privacy_calendar_context_enabled` is true and permission is granted
+- companion header emits `calendar://next_event` on state change; frontend shows
+  "Meeting in N min — [title]" badge; disappears when no event is within 8 hours
+- reorientation prompt includes the next event when within 2 hours
+- nothing calendar-related is persisted to SQLite; all data is transient in memory
+- tauri commands: `request_calendar_permission`, `get_calendar_permission_status`,
+  `get_calendar_next_event`
+
+18. Live app actions layer (`desktop/src-tauri/src/selection_capture.rs`, extended)
+- HTTP bridge server (port 47832) extended with live-edit routes:
+  - `POST /apply-edit`: receives `{ token, anchor_hash, anchor_context, patch_text }`;
+    validates bridge token; creates `live_edit_receipts` DB record with
+    `status=pending_approval`; emits `live_action://apply_requested` event to frontend
+  - `GET /pending-approval/<token>`: polled by browser extension; returns `{ approved,
+    patch_text }` once `approve_live_edit` command fires, or `{ rejected }` on reject
+  - `POST /apply-result`: extension reports `{ token, status: "applied" | "failed" }`;
+    updates receipt record; emits `live_action://result` event to frontend
+  - `POST /apply-fallback`: extension calls when anchor hash or context check fails;
+    creates receipt with `status=guided_apply`; emits `live_action://fallback_triggered`
+- anchor validation in content.js: selection hash + surrounding 50-char context check
+  before writing; mismatches route to `/apply-fallback` with reason
+- receipt log (`live_edit_receipts` table): app_name, document_title, anchor_hash,
+  before_excerpt, after_excerpt, status, created_at, resolved_at
+- tauri commands: `approve_live_edit`, `reject_live_edit`, `list_live_edit_receipts`,
+  `get_pending_live_edits`
+- browser extension (background.js): polls `/pending-approval` every 3 seconds after
+  receiving a `live_action://apply_requested` message from the native app; dispatches
+  approved patch to content.js; reports result back via `/apply-result`
+- frontend: live edit proposal card shows before/after excerpt, Approve/Reject buttons;
+  guided-apply fallback card shows patch text + instruction copy when anchor drifts
+
+19. Distribution and auto-update (`tauri.conf.json`, `main.rs`, `.github/workflows/release.yml`)
+- universal binary: `targets: ["app", "dmg"]` with `universal-apple-darwin` target
+  (arm64 + x86_64 lipo'd together); minimum macOS 13.0 (Ventura)
+- code signing: `signingIdentity` and `providerShortName` in tauri.conf.json are
+  injected from GitHub Actions secrets at CI build time (null in source for local dev)
+- notarization: `xcrun notarytool submit` in CI `notarize` job; staple ticket applied
+  before .dmg upload; Gatekeeper passes without user override on signed builds
+- auto-update: `tauri-plugin-updater` initialized in main.rs; background task on
+  startup calls `app.updater()?.check()`; if update available, native dialog:
+  "Jeff update available" with Install / Later buttons; `download_and_install()` +
+  `app.restart()` on confirm
+- update feed: `https://github.com/km31-code/jeff/releases/latest/download/latest.json`
+  hosting `{ version, pub_date, platforms.darwin-universal: { signature, url } }`;
+  `pubkey` in tauri.conf.json is `{{TAURI_PUBLIC_KEY}}` placeholder — injected by CI
+- CI pipeline (`.github/workflows/release.yml`): 5 sequential jobs triggered on push
+  to `release` branch: test (cargo test + phase17_check.sh + npm test) → build
+  (unsigned universal binary) → sign (codesign with hardened runtime +
+  entitlements.plist) → notarize (notarytool + stapler) → release (create GitHub
+  Release with .dmg, signed updater archive, latest.json)
+
 ## Safety Boundaries (unchanged)
 
 - no silent file application
