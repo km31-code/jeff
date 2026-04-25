@@ -222,3 +222,18 @@ the full workspace window.
 - no unrestricted autonomy
 - no external browsing/tooling
 - single active-task scope
+
+## Windows-ready when
+
+- tauri-plugin-updater endpoint has a `win32-x86_64` platform entry in `latest.json`
+- CI pipeline adds a `windows-2022` runner job alongside the existing `macos-14` job
+- SMAppService (Phase 19 login-item registration) replaced with Windows Task Scheduler
+  equivalent via `schtasks` or the `windows-service` crate
+- EventKit (Phase 23 calendar context) replaced with Windows Calendar API via the
+  Windows Runtime (`windows` crate) under a `#[cfg(target_os = "windows")]` gate
+- Global shortcut and AXUIElement accessibility paths have Windows implementations:
+  - `tauri-plugin-global-shortcut` already cross-platform; no change needed
+  - `context_observer.rs` AXUIElement calls replaced with `IAccessible` / `UIAutomation`
+    under `#[cfg(target_os = "windows")]`
+- `entitlements.plist` is macOS-only; Windows code-signing uses `signtool.exe` with
+  a separate EV certificate in the CI `sign` job

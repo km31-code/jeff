@@ -528,7 +528,7 @@ Verification:
 
 ### M24.3 — Release CI Pipeline (GitHub Actions)
 
-**Status: [ ]**
+**Status: [x]**
 
 Goal: automated build → test → sign → notarize → upload on push to `release` branch.
 
@@ -588,7 +588,7 @@ Verification:
 
 ### M24.4 — Architecture Note + Final Verification
 
-**Status: [ ]**
+**Status: [x]**
 
 Files to modify:
 - `docs/ARCHITECTURE.md` — add at the end of the document:
@@ -616,7 +616,7 @@ Verification:
 
 ### M24.5 — phase24_check.sh
 
-**Status: [ ]**
+**Status: [x]**
 
 Write `scripts/phase24_check.sh` covering:
 
