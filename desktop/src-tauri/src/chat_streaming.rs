@@ -275,7 +275,7 @@ async fn run_llm_stream<R: Runtime + 'static>(
         return;
     }
 
-    let user_prompt = build_user_prompt(&message, &context_pack);
+    let user_prompt = build_user_prompt(&message, &context_pack, active_context.as_deref());
 
     // phase 20/23: prepend active window context and user profile to system prompt.
     let effective_system_prompt = build_system_prompt(&store, active_context.as_deref());

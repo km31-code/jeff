@@ -45,7 +45,7 @@ use retrieval::default_embeddings_provider;
 use selection_capture::SelectionCaptureState;
 use state::{CalendarState, ContextState, JeffState};
 use store::TaskStore;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::ShortcutState;
 use typing_activity::TypingActivityState;
 use voice::OpenAiVoiceProvider;
@@ -122,7 +122,25 @@ fn main() {
                 s
             };
 
-            app.manage(JeffState::new(store, embeddings, reasoning, voice));
+            let jeff_state = JeffState::new(store, embeddings, reasoning, voice);
+            // register the file-indexed emit callback on the watcher so it can
+            // fire workspace://file-indexed without holding an AppHandle directly.
+            {
+                let emit_app = app.handle().clone();
+                let mut watcher = jeff_state
+                    .watcher
+                    .lock()
+                    .expect("watcher state lock poisoned");
+                watcher.set_file_indexed_notify(std::sync::Arc::new(
+                    move |task_id: i64, file_name: String| {
+                        let _ = emit_app.emit(
+                            "workspace://file-indexed",
+                            serde_json::json!({ "task_id": task_id, "file_name": file_name }),
+                        );
+                    },
+                ));
+            }
+            app.manage(jeff_state);
             app.manage(ambient_state);
             // phase 20: manage context state for active-window polling.
             app.manage(ContextState::new());

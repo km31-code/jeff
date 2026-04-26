@@ -610,6 +610,26 @@ body.overlay-body {
   font-size: 12px;
 }
 
+.overlay-watcher-line {
+  font-size: 11px;
+  color: #888;
+  padding: 1px 0 2px;
+}
+
+.overlay-watcher-folder {
+  color: #555;
+  font-weight: 500;
+}
+
+.overlay-watcher-indexed {
+  color: #3a9e5f;
+}
+
+.overlay-watcher-idle {
+  color: #aaa;
+  font-style: italic;
+}
+
 .overlay-messages {
   max-height: 280px;
   overflow-y: auto;

@@ -962,6 +962,14 @@ function App() {
         );
       }
     );
+    // when the overlay creates or switches a task, refresh so the workspace
+    // picks up the new active task without requiring a manual reload.
+    const unlistenActiveChanged = listen<{ task_id: number }>(
+      "task://active-changed",
+      () => {
+        void refreshShellState();
+      }
+    );
     return () => {
       void Promise.all([
         unlisten,
@@ -970,6 +978,7 @@ function App() {
         unlistenResult,
         unlistenCalendar,
         unlistenCollision,
+        unlistenActiveChanged,
       ]).then((unlisteners) => unlisteners.forEach((u) => u()));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

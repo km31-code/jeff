@@ -4,10 +4,12 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import {
   EVENT_LLM_COMPLETE,
   EVENT_LLM_TOKEN,
+  EVENT_TTS_CHUNK,
   EVENT_TURN_CANCELLED,
   EVENT_TURN_COMPLETE,
   LlmCompletePayload,
   LlmTokenPayload,
+  TtsChunkPayload,
   TurnCancelledPayload,
   TurnCompletePayload,
   isStreamingEnabled
@@ -33,6 +35,7 @@ import {
   OnboardingStatusDto,
   SelectionCaptureIndicatorDto,
   TaskDto,
+  WatcherStatusDto,
   cancelStreamingTurn,
   clearPreferredWorkspaceFolder,
   completeOnboarding,
@@ -43,6 +46,7 @@ import {
   getAccessibilityPermissionStatus,
   getOnboardingStatus,
   getSelectionCaptureIndicator,
+  getWatcherStatus,
   listTasks,
   listMessages,
   recordTaskFocus,
@@ -83,6 +87,21 @@ async function blobToBase64(blob: Blob): Promise<string> {
 type PendingNotificationContext = { kind: string | null; id: number | null };
 type OnboardingStep = 1 | 2 | 3 | 4 | 5;
 type OverlayShownPayload = { interactive?: boolean };
+
+interface SpeechRecognitionEvent extends Event {
+  resultIndex: number;
+  results: SpeechRecognitionResultList;
+}
+interface OverlaySpeechRecognition {
+  interimResults: boolean;
+  continuous: boolean;
+  lang: string;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onerror: (() => void) | null;
+  onend: (() => void) | null;
+  start(): void;
+  stop(): void;
+}
 
 function describeStatus(status: TrayStatus): string {
   switch (status) {
@@ -150,6 +169,16 @@ export default function Overlay(): JSX.Element {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+
+  // streaming tts queue: phrase-ordered audio so chunks play in arrival order.
+  const ttsActiveTurnIdRef = useRef<string | null>(null);
+  const streamTtsQueueRef = useRef<Map<number, { audio: HTMLAudioElement; url: string }>>(new Map());
+  const streamTtsNextPhraseRef = useRef<number>(1);
+  const streamTtsCurrentRef = useRef<HTMLAudioElement | null>(null);
+
+  // partial stt via web speech api.
+  const speechRecognitionRef = useRef<OverlaySpeechRecognition | null>(null);
+  const partialSttSentRef = useRef<boolean>(false);
   const [hotkeyConflict, setHotkeyConflict] = useState<string | null>(null);
   const [notificationContext, setNotificationContext] =
     useState<PendingNotificationContext | null>(null);
@@ -168,6 +197,12 @@ export default function Overlay(): JSX.Element {
   // input box so the user sees what context is loaded before sending a message.
   const [selectionCaptureIndicator, setSelectionCaptureIndicator] =
     useState<SelectionCaptureIndicatorDto | null>(null);
+
+  // phase 13: watcher status shown in the task row.
+  const [watcherStatus, setWatcherStatus] = useState<WatcherStatusDto | null>(null);
+  // brief "just indexed" confirmation shown when the watcher ingests a new file.
+  const [fileIndexedNotice, setFileIndexedNotice] = useState<string | null>(null);
+  const fileIndexedTimerRef = useRef<number | null>(null);
 
   // phase 15: reorientation banner shown when user returns to a task after 5+
   // minutes away. auto-dismisses after 8 seconds.
@@ -198,16 +233,18 @@ export default function Overlay(): JSX.Element {
   const onboardingPrimaryActionRef = useRef<HTMLButtonElement | null>(null);
   const pendingInteractiveFocusRef = useRef(false);
   const modeRef = useRef<OverlayMode>(mode);
+  const ambientRef = useRef<AmbientStateDto | null>(null);
   const onboardingVisibleRef = useRef(onboardingVisible);
   const onboardingStepRef = useRef<OnboardingStep>(onboardingStep);
   const hasStoredApiKeyRef = useRef(false);
 
   useEffect(() => {
     modeRef.current = mode;
+    ambientRef.current = ambient;
     onboardingVisibleRef.current = onboardingVisible;
     onboardingStepRef.current = onboardingStep;
     hasStoredApiKeyRef.current = Boolean(onboardingStatus?.has_stored_api_key);
-  }, [mode, onboardingStatus?.has_stored_api_key, onboardingStep, onboardingVisible]);
+  }, [ambient, mode, onboardingStatus?.has_stored_api_key, onboardingStep, onboardingVisible]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -225,9 +262,13 @@ export default function Overlay(): JSX.Element {
 
   const refreshMessages = useCallback(async (taskId: number) => {
     try {
-      const list = await listMessages(taskId);
+      const [list, status] = await Promise.all([
+        listMessages(taskId),
+        getWatcherStatus(taskId).catch(() => null),
+      ]);
       // overlay shows only the tail of the conversation.
       setMessages(list.slice(-6));
+      if (status) setWatcherStatus(status);
     } catch (error) {
       setErrorMessage(String(error));
     }
@@ -444,11 +485,14 @@ export default function Overlay(): JSX.Element {
       })
     );
 
-    const finalizeStreamingTurn = async () => {
+    const finalizeStreamingTurn = async (stopTts = false) => {
       streamingTurnIdRef.current = null;
       setStreamingTurnId(null);
       setStreamingText("");
       setSending(false);
+      if (stopTts) {
+        stopStreamingTtsPlayback();
+      }
       await setTrayStatus("idle").catch(() => undefined);
       const active = activeTaskRef.current;
       if (active) {
@@ -459,7 +503,8 @@ export default function Overlay(): JSX.Element {
     unsubscribers.push(
       listen<LlmCompletePayload>(EVENT_LLM_COMPLETE, (event) => {
         if (streamingTurnIdRef.current !== event.payload.turn_id) return;
-        void finalizeStreamingTurn();
+        // do NOT stop TTS here — late-arriving tts_chunk events still need to play.
+        void finalizeStreamingTurn(false);
       })
     );
 
@@ -470,14 +515,32 @@ export default function Overlay(): JSX.Element {
         if (errMsg) {
           setErrorMessage(errMsg);
         }
-        void finalizeStreamingTurn();
+        // on cancellation, stop TTS immediately.
+        void finalizeStreamingTurn(true);
       })
     );
 
     unsubscribers.push(
       listen<TurnCompletePayload>(EVENT_TURN_COMPLETE, (event) => {
         if (streamingTurnIdRef.current !== event.payload.turn_id) return;
-        void finalizeStreamingTurn();
+        void finalizeStreamingTurn(false);
+      })
+    );
+
+    // streaming tts: gated on ttsActiveTurnIdRef so late-arriving chunks after
+    // llm_complete still play. gated on quiet mode so no audio in quiet mode.
+    unsubscribers.push(
+      listen<TtsChunkPayload>(EVENT_TTS_CHUNK, (event) => {
+        const { turn_id, phrase_id, audio_b64 } = event.payload;
+        if (ttsActiveTurnIdRef.current !== turn_id) return;
+        // respect quiet mode: if ambient state has quiet mode on, skip audio.
+        if (ambientRef.current?.quiet_mode) return;
+        const bytes = Uint8Array.from(atob(audio_b64), (c) => c.charCodeAt(0));
+        const blob = new Blob([bytes], { type: "audio/mpeg" });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        streamTtsQueueRef.current.set(phrase_id, { audio, url });
+        scheduleStreamTtsPlayback();
       })
     );
 
@@ -518,6 +581,35 @@ export default function Overlay(): JSX.Element {
       unsub.then((fn) => fn()).catch(() => undefined);
     };
   }, []);
+
+  // phase 13: show a brief "indexed" confirmation when the watcher ingests a file.
+  useEffect(() => {
+    const unsub = listen<{ task_id: number; file_name: string }>(
+      "workspace://file-indexed",
+      (event) => {
+        const active = activeTaskRef.current;
+        if (!active || active.id !== event.payload.task_id) return;
+        setFileIndexedNotice(`indexed: ${event.payload.file_name}`);
+        if (fileIndexedTimerRef.current !== null) {
+          window.clearTimeout(fileIndexedTimerRef.current);
+        }
+        fileIndexedTimerRef.current = window.setTimeout(() => {
+          setFileIndexedNotice(null);
+          fileIndexedTimerRef.current = null;
+        }, 4000);
+        // refresh watcher status and messages after new file is indexed.
+        if (active) {
+          void refreshMessages(active.id);
+        }
+      }
+    );
+    return () => {
+      unsub.then((fn) => fn()).catch(() => undefined);
+      if (fileIndexedTimerRef.current !== null) {
+        window.clearTimeout(fileIndexedTimerRef.current);
+      }
+    };
+  }, [refreshMessages]);
 
   // phase 22: load any in-flight selection capture on mount, then subscribe to
   // capture/failed/cleared events for the lifetime of the overlay window.
@@ -739,6 +831,7 @@ export default function Overlay(): JSX.Element {
           }
           const turnId = await sendMessageStreaming(task.id, trimmed, "text");
           streamingStarted = true;
+          ttsActiveTurnIdRef.current = turnId;
           streamingTurnIdRef.current = turnId;
           setStreamingTurnId(turnId);
           setStreamingText("");
@@ -890,15 +983,175 @@ export default function Overlay(): JSX.Element {
     void openOnboardingWizard(2);
   }, [openOnboardingWizard]);
 
+  // play the next queued streaming tts phrase in phrase_id order.
+  // called each time a new chunk arrives and each time a phrase finishes.
+  function scheduleStreamTtsPlayback() {
+    if (streamTtsCurrentRef.current !== null) return;
+    const next = streamTtsQueueRef.current.get(streamTtsNextPhraseRef.current);
+    if (!next) return;
+    streamTtsQueueRef.current.delete(streamTtsNextPhraseRef.current);
+    streamTtsNextPhraseRef.current += 1;
+    const { audio, url } = next;
+    streamTtsCurrentRef.current = audio;
+
+    audio.onended = () => {
+      URL.revokeObjectURL(url);
+      streamTtsCurrentRef.current = null;
+      if (streamTtsQueueRef.current.size === 0) {
+        ttsActiveTurnIdRef.current = null;
+        void setTrayStatus("idle").catch(() => undefined);
+      }
+      scheduleStreamTtsPlayback();
+    };
+    audio.onerror = () => {
+      URL.revokeObjectURL(url);
+      streamTtsCurrentRef.current = null;
+      if (streamTtsQueueRef.current.size === 0) {
+        ttsActiveTurnIdRef.current = null;
+        void setTrayStatus("idle").catch(() => undefined);
+      }
+      scheduleStreamTtsPlayback();
+    };
+
+    void audio.play().catch(() => {
+      streamTtsCurrentRef.current = null;
+      if (streamTtsQueueRef.current.size === 0) {
+        ttsActiveTurnIdRef.current = null;
+      }
+    });
+  }
+
+  // immediately stop all streaming tts playback and drain the queue.
+  function stopStreamingTtsPlayback() {
+    if (streamTtsCurrentRef.current) {
+      try { streamTtsCurrentRef.current.pause(); } catch { /* ignore */ }
+      streamTtsCurrentRef.current = null;
+    }
+    for (const { audio, url } of streamTtsQueueRef.current.values()) {
+      try { audio.pause(); } catch { /* ignore */ }
+      URL.revokeObjectURL(url);
+    }
+    streamTtsQueueRef.current.clear();
+    streamTtsNextPhraseRef.current = 1;
+    ttsActiveTurnIdRef.current = null;
+  }
+
+  // barge-in: stop tts and cancel any in-flight streaming turn.
+  async function stopAndBargeIn() {
+    stopStreamingTtsPlayback();
+    stopPartialStt();
+    const activeTurnId = streamingTurnIdRef.current;
+    if (activeTurnId) {
+      await cancelStreamingTurn(activeTurnId, "user_barge_in").catch(() => undefined);
+    }
+    await setTrayStatus("idle").catch(() => undefined);
+  }
+
+  // try to start web speech api recognition for early routing before whisper.
+  // on interim result with confidence >= 0.7, submits the transcript immediately.
+  function tryStartPartialStt(taskId: number) {
+    const win = window as unknown as Record<string, unknown>;
+    const SpeechRecognitionCtor = (win["SpeechRecognition"] ?? win["webkitSpeechRecognition"]) as
+      | (new () => OverlaySpeechRecognition)
+      | undefined;
+    if (!SpeechRecognitionCtor) return;
+
+    partialSttSentRef.current = false;
+    let recognition: OverlaySpeechRecognition;
+    try {
+      recognition = new SpeechRecognitionCtor();
+    } catch {
+      return;
+    }
+
+    recognition.interimResults = true;
+    recognition.continuous = false;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      if (partialSttSentRef.current) return;
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (
+          !result.isFinal &&
+          result[0] &&
+          result[0].confidence >= 0.7 &&
+          result[0].transcript.trim().length >= 5
+        ) {
+          partialSttSentRef.current = true;
+          const text = result[0].transcript.trim();
+          // stop the recorder so finalizeVoiceInput skips whisper
+          const recorder = mediaRecorderRef.current;
+          if (recorder && recorder.state !== "inactive") {
+            recorder.stop();
+          }
+          setRecording(false);
+          void submitVoiceMessage(taskId, text);
+          break;
+        }
+      }
+    };
+
+    recognition.onerror = () => { speechRecognitionRef.current = null; };
+    recognition.onend = () => { speechRecognitionRef.current = null; };
+
+    try {
+      recognition.start();
+      speechRecognitionRef.current = recognition;
+    } catch {
+      speechRecognitionRef.current = null;
+    }
+  }
+
+  function stopPartialStt() {
+    if (speechRecognitionRef.current) {
+      try { speechRecognitionRef.current.stop(); } catch { /* ignore */ }
+      speechRecognitionRef.current = null;
+    }
+  }
+
+  // shared voice message submission path used by both partial STT and whisper.
+  const submitVoiceMessage = useCallback(async (taskId: number, text: string) => {
+    setSending(true);
+    setErrorMessage(null);
+    let streamingStarted = false;
+    try {
+      await setTrayStatus("working").catch(() => undefined);
+      if (isStreamingEnabled()) {
+        if (streamingTurnIdRef.current) {
+          await cancelStreamingTurn(streamingTurnIdRef.current, "user_barge_in").catch(() => undefined);
+        }
+        const turnId = await sendMessageStreaming(taskId, text, "voice");
+        streamingStarted = true;
+        ttsActiveTurnIdRef.current = turnId;
+        streamingTurnIdRef.current = turnId;
+        setStreamingTurnId(turnId);
+        setStreamingText("");
+        await refreshMessages(taskId);
+      } else {
+        await sendMessage(taskId, text, "voice");
+        await refreshMessages(taskId);
+      }
+    } catch (error) {
+      setErrorMessage(String(error));
+      await setTrayStatus("idle").catch(() => undefined);
+    } finally {
+      if (!streamingStarted) setSending(false);
+    }
+  }, [refreshMessages]);
+
   const handleStartVoiceRecording = useCallback(async () => {
     if (recording || sending) return;
     setErrorMessage(null);
+    // if jeff is speaking or streaming, barge in first.
+    await stopAndBargeIn();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
       mediaStreamRef.current = stream;
       mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
+      partialSttSentRef.current = false;
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
@@ -912,40 +1165,59 @@ export default function Overlay(): JSX.Element {
 
       recorder.start();
       setRecording(true);
+
+      // start partial stt alongside whisper for early routing.
+      const task = activeTaskRef.current;
+      if (task) {
+        tryStartPartialStt(task.id);
+      }
     } catch (error) {
       setErrorMessage("Microphone access denied or unavailable.");
       void error;
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording, sending]);
 
   const handleStopVoiceRecording = useCallback(() => {
+    stopPartialStt();
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
     recorder.stop();
     setRecording(false);
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleFinalizeVoiceInput = useCallback(async () => {
+    stopPartialStt();
     const chunks = audioChunksRef.current;
     audioChunksRef.current = [];
     mediaRecorderRef.current = null;
+
+    // if partial stt already routed the message, skip whisper.
+    if (partialSttSentRef.current) {
+      partialSttSentRef.current = false;
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+      return;
+    }
 
     if (chunks.length === 0) return;
 
     setSending(true);
     setErrorMessage(null);
-    let streamingStarted = false;
     try {
       const mimeType = chunks[0].type || "audio/webm";
       const blob = new Blob(chunks, { type: mimeType });
       const audioBase64 = await blobToBase64(blob);
       const transcription = await transcribeAudio(audioBase64, mimeType);
       const text = transcription.text.trim();
-      if (!text) return;
+      if (!text) {
+        setSending(false);
+        return;
+      }
 
-      // treat voice input as a direct send, same as the text submit path.
       let task = activeTaskRef.current;
       if (!task) {
         const created = await createTask(deriveTaskTitleFromPrompt(text));
@@ -955,31 +1227,17 @@ export default function Overlay(): JSX.Element {
         setTasks(await listTasks().catch(() => []));
       }
 
-      await setTrayStatus("working").catch(() => undefined);
-
-      if (isStreamingEnabled()) {
-        if (streamingTurnIdRef.current) {
-          await cancelStreamingTurn(streamingTurnIdRef.current, "user_barge_in").catch(() => undefined);
-        }
-        const turnId = await sendMessageStreaming(task.id, text, "voice");
-        streamingStarted = true;
-        streamingTurnIdRef.current = turnId;
-        setStreamingTurnId(turnId);
-        setStreamingText("");
-        await refreshMessages(task.id);
-      } else {
-        await sendMessage(task.id, text, "voice");
-        await refreshMessages(task.id);
-      }
+      await submitVoiceMessage(task.id, text);
     } catch (error) {
       setErrorMessage(String(error));
       await setTrayStatus("idle").catch(() => undefined);
+      setSending(false);
     } finally {
-      if (!streamingStarted) {
-        setSending(false);
-      }
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
     }
-  }, [refreshMessages]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshMessages, submitVoiceMessage]);
 
   const handleDismissSelectionCapture = useCallback(async () => {
     try {
@@ -1074,6 +1332,26 @@ export default function Overlay(): JSX.Element {
           {activeContext && activeContext.document_title ? (
             <div className="overlay-context-line">
               {activeContext.app_name} &mdash; {activeContext.document_title}
+            </div>
+          ) : null}
+
+          {activeTask ? (
+            <div className="overlay-watcher-line">
+              {watcherStatus?.is_watching ? (
+                <>
+                  watching{" "}
+                  <span className="overlay-watcher-folder">
+                    {watcherStatus.watched_path
+                      ? watcherStatus.watched_path.split("/").pop()
+                      : "folder"}
+                  </span>
+                  {fileIndexedNotice ? (
+                    <span className="overlay-watcher-indexed"> · {fileIndexedNotice}</span>
+                  ) : null}
+                </>
+              ) : (
+                <span className="overlay-watcher-idle">no folder connected</span>
+              )}
             </div>
           ) : null}
 

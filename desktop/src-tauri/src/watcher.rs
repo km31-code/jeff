@@ -42,6 +42,8 @@ const MIN_CLIPBOARD_CHARS: usize = 10;
 pub struct WatcherState {
     active: HashMap<i64, ActiveWatcher>,
     clipboard_polls: HashMap<i64, tauri::async_runtime::JoinHandle<()>>,
+    // optional callback set at startup; fires workspace://file-indexed events.
+    file_indexed_notify: Option<Arc<dyn Fn(i64, String) + Send + Sync + 'static>>,
 }
 
 struct ActiveWatcher {
@@ -57,7 +59,15 @@ impl WatcherState {
         Self {
             active: HashMap::new(),
             clipboard_polls: HashMap::new(),
+            file_indexed_notify: None,
         }
+    }
+
+    pub fn set_file_indexed_notify(
+        &mut self,
+        notify: Arc<dyn Fn(i64, String) + Send + Sync + 'static>,
+    ) {
+        self.file_indexed_notify = Some(notify);
     }
 
     pub fn get_status(&self, task_id: i64) -> WatcherStatusDto {
@@ -123,12 +133,14 @@ pub fn start_watcher(
     embeddings: Arc<dyn EmbeddingProvider>,
 ) -> Result<WatcherStatusDto> {
     // stop existing watcher for this task if any.
-    {
+    // also extract the notify callback while holding the lock.
+    let file_indexed_notify: Option<Arc<dyn Fn(i64, String) + Send + Sync + 'static>> = {
         let mut state = watcher_state.lock().expect("watcher state lock poisoned");
         if let Some(old) = state.active.remove(&task_id) {
             old.debounce_task.abort();
         }
-    }
+        state.file_indexed_notify.clone()
+    };
 
     let canonical = folder_path.canonicalize().with_context(|| {
         format!(
@@ -185,13 +197,24 @@ pub fn start_watcher(
                         if should_ignore_file(&path, &watch_root) {
                             continue;
                         }
-                        if let Err(err) = auto_ingest_file_for_task(
+                        match auto_ingest_file_for_task(
                             &store,
                             embeddings.as_ref(),
                             task_id,
                             &path,
                         ) {
-                            eprintln!("[jeff watcher] ingest error {}: {err}", path.display());
+                            Ok(()) => {
+                                if let Some(ref notify) = file_indexed_notify {
+                                    let file_name = path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_default();
+                                    notify(task_id, file_name);
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!("[jeff watcher] ingest error {}: {err}", path.display());
+                            }
                         }
                     }
                 }

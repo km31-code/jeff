@@ -10,7 +10,7 @@ use crate::{
     user_model,
 };
 
-const GROUNDING_SYSTEM_PROMPT: &str = "You are Jeff, a task-focused AI coworker. When context chunks are provided in the user prompt, prioritize them in your answer and cite the relevant material. When no relevant chunks are available, still help the user — answer the question, give general guidance, suggest next steps, or ask a clarifying question. You are a capable general assistant when document context is absent. Be concise. One to three sentences unless the user asks for more. No filler phrases.";
+const GROUNDING_SYSTEM_PROMPT: &str = "You are Jeff, a task-focused AI coworker. When context chunks are provided in the user prompt, prioritize them and cite the relevant material. When the user asks what they are currently doing, working on, or has open, the Active Window section is the primary signal — use it directly. For all other questions, use retrieved context chunks. When no relevant chunks are available, still help the user — answer the question, give general guidance, suggest next steps, or ask a clarifying question. Be concise. One to three sentences unless the user asks for more. No filler phrases.";
 
 pub fn send_message_for_task(
     store: &TaskStore,
@@ -47,7 +47,7 @@ pub fn send_message_for_task(
     }
 
     let context_pack = build_task_context_pack(store, embeddings, task_id, clean_message)?;
-    let user_prompt = build_user_prompt(clean_message, &context_pack);
+    let user_prompt = build_user_prompt(clean_message, &context_pack, active_context);
 
     let effective_system_prompt = build_system_prompt(store, active_context);
     let assistant_response = reasoning.generate_response(&effective_system_prompt, &user_prompt)?;
@@ -99,7 +99,11 @@ pub fn build_system_prompt(store: &TaskStore, active_context: Option<&str>) -> S
     parts.join("\n\n")
 }
 
-pub fn build_user_prompt(message: &str, context_pack: &TaskContextPackDto) -> String {
+pub fn build_user_prompt(
+    message: &str,
+    context_pack: &TaskContextPackDto,
+    active_context: Option<&str>,
+) -> String {
     let chunks_text = if context_pack.retrieved_chunks.is_empty() {
         "No retrieved chunks available.".to_string()
     } else {
@@ -120,9 +124,14 @@ pub fn build_user_prompt(message: &str, context_pack: &TaskContextPackDto) -> St
             .join("\n\n")
     };
 
+    let active_window_section = match active_context {
+        Some(ctx) if !ctx.is_empty() => format!("\n\nActive Window:\n{ctx}"),
+        _ => String::new(),
+    };
+
     format!(
-        "Task Summary:\n{}\n\nUser Query:\n{}\n\nRetrieved Context Chunks:\n{}\n\nAnswer strictly from retrieved context and any active-window title or selected-text context in the system prompt.",
-        context_pack.task_summary, message, chunks_text
+        "Task Summary:\n{}{}\n\nUser Query:\n{}\n\nRetrieved Context Chunks:\n{}",
+        context_pack.task_summary, active_window_section, message, chunks_text
     )
 }
 

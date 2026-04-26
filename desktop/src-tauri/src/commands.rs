@@ -125,7 +125,11 @@ pub fn get_active_task(state: State<'_, JeffState>) -> Result<Option<TaskDto>, S
 }
 
 #[tauri::command]
-pub fn set_active_task(state: State<'_, JeffState>, task_id: i64) -> Result<TaskDto, String> {
+pub fn set_active_task<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, JeffState>,
+    task_id: i64,
+) -> Result<TaskDto, String> {
     let task = state
         .store
         .set_active_task(task_id)
@@ -134,6 +138,8 @@ pub fn set_active_task(state: State<'_, JeffState>, task_id: i64) -> Result<Task
     if let Err(err) = ensure_workspace_awareness_for_task(state.inner(), task_id) {
         eprintln!("[jeff watcher] failed to sync watcher for active task {task_id}: {err}");
     }
+
+    let _ = app.emit("task://active-changed", serde_json::json!({ "task_id": task.id }));
 
     Ok(task)
 }
@@ -2316,7 +2322,8 @@ pub fn get_workload_summary(state: State<'_, JeffState>) -> Result<WorkloadSumma
 }
 
 #[tauri::command]
-pub fn switch_active_task_from_companion(
+pub fn switch_active_task_from_companion<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, JeffState>,
     task_id: i64,
 ) -> Result<TaskDto, String> {
@@ -2340,6 +2347,8 @@ pub fn switch_active_task_from_companion(
             new_task.id
         );
     }
+
+    let _ = app.emit("task://active-changed", serde_json::json!({ "task_id": new_task.id }));
 
     Ok(new_task)
 }
