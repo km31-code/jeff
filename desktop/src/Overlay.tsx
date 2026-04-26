@@ -57,6 +57,15 @@ import {
   validateOpenAiApiKey
 } from "./tauriClient";
 
+function extractStreamErrorMessage(reason: string): string | null {
+  if (!reason || reason === "user_barge_in" || reason === "jeff_barge_in" || reason === "explicit") {
+    return null;
+  }
+  const colonIdx = reason.indexOf(": ");
+  const msg = colonIdx >= 0 ? reason.slice(colonIdx + 2).trim() : reason.trim();
+  return msg || null;
+}
+
 async function blobToBase64(blob: Blob): Promise<string> {
   const buffer = await blob.arrayBuffer();
   const bytes = new Uint8Array(buffer);
@@ -184,6 +193,7 @@ export default function Overlay(): JSX.Element {
   const pendingExpandRef = useRef(false);
   const onboardingSnoozedRef = useRef(false);
   const messageInputRef = useRef<HTMLInputElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
   const onboardingPrimaryActionRef = useRef<HTMLButtonElement | null>(null);
   const pendingInteractiveFocusRef = useRef(false);
@@ -198,6 +208,10 @@ export default function Overlay(): JSX.Element {
     onboardingStepRef.current = onboardingStep;
     hasStoredApiKeyRef.current = Boolean(onboardingStatus?.has_stored_api_key);
   }, [mode, onboardingStatus?.has_stored_api_key, onboardingStep, onboardingVisible]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, streamingTurnId, streamingText]);
 
   const refreshAmbient = useCallback(async () => {
     try {
@@ -452,6 +466,10 @@ export default function Overlay(): JSX.Element {
     unsubscribers.push(
       listen<TurnCancelledPayload>(EVENT_TURN_CANCELLED, (event) => {
         if (streamingTurnIdRef.current !== event.payload.turn_id) return;
+        const errMsg = extractStreamErrorMessage(event.payload.reason ?? "");
+        if (errMsg) {
+          setErrorMessage(errMsg);
+        }
         void finalizeStreamingTurn();
       })
     );
@@ -918,6 +936,7 @@ export default function Overlay(): JSX.Element {
 
     setSending(true);
     setErrorMessage(null);
+    let streamingStarted = false;
     try {
       const mimeType = chunks[0].type || "audio/webm";
       const blob = new Blob(chunks, { type: mimeType });
@@ -943,6 +962,7 @@ export default function Overlay(): JSX.Element {
           await cancelStreamingTurn(streamingTurnIdRef.current, "user_barge_in").catch(() => undefined);
         }
         const turnId = await sendMessageStreaming(task.id, text, "voice");
+        streamingStarted = true;
         streamingTurnIdRef.current = turnId;
         setStreamingTurnId(turnId);
         setStreamingText("");
@@ -955,7 +975,9 @@ export default function Overlay(): JSX.Element {
       setErrorMessage(String(error));
       await setTrayStatus("idle").catch(() => undefined);
     } finally {
-      setSending(false);
+      if (!streamingStarted) {
+        setSending(false);
+      }
     }
   }, [refreshMessages]);
 
@@ -1344,6 +1366,7 @@ export default function Overlay(): JSX.Element {
                     </div>
                   </div>
                 ) : null}
+                <div ref={messagesEndRef} />
               </div>
 
               {reorientationBanner ? (

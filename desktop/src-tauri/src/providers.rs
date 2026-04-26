@@ -386,7 +386,8 @@ impl ClassifierProvider for OpenAiClassifierProvider {
 }
 
 fn extension_from_mime_type(mime_type: &str) -> &'static str {
-    match mime_type {
+    let base = mime_type.split(';').next().unwrap_or(mime_type).trim();
+    match base {
         "audio/webm" => "webm",
         "audio/mp4" => "m4a",
         "audio/wav" | "audio/x-wav" => "wav",

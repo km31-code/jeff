@@ -486,7 +486,7 @@ function App() {
 
     unlisteners.push(
       listen<TurnCancelledPayload>(EVENT_TURN_CANCELLED, (event) => {
-        const { turn_id } = event.payload;
+        const { turn_id, reason } = event.payload;
         if (streamingTurnIdRef.current !== turn_id) return;
         stopStreamingTtsPlayback();
         streamingTurnIdRef.current = null;
@@ -496,6 +496,10 @@ function App() {
           delete next[turn_id];
           return next;
         });
+        const errMsg = extractStreamCancelError(reason ?? "");
+        if (errMsg) {
+          setErrorMessage(mapJeffErrorMessage(errMsg));
+        }
         updateTrayStatus("idle");
         void (async () => {
           if (!activeTask) return;
@@ -5231,6 +5235,15 @@ function formatError(error: unknown): string {
   }
 
   return "Unexpected error";
+}
+
+function extractStreamCancelError(reason: string): string | null {
+  if (!reason || reason === "user_barge_in" || reason === "jeff_barge_in" || reason === "explicit") {
+    return null;
+  }
+  const colonIdx = reason.indexOf(": ");
+  const msg = colonIdx >= 0 ? reason.slice(colonIdx + 2).trim() : reason.trim();
+  return msg || null;
 }
 
 function mapJeffErrorMessage(raw: string): string {
