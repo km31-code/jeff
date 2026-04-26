@@ -247,7 +247,7 @@ export default function Overlay(): JSX.Element {
   }, [ambient, mode, onboardingStatus?.has_stored_api_key, onboardingStep, onboardingVisible]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    messagesEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
   }, [messages, streamingTurnId, streamingText]);
 
   const refreshAmbient = useCallback(async () => {

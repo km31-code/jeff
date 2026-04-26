@@ -38,7 +38,8 @@ vi.mock("./streamClient", () => ({
   EVENT_LLM_TOKEN: "stream://llm_token",
   EVENT_LLM_COMPLETE: "stream://llm_complete",
   EVENT_TURN_CANCELLED: "stream://turn_cancelled",
-  EVENT_TURN_COMPLETE: "stream://turn_complete"
+  EVENT_TURN_COMPLETE: "stream://turn_complete",
+  EVENT_TTS_CHUNK: "stream://tts_chunk"
 }));
 
 afterEach(() => {
@@ -132,6 +133,10 @@ function setupInvokeMock(options: OverlayMockOptions = {}) {
 
     if (command === "get_active_window_context") {
       return null;
+    }
+
+    if (command === "get_watcher_status") {
+      return { task_id: activeTask?.id ?? 1, is_watching: false, watched_path: null };
     }
 
     if (command === "get_accessibility_permission_status") {

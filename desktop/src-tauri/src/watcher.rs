@@ -197,13 +197,22 @@ pub fn start_watcher(
                         if should_ignore_file(&path, &watch_root) {
                             continue;
                         }
-                        match auto_ingest_file_for_task(
-                            &store,
-                            embeddings.as_ref(),
-                            task_id,
-                            &path,
-                        ) {
-                            Ok(()) => {
+                        // run on a blocking thread: reqwest::blocking::Client panics
+                        // if dropped inside an async context (tokio worker thread).
+                        let path_b = path.clone();
+                        let store_b = store.clone();
+                        let embeddings_b = embeddings.clone();
+                        let result = tauri::async_runtime::spawn_blocking(move || {
+                            auto_ingest_file_for_task(
+                                &store_b,
+                                embeddings_b.as_ref(),
+                                task_id,
+                                &path_b,
+                            )
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(())) => {
                                 if let Some(ref notify) = file_indexed_notify {
                                     let file_name = path
                                         .file_name()
@@ -212,8 +221,11 @@ pub fn start_watcher(
                                     notify(task_id, file_name);
                                 }
                             }
-                            Err(err) => {
+                            Ok(Err(err)) => {
                                 eprintln!("[jeff watcher] ingest error {}: {err}", path.display());
+                            }
+                            Err(join_err) => {
+                                eprintln!("[jeff watcher] ingest task error: {join_err}");
                             }
                         }
                     }
