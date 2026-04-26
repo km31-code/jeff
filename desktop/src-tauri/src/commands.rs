@@ -181,7 +181,16 @@ pub fn set_preferred_workspace_folder(
     state
         .store
         .set_preferred_workspace_folder(Some(clean))
-        .map_err(map_jeff_error)
+        .map_err(map_jeff_error)?;
+
+    // clear any stale watched_folders entry so the next ensure_workspace call
+    // picks up the new preference rather than re-using the old entry.
+    if let Some(task) = state.store.get_active_task().map_err(map_jeff_error)? {
+        let _ = state.store.clear_watched_folder(task.id);
+        let _ = ensure_workspace_awareness_for_task(state.inner(), task.id);
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
