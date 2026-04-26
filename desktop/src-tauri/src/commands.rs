@@ -1165,7 +1165,19 @@ pub fn ensure_workspace_awareness_for_task(
         .get_watched_folder(task_id)
         .map_err(map_jeff_error)?
         .map(|entry| entry.folder_path.trim().to_string())
-        .filter(|path| !path.is_empty());
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            // no folder has been explicitly configured for this task yet.
+            // fall back to the global preferred_workspace_folder set during
+            // onboarding so that the first task the user creates automatically
+            // watches their chosen folder without a manual watcher start call.
+            state
+                .store
+                .get_preferred_workspace_folder()
+                .ok()
+                .flatten()
+                .filter(|path| !path.trim().is_empty())
+        });
 
     let mut candidates = Vec::<PathBuf>::new();
     if let Some(path) = configured_path {
@@ -1183,7 +1195,7 @@ pub fn ensure_workspace_awareness_for_task(
 
     let mut last_error: Option<String> = None;
     for candidate in candidates {
-        match start_watcher_and_persist_folder(state, task_id, candidate) {
+        match start_watcher_and_persist_folder(state, task_id, candidate.clone()) {
             Ok(status) => {
                 sync_clipboard_poll_for_active_task(state, task_id)?;
                 return Ok(status);
@@ -1256,6 +1268,16 @@ pub fn get_watcher_status(
     task_id: i64,
 ) -> WatcherStatusDto {
     crate::watcher::get_watcher_status(state.watcher.clone(), task_id)
+}
+
+// let the backend determine the correct folder (preferred_workspace_folder fallback,
+// then internal task dir) rather than having the frontend prescribe a path.
+#[tauri::command]
+pub fn ensure_workspace_watcher(
+    state: State<'_, crate::state::JeffState>,
+    task_id: i64,
+) -> Result<WatcherStatusDto, String> {
+    ensure_workspace_awareness_for_task(state.inner(), task_id)
 }
 
 #[tauri::command]

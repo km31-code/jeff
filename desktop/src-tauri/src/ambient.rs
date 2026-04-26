@@ -168,6 +168,11 @@ pub struct NotificationPayload {
     pub context_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct OverlayShownPayload {
+    interactive: bool,
+}
+
 // overlay window sizing. collapsed is a compact bar; expanded is the full
 // companion surface. width stays stable so anchoring does not shift.
 const OVERLAY_WIDTH: f64 = 420.0;
@@ -236,22 +241,41 @@ pub fn build_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
     Ok(())
 }
 
-pub fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+fn show_overlay_inner<R: Runtime>(app: &AppHandle<R>, interactive: bool) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
         window.show()?;
-        // do not call set_focus: summoning jeff must not steal focus from
-        // the user's active app (see m11.3 focus preservation).
+        if interactive {
+            window.set_focus()?;
+        }
     } else {
         build_overlay_window(app)?;
         if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
             window.show()?;
+            if interactive {
+                window.set_focus()?;
+            }
         }
     }
     if let Some(state) = app.try_state::<AmbientState>() {
         state.set_overlay_visible(true);
     }
-    let _ = app.emit("ambient://overlay-shown", ());
+    let _ = app.emit(
+        "ambient://overlay-shown",
+        OverlayShownPayload { interactive },
+    );
     Ok(())
+}
+
+pub fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    // Passive overlay display is used by background context events such as
+    // selection capture. It must not steal focus from the user's current app.
+    show_overlay_inner(app, false)
+}
+
+pub fn show_overlay_interactive<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    // Explicit user summons (hotkey/tray/onboarding) should leave Jeff ready
+    // for immediate typing.
+    show_overlay_inner(app, true)
 }
 
 pub fn hide_overlay<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -265,7 +289,7 @@ pub fn hide_overlay<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
-pub fn toggle_overlay<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+pub fn toggle_overlay_interactive<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let currently_visible = app
         .get_webview_window(OVERLAY_WINDOW_LABEL)
         .and_then(|w| w.is_visible().ok())
@@ -273,7 +297,7 @@ pub fn toggle_overlay<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     if currently_visible {
         hide_overlay(app)
     } else {
-        show_overlay(app)
+        show_overlay_interactive(app)
     }
 }
 
@@ -313,7 +337,7 @@ pub fn open_onboarding_flow<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()>
 // (first run or tray "Set up Jeff again"). step=2 jumps directly to API key
 // setup, used when the error recovery CTA is clicked in the full workspace.
 pub fn open_onboarding_flow_at_step<R: Runtime>(app: &AppHandle<R>, step: u8) -> tauri::Result<()> {
-    show_overlay(app)?;
+    show_overlay_interactive(app)?;
     if let Some(state) = app.try_state::<AmbientState>() {
         state.set_overlay_mode(OverlayMode::Expanded);
         let _ = resize_overlay_for_mode(app, OverlayMode::Expanded);
@@ -337,12 +361,12 @@ pub fn hide_workspace<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
 #[tauri::command]
 pub fn ambient_toggle_overlay<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    toggle_overlay(&app).map_err(|e| e.to_string())
+    toggle_overlay_interactive(&app).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn ambient_show_overlay<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    show_overlay(&app).map_err(|e| e.to_string())
+    show_overlay_interactive(&app).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -540,7 +564,7 @@ pub fn install_tray<R: Runtime>(
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "tray:show" => {
-                let _ = show_overlay(app);
+                let _ = show_overlay_interactive(app);
             }
             "tray:workspace" => {
                 let _ = show_workspace(app);
@@ -597,7 +621,7 @@ pub fn install_tray<R: Runtime>(
                 ..
             } = event
             {
-                let _ = toggle_overlay(&tray_handle);
+                let _ = toggle_overlay_interactive(&tray_handle);
             }
         })
         .build(app)?;
@@ -721,7 +745,7 @@ pub fn ambient_notification_clicked<R: Runtime>(
     // frontend listens to in order to select the right surface.
     state.set_overlay_mode(OverlayMode::Expanded);
     resize_overlay_for_mode(&app, OverlayMode::Expanded).map_err(|e| e.to_string())?;
-    show_overlay(&app).map_err(|e| e.to_string())?;
+    show_overlay_interactive(&app).map_err(|e| e.to_string())?;
     let _ = app.emit(
         "ambient://notification-click",
         &serde_json::json!({ "context_kind": context_kind, "context_id": context_id }),

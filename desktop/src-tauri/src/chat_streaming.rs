@@ -89,7 +89,7 @@ fn spawn_tts_chunk<R: Runtime + 'static>(
     first_audio_reported: Arc<AtomicU64>,
     turn_start: Instant,
 ) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         if cancel.is_cancelled() {
             return;
         }
@@ -178,7 +178,7 @@ pub async fn start_streaming_turn(
     let tts_voice = state.store.get_tts_voice()?;
 
     // capture everything needed to run the async pipeline.
-    tokio::spawn(run_llm_stream(
+    tauri::async_runtime::spawn(run_llm_stream(
         store,
         embeddings,
         reasoning,
@@ -218,11 +218,24 @@ async fn run_llm_stream<R: Runtime + 'static>(
     let mut phrase_buf = String::new();
     let mut phrase_id: u32 = 0;
 
-    // build the context pack outside the hot loop.
-    let context_pack = match build_task_context_pack(&store, embeddings.as_ref(), task_id, &message)
-    {
-        Ok(pack) => pack,
-        Err(err) => {
+    // Build the context pack outside the hot loop. The embedding provider uses
+    // reqwest::blocking today, so keep retrieval work off the async worker.
+    let context_store = store.clone();
+    let context_embeddings = embeddings.clone();
+    let context_message = message.clone();
+    let context_pack_result = tauri::async_runtime::spawn_blocking(move || {
+        build_task_context_pack(
+            &context_store,
+            context_embeddings.as_ref(),
+            task_id,
+            &context_message,
+        )
+    })
+    .await;
+
+    let context_pack = match context_pack_result {
+        Ok(Ok(pack)) => pack,
+        Ok(Err(err)) => {
             finalize_and_emit_cancelled(
                 &store,
                 &app,
@@ -230,6 +243,18 @@ async fn run_llm_stream<R: Runtime + 'static>(
                 &turn_id,
                 String::new(),
                 &format!("context_pack_error: {err}"),
+                turn_start,
+            );
+            return;
+        }
+        Err(err) => {
+            finalize_and_emit_cancelled(
+                &store,
+                &app,
+                placeholder_id,
+                &turn_id,
+                String::new(),
+                &format!("context_pack_join_error: {err}"),
                 turn_start,
             );
             return;

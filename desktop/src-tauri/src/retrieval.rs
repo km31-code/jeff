@@ -143,14 +143,14 @@ pub fn retrieve_relevant_chunks_with_top_k(
         return Err(anyhow!("retrieval query cannot be empty"));
     }
 
-    let query_embedding = embeddings
-        .embed_text(clean_query)
-        .context("failed to generate query embedding")?;
-
     let stored_chunks = store.fetch_chunk_embeddings_for_task(task_id)?;
     if stored_chunks.is_empty() {
         return Ok(Vec::new());
     }
+
+    let query_embedding = embeddings
+        .embed_text(clean_query)
+        .context("failed to generate query embedding")?;
 
     let mut scored: Vec<(f32, StoredChunkEmbedding)> = stored_chunks
         .into_iter()
@@ -403,6 +403,14 @@ mod tests {
         }
     }
 
+    struct PanicEmbeddingProvider;
+
+    impl EmbeddingProvider for PanicEmbeddingProvider {
+        fn embed_text(&self, _input: &str) -> Result<Vec<f32>> {
+            panic!("embedding provider should not be called when no chunks exist")
+        }
+    }
+
     fn write_file(path: &Path, body: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("failed to create parent directory");
@@ -526,6 +534,27 @@ mod tests {
         let top_text = retrieved[0].chunk_text.to_lowercase();
         assert!(top_text.contains("structure") || top_text.contains("sections"));
         assert!(top_text.contains("evidence") || top_text.contains("primary source"));
+    }
+
+    #[test]
+    fn retrieval_skips_embedding_call_when_task_has_no_chunks() {
+        let temp = tempfile::tempdir().expect("failed to create temp directory");
+        let base_path = temp.path().join("app_local_data");
+        let store = TaskStore::initialize(&base_path).expect("failed to initialize store");
+        let task = store
+            .create_task("Empty Task")
+            .expect("failed to create task");
+
+        let retrieved = retrieve_relevant_chunks_with_top_k(
+            &store,
+            &PanicEmbeddingProvider,
+            task.id,
+            "what should I do next",
+            3,
+        )
+        .expect("empty task retrieval should succeed");
+
+        assert!(retrieved.is_empty());
     }
 
     #[test]

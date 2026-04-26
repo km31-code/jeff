@@ -671,6 +671,10 @@ export async function getWatcherStatus(taskId: number): Promise<WatcherStatusDto
   return invoke<WatcherStatusDto>("get_watcher_status", { taskId });
 }
 
+export async function ensureWorkspaceWatcher(taskId: number): Promise<WatcherStatusDto> {
+  return invoke<WatcherStatusDto>("ensure_workspace_watcher", { taskId });
+}
+
 export async function listRecentlyLearned(
   taskId: number,
   limit = 10

@@ -88,6 +88,7 @@ import {
   startWorkspaceWatcher,
   stopWorkspaceWatcher,
   getWatcherStatus,
+  ensureWorkspaceWatcher,
   listRecentlyLearned,
   setClipboardCapture,
   getClipboardCaptureSetting,
@@ -1140,20 +1141,15 @@ function App() {
   // phase 13: load recently learned items and watcher/clipboard state for a task.
   async function refreshRecentlyLearned(taskId: number, options?: { ensureWatcher?: boolean }) {
     try {
-      const [workspace, items, statusSnapshot, cbEnabled] = await Promise.all([
-        getTaskWorkspace(taskId),
+      const [items, statusSnapshot, cbEnabled] = await Promise.all([
         listRecentlyLearned(taskId, 10),
         getWatcherStatus(taskId),
         getClipboardCaptureSetting(taskId)
       ]);
 
       let status = statusSnapshot;
-      if (options?.ensureWatcher) {
-        const expectedPath = normalizeFsPath(workspace.workspace_path);
-        const currentPath = normalizeFsPath(status.watched_path);
-        if (!status.is_watching || expectedPath !== currentPath) {
-          status = await startWorkspaceWatcher(taskId, workspace.workspace_path);
-        }
+      if (options?.ensureWatcher && !status.is_watching) {
+        status = await ensureWorkspaceWatcher(taskId);
       }
 
       setRecentlyLearned(items);

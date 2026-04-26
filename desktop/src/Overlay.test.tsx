@@ -7,6 +7,7 @@ import Overlay from "./Overlay";
 const invokeMock = vi.fn();
 const openDialogMock = vi.fn();
 const eventHandlers = new Map<string, Set<(event: { payload: unknown }) => void>>();
+let streamingEnabled = false;
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args)
@@ -33,7 +34,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 vi.mock("./streamClient", () => ({
-  isStreamingEnabled: () => false,
+  isStreamingEnabled: () => streamingEnabled,
   EVENT_LLM_TOKEN: "stream://llm_token",
   EVENT_LLM_COMPLETE: "stream://llm_complete",
   EVENT_TURN_CANCELLED: "stream://turn_cancelled",
@@ -45,7 +46,12 @@ afterEach(() => {
   invokeMock.mockReset();
   openDialogMock.mockReset();
   eventHandlers.clear();
+  streamingEnabled = false;
 });
+
+function emitEvent(eventName: string, payload: unknown) {
+  eventHandlers.get(eventName)?.forEach((handler) => handler({ payload }));
+}
 
 type OverlayMockOptions = {
   onboardingComplete?: boolean;
@@ -191,6 +197,22 @@ function setupInvokeMock(options: OverlayMockOptions = {}) {
       return null;
     }
 
+    if (command === "send_message") {
+      return {
+        assistant_response: "done",
+        retrieved_chunks: [],
+        cancelled: false
+      };
+    }
+
+    if (command === "send_message_streaming") {
+      return "turn-1";
+    }
+
+    if (command === "cancel_streaming_turn") {
+      return true;
+    }
+
     if (
       command === "ambient_set_tray_status" ||
       command === "ambient_set_quiet_mode" ||
@@ -277,6 +299,66 @@ describe("Overlay onboarding", () => {
     expect(await screen.findByTestId("overlay-no-active-task")).toHaveTextContent(
       "Tell me what you're working on."
     );
+  });
+
+  it("focuses the message input after an interactive overlay summon", async () => {
+    setupInvokeMock({
+      onboardingComplete: true,
+      activeTask: { id: 7, title: "runtime smoke task" }
+    });
+
+    render(<Overlay />);
+
+    const input = await screen.findByTestId("overlay-input");
+    emitEvent("ambient://overlay-shown", { interactive: true });
+
+    await waitFor(() => {
+      expect(input).toHaveFocus();
+    });
+  });
+
+  it("keeps streaming sends in working state until the stream completes", async () => {
+    const user = userEvent.setup();
+    streamingEnabled = true;
+    setupInvokeMock({
+      onboardingComplete: true,
+      activeTask: { id: 7, title: "runtime smoke task" }
+    });
+
+    render(<Overlay />);
+
+    await user.type(await screen.findByTestId("overlay-input"), "runtime ping");
+    await user.click(screen.getByRole("button", { name: "send" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("send_message_streaming", {
+        taskId: 7,
+        message: "runtime ping",
+        source: "text"
+      });
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("ambient_set_tray_status", {
+      status: "working"
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("ambient_set_tray_status", {
+      status: "idle"
+    });
+
+    emitEvent("stream://llm_complete", {
+      turn_id: "turn-1",
+      full_text: "pong",
+      cancelled: false,
+      ttft_ms: 10,
+      total_ms: 20
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("ambient_set_tray_status", {
+        status: "idle"
+      });
+      expect(screen.getByTestId("overlay-input")).not.toBeDisabled();
+    });
   });
 
   it("requests accessibility permission only after explicit click", async () => {

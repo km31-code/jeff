@@ -60,6 +60,7 @@ import {
 
 type PendingNotificationContext = { kind: string | null; id: number | null };
 type OnboardingStep = 1 | 2 | 3 | 4 | 5;
+type OverlayShownPayload = { interactive?: boolean };
 
 function describeStatus(status: TrayStatus): string {
   switch (status) {
@@ -159,6 +160,21 @@ export default function Overlay(): JSX.Element {
   const streamingTurnIdRef = useRef<string | null>(null);
   const pendingExpandRef = useRef(false);
   const onboardingSnoozedRef = useRef(false);
+  const messageInputRef = useRef<HTMLInputElement | null>(null);
+  const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
+  const onboardingPrimaryActionRef = useRef<HTMLButtonElement | null>(null);
+  const pendingInteractiveFocusRef = useRef(false);
+  const modeRef = useRef<OverlayMode>(mode);
+  const onboardingVisibleRef = useRef(onboardingVisible);
+  const onboardingStepRef = useRef<OnboardingStep>(onboardingStep);
+  const hasStoredApiKeyRef = useRef(false);
+
+  useEffect(() => {
+    modeRef.current = mode;
+    onboardingVisibleRef.current = onboardingVisible;
+    onboardingStepRef.current = onboardingStep;
+    hasStoredApiKeyRef.current = Boolean(onboardingStatus?.has_stored_api_key);
+  }, [mode, onboardingStatus?.has_stored_api_key, onboardingStep, onboardingVisible]);
 
   const refreshAmbient = useCallback(async () => {
     try {
@@ -230,6 +246,35 @@ export default function Overlay(): JSX.Element {
     [openOnboardingWizard]
   );
 
+  const focusPrimaryInteractionTarget = useCallback(() => {
+    if (typeof window === "undefined") return;
+
+    window.requestAnimationFrame(() => {
+      if (onboardingVisibleRef.current) {
+        if (onboardingStepRef.current === 2 && !hasStoredApiKeyRef.current) {
+          apiKeyInputRef.current?.focus();
+          return;
+        }
+
+        onboardingPrimaryActionRef.current?.focus();
+        return;
+      }
+
+      if (modeRef.current === "expanded") {
+        messageInputRef.current?.focus();
+      }
+    });
+  }, []);
+
+  const schedulePrimaryInteractionFocus = useCallback(() => {
+    if (typeof window === "undefined") return;
+
+    window.setTimeout(() => {
+      pendingInteractiveFocusRef.current = false;
+      focusPrimaryInteractionTarget();
+    }, 50);
+  }, [focusPrimaryInteractionTarget]);
+
   // initial load + notification permission probing.
   useEffect(() => {
     refreshAmbient();
@@ -279,10 +324,17 @@ export default function Overlay(): JSX.Element {
     );
 
     unsubscribers.push(
-      listen("ambient://overlay-shown", () => {
+      listen<OverlayShownPayload>("ambient://overlay-shown", (event) => {
         onboardingSnoozedRef.current = false;
+        if (event.payload?.interactive) {
+          pendingInteractiveFocusRef.current = true;
+        }
         void refreshActiveTask();
-        void refreshOnboarding(true);
+        void refreshOnboarding(true).finally(() => {
+          if (event.payload?.interactive) {
+            schedulePrimaryInteractionFocus();
+          }
+        });
       })
     );
 
@@ -299,7 +351,23 @@ export default function Overlay(): JSX.Element {
         p.then((unlisten) => unlisten()).catch(() => undefined)
       );
     };
-  }, [openOnboardingWizard, refreshActiveTask, refreshOnboarding]);
+  }, [openOnboardingWizard, refreshActiveTask, refreshOnboarding, schedulePrimaryInteractionFocus]);
+
+  useEffect(() => {
+    if (!pendingInteractiveFocusRef.current) return;
+    schedulePrimaryInteractionFocus();
+  }, [
+    mode,
+    onboardingStatus?.has_stored_api_key,
+    onboardingStep,
+    onboardingVisible,
+    schedulePrimaryInteractionFocus
+  ]);
+
+  useEffect(() => {
+    if (!onboardingVisible) return;
+    schedulePrimaryInteractionFocus();
+  }, [onboardingStep, onboardingVisible, schedulePrimaryInteractionFocus]);
 
   useEffect(() => {
     if (!isStreamingEnabled()) {
@@ -585,6 +653,7 @@ export default function Overlay(): JSX.Element {
 
       setSending(true);
       setErrorMessage(null);
+      let streamingStarted = false;
 
       try {
         let task = activeTask;
@@ -604,6 +673,7 @@ export default function Overlay(): JSX.Element {
             );
           }
           const turnId = await sendMessageStreaming(task.id, trimmed, "text");
+          streamingStarted = true;
           streamingTurnIdRef.current = turnId;
           setStreamingTurnId(turnId);
           setStreamingText("");
@@ -618,8 +688,10 @@ export default function Overlay(): JSX.Element {
       } catch (error) {
         setErrorMessage(String(error));
       } finally {
-        await setTrayStatus("idle").catch(() => undefined);
-        setSending(false);
+        if (!streamingStarted) {
+          await setTrayStatus("idle").catch(() => undefined);
+          setSending(false);
+        }
       }
     },
     [activeTask, input, refreshMessages, sending]
@@ -740,6 +812,7 @@ export default function Overlay(): JSX.Element {
       onboardingSnoozedRef.current = false;
       setOnboardingStep(1);
       setApiKeyValidation(null);
+      window.setTimeout(() => messageInputRef.current?.focus(), 50);
     } catch (error) {
       setErrorMessage(String(error));
     } finally {
@@ -932,6 +1005,7 @@ export default function Overlay(): JSX.Element {
                   <div className="overlay-onboarding-actions">
                     <button
                       type="button"
+                      ref={onboardingPrimaryActionRef}
                       onClick={handleOnboardingStepOneContinue}
                       data-testid="onboarding-continue-step-1"
                     >
@@ -951,6 +1025,7 @@ export default function Overlay(): JSX.Element {
                     Add your OpenAI API key. Jeff validates it and stores it in macOS Keychain.
                   </p>
                   <input
+                    ref={apiKeyInputRef}
                     type="password"
                     className="overlay-input"
                     value={apiKeyInput}
@@ -973,6 +1048,7 @@ export default function Overlay(): JSX.Element {
                   <div className="overlay-onboarding-actions">
                     <button
                       type="button"
+                      ref={onboardingPrimaryActionRef}
                       onClick={() => void handleOnboardingValidateApiKey()}
                       disabled={onboardingBusy}
                       data-testid="onboarding-continue-step-2"
@@ -998,6 +1074,7 @@ export default function Overlay(): JSX.Element {
                   <div className="overlay-onboarding-actions">
                     <button
                       type="button"
+                      ref={onboardingPrimaryActionRef}
                       onClick={() => void handleChooseWorkspaceFolder()}
                       disabled={onboardingBusy}
                       data-testid="onboarding-choose-folder"
@@ -1048,6 +1125,11 @@ export default function Overlay(): JSX.Element {
                     <div className="overlay-onboarding-actions">
                       <button
                         type="button"
+                        ref={
+                          accessibilityPermissionGranted
+                            ? undefined
+                            : onboardingPrimaryActionRef
+                        }
                         onClick={() => void handleRequestAccessibilityPermission()}
                         data-testid="onboarding-enable-accessibility"
                       >
@@ -1058,6 +1140,11 @@ export default function Overlay(): JSX.Element {
                   <div className="overlay-onboarding-actions">
                     <button
                       type="button"
+                      ref={
+                        accessibilityPermissionGranted
+                          ? onboardingPrimaryActionRef
+                          : undefined
+                      }
                       onClick={() => setOnboardingStep(5)}
                       data-testid="onboarding-continue-step-4"
                     >
@@ -1079,6 +1166,7 @@ export default function Overlay(): JSX.Element {
                   <div className="overlay-onboarding-actions">
                     <button
                       type="button"
+                      ref={onboardingPrimaryActionRef}
                       onClick={() => void handleFinishOnboarding()}
                       disabled={onboardingBusy}
                       data-testid="onboarding-complete"
@@ -1155,6 +1243,7 @@ export default function Overlay(): JSX.Element {
 
               <form className="overlay-input-row" onSubmit={handleSubmit}>
                 <input
+                  ref={messageInputRef}
                   className="overlay-input"
                   data-testid="overlay-input"
                   type="text"

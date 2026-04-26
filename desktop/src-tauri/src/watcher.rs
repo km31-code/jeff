@@ -41,14 +41,14 @@ const MIN_CLIPBOARD_CHARS: usize = 10;
 
 pub struct WatcherState {
     active: HashMap<i64, ActiveWatcher>,
-    clipboard_polls: HashMap<i64, tokio::task::AbortHandle>,
+    clipboard_polls: HashMap<i64, tauri::async_runtime::JoinHandle<()>>,
 }
 
 struct ActiveWatcher {
     // dropping the watcher stops filesystem event delivery.
     _watcher: RecommendedWatcher,
     // aborting the handle stops ingest processing.
-    debounce_abort: tokio::task::AbortHandle,
+    debounce_task: tauri::async_runtime::JoinHandle<()>,
     watched_path: PathBuf,
 }
 
@@ -87,7 +87,7 @@ pub fn start_watcher(
     {
         let mut state = watcher_state.lock().expect("watcher state lock poisoned");
         if let Some(old) = state.active.remove(&task_id) {
-            old.debounce_abort.abort();
+            old.debounce_task.abort();
         }
     }
 
@@ -113,7 +113,38 @@ pub fn start_watcher(
         .with_context(|| format!("failed to watch path {}", canonical.display()))?;
 
     let watch_root = canonical.clone();
-    let debounce_task = tokio::spawn(async move {
+    let debounce_task = tauri::async_runtime::spawn(async move {
+        // initial scan: ingest files that already exist in the watched folder.
+        // the filesystem watcher only fires for changes AFTER it starts, so
+        // pre-existing files would never be ingested without this pass.
+        {
+            let scan_root = watch_root.clone();
+            let scan_store = store.clone();
+            let scan_embeddings = embeddings.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                if let Ok(entries) = std::fs::read_dir(&scan_root) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if should_ignore_file(&path, &scan_root) {
+                            continue;
+                        }
+                        if let Err(err) = auto_ingest_file_for_task(
+                            &scan_store,
+                            scan_embeddings.as_ref(),
+                            task_id,
+                            &path,
+                        ) {
+                            eprintln!(
+                                "[jeff watcher] initial scan ingest error {}: {err}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+            })
+            .await;
+        }
+
         let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
         let mut interval = tokio::time::interval(Duration::from_millis(POLL_INTERVAL_MS));
 
@@ -176,7 +207,6 @@ pub fn start_watcher(
         }
     });
 
-    let abort_handle = debounce_task.abort_handle();
     let status = WatcherStatusDto {
         task_id,
         is_watching: true,
@@ -189,7 +219,7 @@ pub fn start_watcher(
             task_id,
             ActiveWatcher {
                 _watcher: watcher,
-                debounce_abort: abort_handle,
+                debounce_task,
                 watched_path: canonical,
             },
         );
@@ -209,7 +239,7 @@ pub fn start_clipboard_poll(
     // last-seen hash; used to deduplicate repeated clipboard reads.
     let last_hash: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
 
-    let handle = tokio::spawn(async move {
+    let handle = tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(CLIPBOARD_POLL_MS));
 
         loop {
@@ -222,7 +252,7 @@ pub fn start_clipboard_poll(
             }
 
             // read clipboard on a blocking thread to avoid blocking the async runtime.
-            let content_result = tokio::task::spawn_blocking(|| {
+            let content_result = tauri::async_runtime::spawn_blocking(|| {
                 let mut cb = arboard::Clipboard::new().ok()?;
                 cb.get_text().ok()
             })
@@ -272,9 +302,8 @@ pub fn start_clipboard_poll(
         }
     });
 
-    let abort = handle.abort_handle();
     let mut state = watcher_state.lock().expect("watcher state lock poisoned");
-    if let Some(old) = state.clipboard_polls.insert(task_id, abort) {
+    if let Some(old) = state.clipboard_polls.insert(task_id, handle) {
         old.abort();
     }
 }
@@ -289,7 +318,7 @@ pub fn stop_clipboard_poll(watcher_state: Arc<Mutex<WatcherState>>, task_id: i64
 pub fn stop_watcher(watcher_state: Arc<Mutex<WatcherState>>, task_id: i64) -> WatcherStatusDto {
     let mut state = watcher_state.lock().expect("watcher state lock poisoned");
     if let Some(old) = state.active.remove(&task_id) {
-        old.debounce_abort.abort();
+        old.debounce_task.abort();
     }
     WatcherStatusDto {
         task_id,
@@ -315,7 +344,7 @@ pub fn stop_all_except(watcher_state: Arc<Mutex<WatcherState>>, keep_task_id: Op
             continue;
         }
         if let Some(old) = state.active.remove(&id) {
-            old.debounce_abort.abort();
+            old.debounce_task.abort();
         }
     }
 

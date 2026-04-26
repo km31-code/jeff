@@ -58,7 +58,7 @@ fn main() {
         // single-instance plugin must be registered before any window work so
         // second-launch invocations are redirected to the already-running app.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            let _ = ambient::show_overlay(app);
+            let _ = ambient::show_overlay_interactive(app);
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -70,7 +70,7 @@ fn main() {
                     // double-fire. pressed-only keeps toggle latency tight.
                     if event.state == ShortcutState::Pressed {
                         if ambient::shortcut_matches(shortcut, ambient::DEFAULT_HOTKEY) {
-                            let _ = ambient::toggle_overlay(app);
+                            let _ = ambient::toggle_overlay_interactive(app);
                         } else if ambient::shortcut_matches(
                             shortcut,
                             selection_capture::SELECTION_CAPTURE_HOTKEY,
@@ -539,6 +539,7 @@ fn main() {
             commands::start_workspace_watcher,
             commands::stop_workspace_watcher,
             commands::get_watcher_status,
+            commands::ensure_workspace_watcher,
             commands::list_recently_learned,
             commands::set_clipboard_capture,
             commands::get_clipboard_capture_setting,

@@ -42,8 +42,8 @@ surfaces remain unmodified.
 3. Ambient presence layer (`desktop/src-tauri/src/ambient.rs`)
 - system tray icon with status (idle / listening / working) and menu
 - single-instance lock (second launch focuses existing overlay)
-- global hotkey: CmdOrCtrl+Shift+J toggles overlay
-- overlay window: frameless, always-on-top, no-focus-steal
+- global hotkey: CmdOrCtrl+Shift+J toggles overlay and focuses it for input
+- overlay window: frameless, always-on-top, passive display does not steal focus
 - collapsed state (compact bar, 72px height)
 - expanded state (companion chat surface, 520px height)
 - native OS notification dispatch with quiet mode suppression
@@ -116,11 +116,15 @@ Both windows close-to-hide. Quit is only reachable via the tray menu
 
 ## Focus Model
 
-Summoning the overlay via hotkey or tray click calls `window.show()` only.
-`set_focus()` is never called on the overlay from the `show_overlay` path.
-The user's active app retains focus. Clicking into the overlay transfers
-focus explicitly. Hotkey dismiss returns focus to the previous app because
-the overlay never stole it.
+Passive overlay display calls `window.show()` only. `set_focus()` is never
+called from the `show_overlay` path, so background context events such as
+selection capture do not interrupt the user's active app.
+
+Explicit user summons use the interactive path: hotkey, tray show, onboarding,
+notification clicks, and second-launch handoff call `show_overlay_interactive`.
+That path focuses the overlay and emits `ambient://overlay-shown` with
+`interactive: true`, allowing the frontend to focus the primary onboarding
+control or message input. Hotkey dismiss hides the overlay.
 
 ## Notification Path
 

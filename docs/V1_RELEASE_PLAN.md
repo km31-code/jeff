@@ -483,15 +483,15 @@ Run these in order. Check off each one when confirmed working.
 
 **Ambient presence**
 - [ ] App starts in system tray with no window stealing focus from frontmost app
-- [ ] Cmd+Shift+J summons overlay without the previous app losing focus
-- [ ] Cmd+Shift+J again dismisses overlay; previous app still has focus
+- [ ] Cmd+Shift+J summons overlay and focuses the primary input/action
+- [ ] Cmd+Shift+J again dismisses overlay
 - [ ] Closing the overlay window (red button) hides it, does not quit process
 - [ ] Quit is only accessible from tray menu
 - [ ] "Launch at Login" toggle appears in macOS System Settings → Login Items
   after enabling
 
 **Session restore**
-- [ ] Quit and relaunch: active task is restored in overlay without focus steal
+- [ ] Quit and relaunch: active task is restored without startup focus steal
 - [ ] Overlay state (collapsed vs expanded) is restored from prior session
 
 **Active window context**
