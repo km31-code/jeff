@@ -996,12 +996,12 @@ mod platform {
     }
 
     fn get_frontmost_app() -> Option<(String, i32)> {
-        use objc2::{class, msg_send, runtime::AnyObject};
+        use objc2::{msg_send, runtime::AnyClass, runtime::AnyObject};
         unsafe {
-            let pool_cls = class!(NSAutoreleasePool);
+            let pool_cls = AnyClass::get(c"NSAutoreleasePool")?;
             let pool: *mut AnyObject = msg_send![pool_cls, new];
 
-            let workspace_cls = class!(NSWorkspace);
+            let workspace_cls = AnyClass::get(c"NSWorkspace")?;
             let workspace: *mut AnyObject = msg_send![workspace_cls, sharedWorkspace];
 
             let result = if workspace.is_null() {

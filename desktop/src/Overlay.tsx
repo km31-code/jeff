@@ -45,12 +45,14 @@ import {
   getSelectionCaptureIndicator,
   listTasks,
   listMessages,
+  recordTaskFocus,
   requestAccessibilityPermission,
   sendMessage,
   sendMessageStreaming,
   setActiveTask,
   setPreferredWorkspaceFolder,
   storeOpenAiApiKey,
+  triggerTaskResume,
   validateOpenAiApiKey
 } from "./tauriClient";
 
@@ -141,6 +143,11 @@ export default function Overlay(): JSX.Element {
   // input box so the user sees what context is loaded before sending a message.
   const [selectionCaptureIndicator, setSelectionCaptureIndicator] =
     useState<SelectionCaptureIndicatorDto | null>(null);
+
+  // phase 15: reorientation banner shown when user returns to a task after 5+
+  // minutes away. auto-dismisses after 8 seconds.
+  const [reorientationBanner, setReorientationBanner] = useState<string | null>(null);
+  const reorientationTimerRef = useRef<number | null>(null);
 
   const [onboardingStatus, setOnboardingStatus] =
     useState<OnboardingStatusDto | null>(null);
@@ -335,6 +342,30 @@ export default function Overlay(): JSX.Element {
             schedulePrimaryInteractionFocus();
           }
         });
+
+        // phase 15: when the user explicitly summons the overlay, check for
+        // reorientation (5+ min absence) and record the focus timestamp.
+        // mirrors what App.tsx does on main-window focus for overlay-first users.
+        if (event.payload?.interactive) {
+          const task = activeTaskRef.current;
+          if (task) {
+            void triggerTaskResume(task.id)
+              .then((result) => {
+                if (result.summary && result.summary.trim().length > 0) {
+                  if (reorientationTimerRef.current !== null) {
+                    window.clearTimeout(reorientationTimerRef.current);
+                  }
+                  setReorientationBanner(result.summary.trim());
+                  reorientationTimerRef.current = window.setTimeout(() => {
+                    setReorientationBanner(null);
+                    reorientationTimerRef.current = null;
+                  }, 8000);
+                }
+              })
+              .catch(() => undefined);
+            void recordTaskFocus(task.id).catch(() => undefined);
+          }
+        }
       })
     );
 
@@ -1211,6 +1242,26 @@ export default function Overlay(): JSX.Element {
                   </div>
                 ) : null}
               </div>
+
+              {reorientationBanner ? (
+                <div className="overlay-banner overlay-banner-info" data-testid="overlay-reorientation-banner">
+                  <span className="overlay-selection-capture-message">{reorientationBanner}</span>
+                  <div className="overlay-banner-actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (reorientationTimerRef.current !== null) {
+                          window.clearTimeout(reorientationTimerRef.current);
+                          reorientationTimerRef.current = null;
+                        }
+                        setReorientationBanner(null);
+                      }}
+                    >
+                      dismiss
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               {selectionCaptureIndicator ? (
                 <div
