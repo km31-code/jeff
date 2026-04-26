@@ -2332,18 +2332,13 @@ pub fn switch_active_task_from_companion(
         .set_active_task(task_id)
         .map_err(map_jeff_error)?;
 
-    // restart workspace watcher on the new task's folder if one is configured
-    if !new_task.workspace_path.is_empty() {
-        let path = std::path::PathBuf::from(&new_task.workspace_path);
-        if path.exists() {
-            let _ = crate::watcher::start_watcher(
-                state.watcher.clone(),
-                new_task.id,
-                path,
-                state.store.clone(),
-                state.embeddings.clone(),
-            );
-        }
+    // restart watcher on the correct folder for this task (preferred_workspace_folder
+    // fallback, then internal task dir) — same logic as set_active_task.
+    if let Err(err) = ensure_workspace_awareness_for_task(state.inner(), new_task.id) {
+        eprintln!(
+            "[jeff watcher] failed to sync watcher after companion task switch to {}: {err}",
+            new_task.id
+        );
     }
 
     Ok(new_task)

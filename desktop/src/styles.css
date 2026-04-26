@@ -674,6 +674,34 @@ body.overlay-body {
   cursor: default;
 }
 
+.overlay-mic {
+  border: 1px solid #d6d8dc;
+  background: #f4f5f7;
+  color: #444;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.overlay-mic:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.overlay-mic-active {
+  border-color: #e53e3e;
+  background: #fff5f5;
+  color: #e53e3e;
+  animation: overlay-mic-pulse 1s ease-in-out infinite;
+}
+
+@keyframes overlay-mic-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 .overlay-banner {
   font-size: 12px;
   padding: 6px 8px;

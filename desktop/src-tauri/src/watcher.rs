@@ -76,6 +76,45 @@ impl WatcherState {
     }
 }
 
+// recursively walk a directory and ingest all non-ignored files for a task.
+// called once at watcher startup so pre-existing files become available for
+// retrieval without the user needing to modify them to trigger a watch event.
+fn initial_scan_recursive(
+    dir: &Path,
+    watch_root: &Path,
+    store: &TaskStore,
+    embeddings: &Arc<dyn EmbeddingProvider>,
+    task_id: i64,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if child.is_dir() {
+            let rel = child.strip_prefix(watch_root).unwrap_or(&child);
+            let ignored = rel.components().any(|c| {
+                c.as_os_str()
+                    .to_str()
+                    .map(|name| name.starts_with('.') || IGNORED_DIRS.contains(&name))
+                    .unwrap_or(false)
+            });
+            if !ignored {
+                initial_scan_recursive(&child, watch_root, store, embeddings, task_id);
+            }
+        } else if !should_ignore_file(&child, watch_root) {
+            if let Err(err) =
+                auto_ingest_file_for_task(store, embeddings.as_ref(), task_id, &child)
+            {
+                eprintln!(
+                    "[jeff watcher] initial scan ingest error {}: {err}",
+                    child.display()
+                );
+            }
+        }
+    }
+}
+
 pub fn start_watcher(
     watcher_state: Arc<Mutex<WatcherState>>,
     task_id: i64,
@@ -117,30 +156,13 @@ pub fn start_watcher(
         // initial scan: ingest files that already exist in the watched folder.
         // the filesystem watcher only fires for changes AFTER it starts, so
         // pre-existing files would never be ingested without this pass.
+        // the scan is recursive so files in subdirectories are also picked up.
         {
             let scan_root = watch_root.clone();
             let scan_store = store.clone();
             let scan_embeddings = embeddings.clone();
             let _ = tauri::async_runtime::spawn_blocking(move || {
-                if let Ok(entries) = std::fs::read_dir(&scan_root) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if should_ignore_file(&path, &scan_root) {
-                            continue;
-                        }
-                        if let Err(err) = auto_ingest_file_for_task(
-                            &scan_store,
-                            scan_embeddings.as_ref(),
-                            task_id,
-                            &path,
-                        ) {
-                            eprintln!(
-                                "[jeff watcher] initial scan ingest error {}: {err}",
-                                path.display()
-                            );
-                        }
-                    }
-                }
+                initial_scan_recursive(&scan_root, &scan_root, &scan_store, &scan_embeddings, task_id);
             })
             .await;
         }

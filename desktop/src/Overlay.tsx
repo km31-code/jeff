@@ -52,9 +52,20 @@ import {
   setActiveTask,
   setPreferredWorkspaceFolder,
   storeOpenAiApiKey,
+  transcribeAudio,
   triggerTaskResume,
   validateOpenAiApiKey
 } from "./tauriClient";
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
 
 // phase 11 overlay: ambient presence window. collapsed is a compact status
 // bar, expanded shows the last few messages and a send box. this is not the
@@ -124,7 +135,12 @@ export default function Overlay(): JSX.Element {
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [recording, setRecording] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   const [hotkeyConflict, setHotkeyConflict] = useState<string | null>(null);
   const [notificationContext, setNotificationContext] =
     useState<PendingNotificationContext | null>(null);
@@ -856,6 +872,93 @@ export default function Overlay(): JSX.Element {
     void openOnboardingWizard(2);
   }, [openOnboardingWizard]);
 
+  const handleStartVoiceRecording = useCallback(async () => {
+    if (recording || sending) return;
+    setErrorMessage(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        void handleFinalizeVoiceInput();
+      };
+
+      recorder.start();
+      setRecording(true);
+    } catch (error) {
+      setErrorMessage("Microphone access denied or unavailable.");
+      void error;
+    }
+  }, [recording, sending]);
+
+  const handleStopVoiceRecording = useCallback(() => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    recorder.stop();
+    setRecording(false);
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+  }, []);
+
+  const handleFinalizeVoiceInput = useCallback(async () => {
+    const chunks = audioChunksRef.current;
+    audioChunksRef.current = [];
+    mediaRecorderRef.current = null;
+
+    if (chunks.length === 0) return;
+
+    setSending(true);
+    setErrorMessage(null);
+    try {
+      const mimeType = chunks[0].type || "audio/webm";
+      const blob = new Blob(chunks, { type: mimeType });
+      const audioBase64 = await blobToBase64(blob);
+      const transcription = await transcribeAudio(audioBase64, mimeType);
+      const text = transcription.text.trim();
+      if (!text) return;
+
+      // treat voice input as a direct send, same as the text submit path.
+      let task = activeTaskRef.current;
+      if (!task) {
+        const created = await createTask(deriveTaskTitleFromPrompt(text));
+        task = await setActiveTask(created.id).catch(() => created);
+        setActiveTaskState(task);
+        activeTaskRef.current = task;
+        setTasks(await listTasks().catch(() => []));
+      }
+
+      await setTrayStatus("working").catch(() => undefined);
+
+      if (isStreamingEnabled()) {
+        if (streamingTurnIdRef.current) {
+          await cancelStreamingTurn(streamingTurnIdRef.current, "user_barge_in").catch(() => undefined);
+        }
+        const turnId = await sendMessageStreaming(task.id, text, "voice");
+        streamingTurnIdRef.current = turnId;
+        setStreamingTurnId(turnId);
+        setStreamingText("");
+        await refreshMessages(task.id);
+      } else {
+        await sendMessage(task.id, text, "voice");
+        await refreshMessages(task.id);
+      }
+    } catch (error) {
+      setErrorMessage(String(error));
+      await setTrayStatus("idle").catch(() => undefined);
+    } finally {
+      setSending(false);
+    }
+  }, [refreshMessages]);
+
   const handleDismissSelectionCapture = useCallback(async () => {
     try {
       await dismissSelectionCapture();
@@ -1299,20 +1402,32 @@ export default function Overlay(): JSX.Element {
                   data-testid="overlay-input"
                   type="text"
                   placeholder={
-                    activeTask
-                      ? selectionCaptureIndicator?.status === "captured"
-                        ? "Ask about the captured text"
-                        : "Say something to Jeff"
-                      : "Tell me what you're working on"
+                    recording
+                      ? "Recording — click mic to send"
+                      : activeTask
+                        ? selectionCaptureIndicator?.status === "captured"
+                          ? "Ask about the captured text"
+                          : "Say something to Jeff"
+                        : "Tell me what you're working on"
                   }
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
-                  disabled={sending}
+                  disabled={sending || recording}
                 />
+                <button
+                  type="button"
+                  className={`overlay-mic${recording ? " overlay-mic-active" : ""}`}
+                  data-testid="overlay-mic-button"
+                  title={recording ? "Stop recording and send" : "Voice input"}
+                  disabled={sending}
+                  onClick={() => recording ? handleStopVoiceRecording() : void handleStartVoiceRecording()}
+                >
+                  {recording ? "stop" : "mic"}
+                </button>
                 <button
                   type="submit"
                   className="overlay-send"
-                  disabled={sending || input.trim().length === 0}
+                  disabled={sending || recording || input.trim().length === 0}
                 >
                   {sending ? "…" : activeTask ? "send" : "start"}
                 </button>
