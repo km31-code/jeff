@@ -89,12 +89,14 @@ impl WatcherState {
 // recursively walk a directory and ingest all non-ignored files for a task.
 // called once at watcher startup so pre-existing files become available for
 // retrieval without the user needing to modify them to trigger a watch event.
+// g4: notify callback fires after each file so the companion shows progress.
 fn initial_scan_recursive(
     dir: &Path,
     watch_root: &Path,
     store: &TaskStore,
     embeddings: &Arc<dyn EmbeddingProvider>,
     task_id: i64,
+    file_indexed_notify: Option<&Arc<dyn Fn(i64, String) + Send + Sync + 'static>>,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -110,15 +112,29 @@ fn initial_scan_recursive(
                     .unwrap_or(false)
             });
             if !ignored {
-                initial_scan_recursive(&child, watch_root, store, embeddings, task_id);
+                initial_scan_recursive(&child, watch_root, store, embeddings, task_id, file_indexed_notify);
             }
         } else if !should_ignore_file(&child, watch_root) {
-            if let Err(err) = auto_ingest_file_for_task(store, embeddings.as_ref(), task_id, &child)
-            {
-                eprintln!(
-                    "[jeff watcher] initial scan ingest error {}: {err}",
-                    child.display()
-                );
+            match auto_ingest_file_for_task(store, embeddings.as_ref(), task_id, &child) {
+                Ok(()) => {
+                    // g4: emit file-indexed event so the companion shows scanning progress.
+                    if let Some(notify) = file_indexed_notify {
+                        let file_name = child
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !file_name.is_empty() {
+                            notify(task_id, file_name);
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[jeff watcher] initial scan ingest error {}: {err}",
+                        child.display()
+                    );
+                }
             }
         }
     }
@@ -168,10 +184,13 @@ pub fn start_watcher(
         // the filesystem watcher only fires for changes AFTER it starts, so
         // pre-existing files would never be ingested without this pass.
         // the scan is recursive so files in subdirectories are also picked up.
+        // g4: clone the notify ref so the initial scan can emit file-indexed
+        // events — the companion bar shows scanning progress in real time.
         {
             let scan_root = watch_root.clone();
             let scan_store = store.clone();
             let scan_embeddings = embeddings.clone();
+            let scan_notify = file_indexed_notify.clone();
             let _ = tauri::async_runtime::spawn_blocking(move || {
                 initial_scan_recursive(
                     &scan_root,
@@ -179,6 +198,7 @@ pub fn start_watcher(
                     &scan_store,
                     &scan_embeddings,
                     task_id,
+                    scan_notify.as_ref(),
                 );
             })
             .await;

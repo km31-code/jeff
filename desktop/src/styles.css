@@ -863,6 +863,25 @@ body.overlay-body {
   color: var(--text-dim);
 }
 
+/* g3: inline text link inside banners (folder connect prompt) */
+.overlay-inline-link {
+  background: none;
+  border: none;
+  color: var(--accent-purple);
+  cursor: pointer;
+  padding: 0;
+  font-size: inherit;
+  font-family: inherit;
+  text-decoration: underline;
+  display: inline;
+  min-height: unset;
+}
+.overlay-inline-link:hover {
+  background: none;
+  border: none;
+  color: #9d6ef8;
+}
+
 /* b2: task row */
 .overlay-task-row {
   display: flex;

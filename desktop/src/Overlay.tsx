@@ -251,6 +251,10 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   // brief "just indexed" confirmation shown when the watcher ingests a new file.
   const [fileIndexedNotice, setFileIndexedNotice] = useState<string | null>(null);
   const fileIndexedTimerRef = useRef<number | null>(null);
+  // g3: one-time per-session soft prompt to connect a folder after the first
+  // successful message exchange when no folder is connected.
+  const [showFolderConnectPrompt, setShowFolderConnectPrompt] = useState(false);
+  const folderPromptShownRef = useRef(false);
   const [activeSubtask, setActiveSubtask] = useState<ActiveSubtaskState | null>(null);
   const [pendingWriteProposals, setPendingWriteProposals] = useState<FileWriteProposalDto[]>([]);
   const [writeConfirmations, setWriteConfirmations] = useState<WriteConfirmation[]>([]);
@@ -316,6 +320,20 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     streamingTurnId,
     writeConfirmations.length
   ]);
+
+  // g3: show the folder-connect soft prompt once per session after the first
+  // successful message exchange when onboarding is complete and no folder is
+  // connected. does not fire during onboarding or on startup.
+  useEffect(() => {
+    if (folderPromptShownRef.current) return;
+    if (!onboardingStatus?.onboarding_complete) return;
+    if (watcherStatus?.is_watching) return;
+    if (messages.length === 0) return;
+    const hasAssistantResponse = messages.some((m) => m.role === "assistant");
+    if (!hasAssistantResponse) return;
+    folderPromptShownRef.current = true;
+    setShowFolderConnectPrompt(true);
+  }, [messages, onboardingStatus?.onboarding_complete, watcherStatus?.is_watching]);
 
   useEffect(() => {
     return () => {
@@ -1204,6 +1222,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
 
       await setPreferredWorkspaceFolder(folderPath);
       setWorkspaceFolder(folderPath);
+      setShowFolderConnectPrompt(false);
       await refreshOnboarding(false);
     } catch (error) {
       setErrorMessage(String(error));
@@ -1965,6 +1984,36 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                 </div>
               ) : null}
 
+              {showFolderConnectPrompt ? (
+                <div className="overlay-banner overlay-banner-info" data-testid="overlay-folder-prompt">
+                  <span>
+                    {activeContext?.document_title
+                      ? `Jeff can see ${activeContext.document_title} is open.`
+                      : "Jeff sees your active window."}{" "}
+                    <button
+                      type="button"
+                      className="overlay-inline-link"
+                      onClick={() => void handleChooseWorkspaceFolder()}
+                      data-testid="overlay-folder-prompt-connect"
+                    >
+                      Connect a folder
+                    </button>{" "}
+                    to give Jeff full context.
+                  </span>
+                  <div className="overlay-banner-actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        folderPromptShownRef.current = true;
+                        setShowFolderConnectPrompt(false);
+                      }}
+                    >
+                      not now
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
               <div className="overlay-messages" data-testid="overlay-messages">
                 {messages.length === 0 && !hasCompanionStreamItems ? (
                   <div className="overlay-empty">No recent messages.</div>
@@ -2142,7 +2191,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                         ? selectionCaptureIndicator?.status === "captured"
                           ? "Ask about the captured text"
                           : "Say something to Jeff"
-                        : "Tell me what you're working on"
+                        : "What are you working on right now?"
                   }
                   value={input}
                   onChange={(event) => {

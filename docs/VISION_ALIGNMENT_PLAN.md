@@ -634,47 +634,47 @@ but reduces the friction and makes the first-use experience require zero setup t
 get useful context.
 
 ### G1 — Make active window title immediately useful
-- [ ] In `src-tauri/src/chat.rs` (or wherever the system prompt is assembled):
+- [x] In `src-tauri/src/chat.rs` (or wherever the system prompt is assembled):
   when `active_window_context` is available (app name + document title), prepend
   it to the system prompt in a natural way:
   "The user currently has [app_name] open with [document_title]."
   This already exists per the architecture doc but verify it is live in the chat
   path, not just in the reorientation path.
-- [ ] In `src-tauri/src/proactive.rs`: the reorientation prompt should include
+- [x] In `src-tauri/src/proactive.rs`: the reorientation prompt should include
   the active window context when available. Verify this is implemented.
-- [ ] Test: open Pages with a document named "Research Paper Draft". Ask Jeff
+- [x] Test: open Pages with a document named "Research Paper Draft". Ask Jeff
   "What am I working on?" without any folder connection. Jeff should reference
   "Research Paper Draft" in its response.
 
 ### G2 — Zero-setup first message
-- [ ] In `src/Overlay.tsx`: when `activeTask` is null (first session), the input
+- [x] In `src/Overlay.tsx`: when `activeTask` is null (first session), the input
   placeholder should read: "What are you working on right now?" — not "Tell me
   what you're working on" (existing text is fine but verify it is friendly).
-- [ ] When the user sends their first message with no active task, Jeff's response
+- [x] When the user sends their first message with no active task, Jeff's response
   should be grounded in whatever active window context is available. The grounding
   system prompt should include: "The user just told you what they're working on
   for the first time. Their current document is [active_window_context if available].
   Orient yourself as a coworker who is now joining this work."
-- [ ] Do not require the user to "create a task" before chatting. The first message
+- [x] Do not require the user to "create a task" before chatting. The first message
   auto-creates a task (this already works — verify it is correct).
 
 ### G3 — Surface the "no folder connected" soft prompt clearly
-- [ ] In `src/Overlay.tsx`: when onboarding is complete, accessibility is granted
+- [x] In `src/Overlay.tsx`: when onboarding is complete, accessibility is granted
   (so Jeff can see the window title), but no workspace folder is connected, show
   a one-line soft prompt (not a blocking banner) after the first message: "Jeff
   can see [document_title] is open. Connect a folder to give Jeff full context."
   with a `connect folder` inline link that opens the folder picker.
-- [ ] This prompt fires once per session and only after the first successful message
+- [x] This prompt fires once per session and only after the first successful message
   exchange. It does not appear during onboarding or on startup.
-- [ ] The folder picker flow in `Overlay.tsx` (`handleChooseWorkspaceFolder`) already
+- [x] The folder picker flow in `Overlay.tsx` (`handleChooseWorkspaceFolder`) already
   exists — just surface an entry point here.
 
 ### G4 — Reduce the context gap for file-based work
-- [ ] In `src-tauri/src/watcher.rs`: when the user sets a workspace folder (via
+- [x] In `src-tauri/src/watcher.rs`: when the user sets a workspace folder (via
   onboarding or the companion prompt), immediately trigger a full folder scan in
   the background without requiring any user action. This already happens on
   `start_watcher` — verify the full initial scan is implemented and runs quickly.
-- [ ] The `workspace://file-indexed` event already fires per file — verify the
+- [x] The `workspace://file-indexed` event already fires per file — verify the
   companion bar shows "indexed: [filename]" for each file as the initial scan
   completes. The user should see Jeff ingesting their work in real time.
 
@@ -699,27 +699,27 @@ verification appendix with the existing technical tests, labeled clearly as
 developer-only.
 
 ### H1 — Remove terminal commands from user-facing steps
-- [ ] Replace Part 0 (Full Reset) terminal commands with instructions using:
+- [x] Replace Part 0 (Full Reset) terminal commands with instructions using:
   - System Settings for permissions
   - The "Set up Jeff again" tray menu item for re-running onboarding
   - The "Clear all Jeff data" option in the Privacy Center for full reset
   (keep a developer-only appendix with the shell commands for CI use)
-- [ ] Replace Part 1 Step 3 (`npm run tauri dev`) with instructions for the
+- [x] Replace Part 1 Step 3 (`npm run tauri dev`) with instructions for the
   production `.dmg` install. If a dev build must be used, clearly label it
   "Developer build only — non-technical users should use the .dmg."
-- [ ] Replace Part 4 Step 12 (echo to create file) with: "Open Finder. Create a
+- [x] Replace Part 4 Step 12 (echo to create file) with: "Open Finder. Create a
   new text file inside the connected folder. Write: 'My test note: the project
   deadline is next Friday.' Save it."
 
 ### H2 — Add five felt-property scenario tests
-- [ ] Add a new **Part A: Already Present** test section:
+- [x] Add a new **Part A: Already Present** test section:
   - Enable Launch at Login from tray menu.
   - Log out of macOS and log back in.
   - Expected: Jeff is in the tray within 5 seconds of login. The overlay does not
     appear unless you invoke the hotkey. No window steals focus.
   - Invoke hotkey. Expected: overlay appears in under 200ms.
 
-- [ ] Add a new **Part B: Already Knows Your Task** test section:
+- [x] Add a new **Part B: Already Knows Your Task** test section:
   - Open Pages and create a document named "My Vision Document".
   - Wait 5 seconds.
   - Open Jeff via hotkey. Expected: companion header shows "Pages — My Vision
@@ -730,7 +730,7 @@ developer-only.
     for indexed confirmation. Ask "What's in my document?" Expected: Jeff
     references actual content from the file.
 
-- [ ] Add a new **Part C: Interruption** test section:
+- [x] Add a new **Part C: Interruption** test section:
   - Send a long message (ask Jeff to write a 5-paragraph essay). Wait for TTS to
     start playing.
   - Without clicking anything, start typing a new message. Expected: TTS stops
@@ -739,7 +739,7 @@ developer-only.
   - Second test: while Jeff is speaking, press the hotkey (Cmd+Shift+J). Expected:
     TTS stops. Input is focused.
 
-- [ ] Add a new **Part D: Parallel Work** test section:
+- [x] Add a new **Part D: Parallel Work** test section:
   - Say (or type): "Draft a short intro paragraph for my task while I keep
     chatting."
   - Immediately send another message: "How's my day looking?"
@@ -750,7 +750,7 @@ developer-only.
   - Approve or reject from the companion. Expected: done. Workspace was never
     opened.
 
-- [ ] Add a new **Part E: Jeff Initiates** test section:
+- [x] Add a new **Part E: Jeff Initiates** test section:
   - Set an active task. Chat with Jeff for a minute.
   - Close the overlay and switch to another app. Work for 6 minutes.
   - Expected: A native macOS notification appears from Jeff, telling you where you
@@ -760,30 +760,30 @@ developer-only.
   - Second test: quiet mode on. Wait 6 minutes. Expected: no notification.
 
 ### H3 — Update error testing to use UI-only paths
-- [ ] Replace Step 20 (terminal keychain manipulation) with: go to tray → "Set up
+- [x] Replace Step 20 (terminal keychain manipulation) with: go to tray → "Set up
   Jeff again" → enter an invalid API key on purpose → verify error message appears.
-- [ ] Replace Step 21 (turn off WiFi while testing) with: same WiFi-off test but
+- [x] Replace Step 21 (turn off WiFi while testing) with: same WiFi-off test but
   document it as a user action, not a terminal action.
 
 ### H4 — Add a voice naturalness test
-- [ ] Add a test: ask Jeff a question via voice. While Jeff is responding via TTS,
+- [x] Add a test: ask Jeff a question via voice. While Jeff is responding via TTS,
   start typing. Expected: TTS stops. Your text appears in the input.
-- [ ] Add a test: ask Jeff a very short question. Expected: Jeff's TTS response
+- [x] Add a test: ask Jeff a very short question. Expected: Jeff's TTS response
   begins with a natural interjection ("got it," "here you go," etc.), not a filler
   phrase ("Certainly," "Of course,").
 
 ### H5 — Add a no-workspace-visit test
-- [ ] Add an explicit test step: complete a full interaction session (send 5 messages,
+- [x] Add an explicit test step: complete a full interaction session (send 5 messages,
   trigger a subtask, approve a file write, switch tasks) without ever clicking
   "open full workspace" or using the tray to open the workspace window.
-- [ ] Expected: everything works. The workspace link exists in the tray but was not
+- [x] Expected: everything works. The workspace link exists in the tray but was not
   needed.
 
 ### H6 — Label the developer appendix
-- [ ] Move all shell-command-based tests (phase check scripts, keychain manipulation,
+- [x] Move all shell-command-based tests (phase check scripts, keychain manipulation,
   process management, npm commands) to an appendix: "Developer Verification
   Appendix."
-- [ ] Label the appendix: "These steps require developer tools. They verify that
+- [x] Label the appendix: "These steps require developer tools. They verify that
   features exist in the code. Run them before a release, not as part of regular
   user testing."
 
@@ -802,8 +802,8 @@ All six sections above are complete when:
 - [x] A running subtask is visible and cancellable from the companion bar, without
   opening any other window.
 - [x] The "open full workspace" button is not visible in the companion bar.
-- [ ] The testing guide has no terminal commands in user-facing steps.
-- [ ] The testing guide has a scenario for each of the five felt properties.
-- [ ] A non-technical user can complete a 20-minute work session — chatting,
+- [x] The testing guide has no terminal commands in user-facing steps.
+- [x] The testing guide has a scenario for each of the five felt properties.
+- [x] A non-technical user can complete a 20-minute work session — chatting,
   having Jeff run parallel work, approving a write, being proactively oriented —
   without ever opening a terminal or navigating to a separate workspace window.

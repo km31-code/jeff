@@ -29,6 +29,13 @@ pub fn send_message_for_task(
         return Err(anyhow!("message cannot be empty"));
     }
 
+    // g2: detect first message before storing user turn so the joining context
+    // is injected into the system prompt for that response only.
+    let is_first_message = store
+        .list_recent_chat_messages(task_id, 1)
+        .map(|msgs| msgs.is_empty())
+        .unwrap_or(false);
+
     let user_message_kind = classify_user_message_kind(clean_message);
     store.append_chat_message(
         task_id,
@@ -49,7 +56,7 @@ pub fn send_message_for_task(
     let context_pack = build_task_context_pack(store, embeddings, task_id, clean_message)?;
     let user_prompt = build_user_prompt(clean_message, &context_pack, active_context);
 
-    let effective_system_prompt = build_system_prompt(store, active_context);
+    let effective_system_prompt = build_system_prompt(store, active_context, is_first_message);
     let assistant_response = reasoning.generate_response(&effective_system_prompt, &user_prompt)?;
     if is_cancelled() {
         return Ok(SendMessageResponseDto {
@@ -76,7 +83,13 @@ pub fn send_message_for_task(
 
 /// builds the effective system prompt, prepending active window context and user
 /// profile injection when present. profile injection is gated on the privacy setting.
-pub fn build_system_prompt(store: &TaskStore, active_context: Option<&str>) -> String {
+/// g2: when is_first_message is true, the active window context is wrapped in a
+/// coworker-joining phrase so jeff orients itself to the user's current work.
+pub fn build_system_prompt(
+    store: &TaskStore,
+    active_context: Option<&str>,
+    is_first_message: bool,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     // phase 23: profile injection (gated on privacy setting)
@@ -89,7 +102,21 @@ pub fn build_system_prompt(store: &TaskStore, active_context: Option<&str>) -> S
         }
     }
 
-    if let Some(ctx) = active_context {
+    if is_first_message {
+        // g2: inject joining context on first message so jeff treats itself as a
+        // coworker catching up, not a blank assistant being invoked cold.
+        let joining = match active_context {
+            Some(ctx) if !ctx.is_empty() => format!(
+                "The user just told you what they're working on for the first time. \
+                 Their current document is: {ctx}. \
+                 Orient yourself as a coworker who is now joining this work."
+            ),
+            _ => "The user just told you what they're working on for the first time. \
+                  Orient yourself as a coworker who is now joining this work."
+                .to_string(),
+        };
+        parts.push(joining);
+    } else if let Some(ctx) = active_context {
         if !ctx.is_empty() {
             parts.push(ctx.to_string());
         }

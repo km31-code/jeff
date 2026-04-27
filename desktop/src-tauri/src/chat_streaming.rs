@@ -149,6 +149,14 @@ pub async fn start_streaming_turn(
         return Err(anyhow::anyhow!("message cannot be empty"));
     }
 
+    // g2: detect first message before appending user turn so the joining
+    // context lands in the system prompt for exactly that one response.
+    let is_first_message = state
+        .store
+        .list_recent_chat_messages(task_id, 1)
+        .map(|msgs| msgs.is_empty())
+        .unwrap_or(false);
+
     // 1. append user message synchronously (fast sqlite write).
     let user_kind = classify_user_message_kind(&clean);
     state
@@ -190,6 +198,7 @@ pub async fn start_streaming_turn(
         registry,
         active_context,
         tts_voice,
+        is_first_message,
     ));
 
     Ok(())
@@ -207,6 +216,7 @@ async fn run_llm_stream<R: Runtime + 'static>(
     registry: SharedRegistry,
     active_context: Option<String>,
     tts_voice: String,
+    is_first_message: bool,
 ) {
     let turn_start = Instant::now();
     let turn_id = token.turn_id.clone();
@@ -278,7 +288,7 @@ async fn run_llm_stream<R: Runtime + 'static>(
     let user_prompt = build_user_prompt(&message, &context_pack, active_context.as_deref());
 
     // phase 20/23: prepend active window context and user profile to system prompt.
-    let effective_system_prompt = build_system_prompt(&store, active_context.as_deref());
+    let effective_system_prompt = build_system_prompt(&store, active_context.as_deref(), is_first_message);
 
     // open the streaming LLM channel.
     let mut rx = match reasoning.stream_response(
