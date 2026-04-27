@@ -662,10 +662,19 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     // d2: hotkey pressed while overlay is visible — barge-in or hide.
     unsubscribers.push(
       listen<{ overlay_visible: boolean }>("ambient://hotkey-pressed", () => {
-        if (ttsActiveTurnIdRef.current !== null) {
+        if (ttsActiveTurnIdRef.current !== null || streamingTurnIdRef.current !== null) {
           stopStreamingTtsPlayback();
           setTtsBargeInHintDismissed(true);
           setTtsActivePlaying(false);
+          const activeTurnId = streamingTurnIdRef.current;
+          if (activeTurnId) {
+            streamingTurnIdRef.current = null;
+            setStreamingTurnId(null);
+            setStreamingText("");
+            setSending(false);
+            cancelStreamingTurn(activeTurnId, "user_barge_in").catch(() => undefined);
+            setTrayStatus("idle").catch(() => undefined);
+          }
           messageInputRef.current?.focus();
         } else {
           void hideOverlay();
@@ -682,12 +691,21 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   // d1: global keydown listener — stop tts on first printable keystroke.
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (ttsActiveTurnIdRef.current === null) return;
+      if (ttsActiveTurnIdRef.current === null && streamingTurnIdRef.current === null) return;
       if (event.key.length !== 1) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       stopStreamingTtsPlayback();
       setTtsActivePlaying(false);
       setTtsBargeInHintDismissed(true);
+      const activeTurnId = streamingTurnIdRef.current;
+      if (activeTurnId) {
+        streamingTurnIdRef.current = null;
+        setStreamingTurnId(null);
+        setStreamingText("");
+        setSending(false);
+        cancelStreamingTurn(activeTurnId, "user_barge_in").catch(() => undefined);
+        setTrayStatus("idle").catch(() => undefined);
+      }
       messageInputRef.current?.focus();
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -1329,12 +1347,18 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     setTtsActivePlaying(false);
   }
 
-  // barge-in: stop tts and cancel any in-flight streaming turn.
+  // barge-in: stop tts, synchronously unlock input, cancel any in-flight streaming turn.
   async function stopAndBargeIn() {
     stopStreamingTtsPlayback();
     stopPartialStt();
+    setTtsActivePlaying(false);
+    setTtsBargeInHintDismissed(true);
     const activeTurnId = streamingTurnIdRef.current;
     if (activeTurnId) {
+      streamingTurnIdRef.current = null;
+      setStreamingTurnId(null);
+      setStreamingText("");
+      setSending(false);
       await cancelStreamingTurn(activeTurnId, "user_barge_in").catch(() => undefined);
     }
     await setTrayStatus("idle").catch(() => undefined);
@@ -1434,7 +1458,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   }, [refreshMessages]);
 
   const handleStartVoiceRecording = useCallback(async () => {
-    if (recording || sending) return;
+    if (recording) return;
     setErrorMessage(null);
     // if jeff is speaking or streaming, barge in first.
     await stopAndBargeIn();
@@ -1469,7 +1493,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
       void error;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recording, sending]);
+  }, [recording]);
 
   const handleStopVoiceRecording = useCallback(() => {
     stopPartialStt();
@@ -1989,7 +2013,9 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                   <span>
                     {activeContext?.document_title
                       ? `Jeff can see ${activeContext.document_title} is open.`
-                      : "Jeff sees your active window."}{" "}
+                      : accessibilityPermissionGranted
+                        ? "Jeff sees your active window."
+                        : ""}{" "}
                     <button
                       type="button"
                       className="overlay-inline-link"

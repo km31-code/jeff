@@ -45,6 +45,9 @@ pub const APP_SETTING_PRIVACY_SELECTION_CAPTURE_ENABLED: &str = "privacy_selecti
 pub const APP_SETTING_PRIVACY_TYPING_ACTIVITY_ENABLED: &str = "privacy_typing_activity_enabled";
 pub const APP_SETTING_TTS_VOICE: &str = "tts_voice";
 
+// prefix for per-task last reorientation summary (key = prefix + task_id)
+const LAST_REORIENTATION_SUMMARY_PREFIX: &str = "last_reorientation_summary:";
+
 #[derive(Debug, Clone)]
 pub struct StorePaths {
     pub db_path: PathBuf,
@@ -2767,6 +2770,18 @@ impl TaskStore {
         let normalized = crate::voice_naturalness::normalize_tts_voice(voice);
         self.set_app_setting(APP_SETTING_TTS_VOICE, &normalized)?;
         Ok(normalized)
+    }
+
+    // last reorientation summary — stored when a notification fires so the
+    // frontend can retrieve it on notification click even after cooldown resets.
+    pub fn get_last_reorientation_summary(&self, task_id: i64) -> Result<Option<String>> {
+        let key = format!("{}{}", LAST_REORIENTATION_SUMMARY_PREFIX, task_id);
+        self.get_app_setting(&key)
+    }
+
+    pub fn set_last_reorientation_summary(&self, task_id: i64, summary: &str) -> Result<()> {
+        let key = format!("{}{}", LAST_REORIENTATION_SUMMARY_PREFIX, task_id);
+        self.set_app_setting(&key, summary)
     }
 
     // returns true if this is NOT the first ever session (session_restored_at is set).

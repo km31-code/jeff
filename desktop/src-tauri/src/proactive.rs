@@ -183,9 +183,16 @@ pub fn generate_reorientation(
     if let Some(last_trigger) = store.get_last_proactive_trigger(task_id, "resume")? {
         if seconds_since(&last_trigger) < REORIENTATION_COOLDOWN_SECONDS {
             let _ = store.record_proactive_trigger(task_id, "resume", true);
+            // return the last stored summary so notification-click can display
+            // the content that was already generated rather than showing nothing.
+            let cached = store
+                .get_last_reorientation_summary(task_id)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             return Ok(ReorientationDto {
                 task_id,
-                summary: String::new(),
+                summary: cached,
                 fired_at,
             });
         }
@@ -526,6 +533,9 @@ async fn check_reorientation_from_background<R: Runtime>(
             }),
         );
     } else {
+        // persist summary so trigger_task_resume can return it on notification click
+        // even after the cooldown has been recorded.
+        let _ = jeff.store.set_last_reorientation_summary(task_id, &reorientation.summary);
         let _ = crate::ambient::dispatch_notification(
             handle,
             NotificationPayload {
