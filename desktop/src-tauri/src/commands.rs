@@ -139,7 +139,10 @@ pub fn set_active_task<R: Runtime>(
         eprintln!("[jeff watcher] failed to sync watcher for active task {task_id}: {err}");
     }
 
-    let _ = app.emit("task://active-changed", serde_json::json!({ "task_id": task.id }));
+    let _ = app.emit(
+        "task://active-changed",
+        serde_json::json!({ "task_id": task.id }),
+    );
 
     Ok(task)
 }
@@ -452,8 +455,7 @@ fn is_window_visible<R: Runtime>(app: &AppHandle<R>, label: &str) -> bool {
 
 fn should_notify_when_backgrounded<R: Runtime>(app: &AppHandle<R>) -> bool {
     let overlay_visible = is_window_visible(app, ambient::OVERLAY_WINDOW_LABEL);
-    let main_visible = is_window_visible(app, ambient::MAIN_WINDOW_LABEL);
-    !(overlay_visible || main_visible)
+    !overlay_visible
 }
 
 fn compact_notification_body(content: &str, max_chars: usize) -> String {
@@ -2348,7 +2350,10 @@ pub fn switch_active_task_from_companion<R: Runtime>(
         );
     }
 
-    let _ = app.emit("task://active-changed", serde_json::json!({ "task_id": new_task.id }));
+    let _ = app.emit(
+        "task://active-changed",
+        serde_json::json!({ "task_id": new_task.id }),
+    );
 
     Ok(new_task)
 }

@@ -182,6 +182,7 @@ afterEach(() => {
   invokeMock.mockReset();
   streamingEnabled = false;
   eventHandlers.clear();
+  window.localStorage.removeItem("jeff_show_debug_panels");
 });
 
 function setupInvokeMock(options?: {
@@ -1919,6 +1920,7 @@ describe("App", () => {
       await userEvent.click(screen.getByTestId("continue-task-button"));
       await screen.findByTestId("workspace-screen");
       await userEvent.click(screen.getByTestId("toggle-full-workspace"));
+      await userEvent.click(screen.getByTestId("debug-panels-toggle"));
 
       await userEvent.click(screen.getByTestId("suggestion-accept-1"));
       expect(await screen.findByTestId("action-center-revisions-list")).toHaveTextContent("#1");

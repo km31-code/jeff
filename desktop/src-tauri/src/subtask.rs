@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        mpsc, Arc, Mutex,
     },
     thread,
 };
@@ -14,14 +14,30 @@ use crate::{
     embedding::EmbeddingProvider,
     message_kind::MessageKind,
     models::{
-        RetrievedChunkDto, RevisionProposalResultDto, RevisionTargetDto, SubTaskDto,
-        SubTaskStepDto, SubTaskSuggestionDto,
+        FileWriteProposalDto, RetrievedChunkDto, RevisionProposalResultDto, RevisionTargetDto,
+        SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto,
     },
     reasoning::ReasoningProvider,
     retrieval::{build_task_context_pack, retrieve_relevant_chunks},
     revision::propose_artifact_revision,
     store::{NewSubTaskInput, TaskStore},
 };
+
+// e1: companion events emitted by background subtask chain threads via sync channel.
+// main.rs wires a relay thread that forwards them to the frontend via AppHandle::emit.
+pub enum CompanionEvent {
+    Started {
+        subtask_id: i64,
+        task_id: i64,
+        title: String,
+    },
+    Complete {
+        subtask_id: i64,
+        task_id: i64,
+        final_status: String,
+    },
+    WriteProposal(FileWriteProposalDto),
+}
 
 const SUBTASK_SYSTEM_PROMPT: &str = "You are Jeff's bounded subtask executor. Complete exactly one controlled subtask using ONLY provided context. Never claim external research. Return strict JSON with keys: result_summary (string), result_payload (string), grounding_notes (string), confidence (number 0..1).";
 
@@ -64,9 +80,10 @@ pub struct SubTaskContextSnapshot {
     pub retrieved_chunks: Vec<RetrievedChunkDto>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SubTaskRunner {
     cancellation_flags: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
+    companion_tx: Arc<Mutex<Option<mpsc::SyncSender<CompanionEvent>>>>,
 }
 
 impl Default for SubTaskRunner {
@@ -79,7 +96,19 @@ impl SubTaskRunner {
     pub fn new() -> Self {
         Self {
             cancellation_flags: Arc::new(Mutex::new(HashMap::new())),
+            companion_tx: Arc::new(Mutex::new(None)),
         }
+    }
+
+    // e1: called once from main.rs setup to wire the companion event relay.
+    pub fn set_companion_notify(&self, tx: mpsc::SyncSender<CompanionEvent>) {
+        if let Ok(mut guard) = self.companion_tx.lock() {
+            *guard = Some(tx);
+        }
+    }
+
+    fn clone_companion_tx(&self) -> Option<mpsc::SyncSender<CompanionEvent>> {
+        self.companion_tx.lock().ok().and_then(|g| g.clone())
     }
 
     pub fn start_subtask(
@@ -148,6 +177,8 @@ impl SubTaskRunner {
         }
 
         let flags_ref = Arc::clone(&self.cancellation_flags);
+        // e1: clone sender before move; None if relay not yet wired (e.g. in tests).
+        let companion_sender = self.clone_companion_tx();
         thread::spawn(move || {
             let run_result = run_subtask_chain(
                 &store,
@@ -155,9 +186,20 @@ impl SubTaskRunner {
                 embeddings.as_ref(),
                 subtask_id,
                 &cancel_token,
+                companion_sender.as_ref(),
             );
             if let Err(error) = run_result {
                 let _ = mark_subtask_failed(&store, subtask_id, &error.to_string());
+                // e1: send failed event when chain errors out unexpectedly.
+                if let Some(tx) = &companion_sender {
+                    if let Ok(Some(s)) = store.get_subtask_by_id(subtask_id) {
+                        let _ = tx.try_send(CompanionEvent::Complete {
+                            subtask_id,
+                            task_id: s.task_id,
+                            final_status: "failed".to_string(),
+                        });
+                    }
+                }
             }
             if let Ok(mut flags) = flags_ref.lock() {
                 flags.remove(&subtask_id);
@@ -699,12 +741,19 @@ fn mark_subtask_failed(store: &TaskStore, subtask_id: i64, error_message: &str) 
 
 // phase 16: multi-step chain executor
 
+fn companion_send(tx: Option<&mpsc::SyncSender<CompanionEvent>>, event: CompanionEvent) {
+    if let Some(t) = tx {
+        let _ = t.try_send(event);
+    }
+}
+
 fn run_subtask_chain(
     store: &TaskStore,
     reasoning: &dyn ReasoningProvider,
     embeddings: &dyn EmbeddingProvider,
     subtask_id: i64,
     cancel_token: &AtomicBool,
+    companion_tx: Option<&mpsc::SyncSender<CompanionEvent>>,
 ) -> Result<()> {
     let subtask = store
         .get_subtask_by_id(subtask_id)?
@@ -718,6 +767,16 @@ fn run_subtask_chain(
         store.transition_subtask_status(subtask_id, "running", None, None, None)?;
     }
 
+    // e1: emit started after transitioning to running so the companion indicator appears.
+    companion_send(
+        companion_tx,
+        CompanionEvent::Started {
+            subtask_id,
+            task_id: subtask.task_id,
+            title: subtask.title.clone(),
+        },
+    );
+
     if cancel_token.load(Ordering::SeqCst) {
         let _ = store.transition_subtask_status(
             subtask_id,
@@ -725,6 +784,15 @@ fn run_subtask_chain(
             None,
             None,
             Some("cancelled_by_user"),
+        );
+        // e1: emit complete so the companion indicator clears.
+        companion_send(
+            companion_tx,
+            CompanionEvent::Complete {
+                subtask_id,
+                task_id: subtask.task_id,
+                final_status: "cancelled".to_string(),
+            },
         );
         return Ok(());
     }
@@ -827,6 +895,15 @@ fn run_subtask_chain(
                 None,
                 Some("cancelled_by_user"),
             );
+            // e1: companion indicator must clear on mid-step cancellation.
+            companion_send(
+                companion_tx,
+                CompanionEvent::Complete {
+                    subtask_id,
+                    task_id: subtask.task_id,
+                    final_status: "cancelled".to_string(),
+                },
+            );
             return Ok(());
         }
 
@@ -841,6 +918,7 @@ fn run_subtask_chain(
             step,
             &prior_payloads,
             cancel_token,
+            companion_tx,
         );
 
         match step_result {
@@ -895,6 +973,16 @@ fn run_subtask_chain(
         ),
     )?;
 
+    // e1: emit complete so the companion indicator clears.
+    companion_send(
+        companion_tx,
+        CompanionEvent::Complete {
+            subtask_id: completed.subtask_id,
+            task_id: completed.task_id,
+            final_status: "completed".to_string(),
+        },
+    );
+
     Ok(())
 }
 
@@ -906,6 +994,7 @@ fn execute_chain_step(
     step: &SubTaskStepDto,
     prior_payloads: &[String],
     cancel_token: &AtomicBool,
+    companion_tx: Option<&mpsc::SyncSender<CompanionEvent>>,
 ) -> Result<String> {
     if cancel_token.load(Ordering::SeqCst) {
         return Err(anyhow!("cancelled before step execution"));
@@ -953,6 +1042,12 @@ fn execute_chain_step(
                 &proposed_path,
                 &content,
             )?;
+            // e1: notify companion so the approval card appears without requiring
+            // the user to open the workspace.
+            companion_send(
+                companion_tx,
+                CompanionEvent::WriteProposal(proposal.clone()),
+            );
             Ok(format!("proposal_id:{}", proposal.id))
         }
 

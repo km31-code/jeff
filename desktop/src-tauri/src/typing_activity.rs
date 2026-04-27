@@ -92,7 +92,11 @@ impl TypingActivityState {
     }
 
     pub fn last_error(&self) -> Option<String> {
-        self.inner.last_error.lock().ok().and_then(|guard| guard.clone())
+        self.inner
+            .last_error
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     fn note_keydown_at(&self, instant: Instant) {

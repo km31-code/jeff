@@ -36,7 +36,7 @@ mod watcher;
 mod workload;
 mod workspace;
 
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use ambient::AmbientState;
 use providers::VoiceProvider;
@@ -85,10 +85,7 @@ fn main() {
                             } else {
                                 let _ = ambient::show_overlay_interactive(app);
                             }
-                        } else if ambient::shortcut_matches(
-                            shortcut,
-                            ambient::MIC_SHORTCUT,
-                        ) {
+                        } else if ambient::shortcut_matches(shortcut, ambient::MIC_SHORTCUT) {
                             // d3: mic shortcut — frontend toggles mic on/off.
                             let _ = app.emit("ambient://mic-shortcut", serde_json::json!({}));
                         } else if ambient::shortcut_matches(
@@ -159,6 +156,50 @@ fn main() {
                         );
                     },
                 ));
+            }
+            {
+                let (companion_tx, companion_rx) =
+                    mpsc::sync_channel::<subtask::CompanionEvent>(64);
+                jeff_state.subtasks.set_companion_notify(companion_tx);
+                let emit_app = app.handle().clone();
+                std::thread::spawn(move || {
+                    while let Ok(event) = companion_rx.recv() {
+                        match event {
+                            subtask::CompanionEvent::Started {
+                                subtask_id,
+                                task_id,
+                                title,
+                            } => {
+                                let _ = emit_app.emit(
+                                    "subtask://companion-started",
+                                    serde_json::json!({
+                                        "subtask_id": subtask_id,
+                                        "task_id": task_id,
+                                        "title": title,
+                                    }),
+                                );
+                            }
+                            subtask::CompanionEvent::Complete {
+                                subtask_id,
+                                task_id,
+                                final_status,
+                            } => {
+                                let _ = emit_app.emit(
+                                    "subtask://companion-complete",
+                                    serde_json::json!({
+                                        "subtask_id": subtask_id,
+                                        "task_id": task_id,
+                                        "final_status": final_status,
+                                    }),
+                                );
+                            }
+                            subtask::CompanionEvent::WriteProposal(proposal) => {
+                                let _ =
+                                    emit_app.emit("subtask://companion-write-proposal", proposal);
+                            }
+                        }
+                    }
+                });
             }
             app.manage(jeff_state);
             app.manage(ambient_state);

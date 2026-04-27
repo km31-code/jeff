@@ -31,11 +31,14 @@ import {
   ActiveWindowContextDto,
   ApiKeyValidationDto,
   ChatMessageDto,
+  FileWriteProposalDto,
   OnboardingStatusDto,
   SelectionCaptureIndicatorDto,
   TaskDto,
   WatcherStatusDto,
+  approveSubtaskFileWrite,
   acceptSubtaskResult,
+  cancelSubtask,
   cancelStreamingTurn,
   clearPreferredWorkspaceFolder,
   completeOnboarding,
@@ -47,10 +50,13 @@ import {
   getOnboardingStatus,
   getSelectionCaptureIndicator,
   getWatcherStatus,
+  listFileWriteProposals,
+  listSubtasks,
   listTasks,
   listMessages,
   recordTaskFocus,
   rejectSubtaskResult,
+  rejectSubtaskFileWrite,
   requestAccessibilityPermission,
   sendMessage,
   sendMessageStreaming,
@@ -88,6 +94,39 @@ async function blobToBase64(blob: Blob): Promise<string> {
 type PendingNotificationContext = { kind: string | null; id: number | null };
 type OnboardingStep = 1 | 2 | 3 | 4 | 5;
 type OverlayShownPayload = { interactive?: boolean };
+type ActiveSubtaskState = { id: number; taskId: number; title: string };
+type CompanionStartedPayload = { subtask_id: number; task_id: number; title: string };
+type CompanionCompletePayload = { subtask_id: number; task_id: number; final_status: string };
+type SpeculativeSubtaskState = { subtask_id: number; title: string; description?: string | null };
+type WriteConfirmation = { id: number; fileName: string };
+
+const WRITE_CONFIRMATION_MS = 3500;
+
+function normalizePath(path: string): string {
+  return path.replace(/\\/g, "/");
+}
+
+function fileNameFromPath(path: string): string {
+  const normalized = normalizePath(path);
+  return normalized.split("/").filter(Boolean).pop() ?? normalized;
+}
+
+function displayProposalPath(path: string): string {
+  const normalized = normalizePath(path);
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length <= 2) {
+    return normalized;
+  }
+  return parts.slice(-2).join("/");
+}
+
+function proposalExcerpt(content: string): string {
+  const compact = content.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return "(empty file)";
+  }
+  return compact.length > 80 ? `${compact.slice(0, 77)}...` : compact;
+}
 
 interface SpeechRecognitionEvent extends Event {
   resultIndex: number;
@@ -162,6 +201,9 @@ interface OverlayProps {
 }
 
 export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element {
+  // Root still wires this prop for the tray-driven workspace path, but the
+  // companion no longer exposes workspace navigation as a primary action.
+  void onOpenWorkspace;
   const [ambient, setAmbient] = useState<AmbientStateDto | null>(null);
   const [mode, setMode] = useState<OverlayMode>("collapsed");
   const [activeTask, setActiveTaskState] = useState<TaskDto | null>(null);
@@ -194,6 +236,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   const [activeContext, setActiveContext] = useState<ActiveWindowContextDto | null>(null);
   const [docSwitchBanner, setDocSwitchBanner] = useState<{ app_name: string; document_title: string } | null>(null);
   const [tasks, setTasks] = useState<TaskDto[]>([]);
+  const [taskSwitcherOpen, setTaskSwitcherOpen] = useState(false);
   const [accessibilityPermissionGranted, setAccessibilityPermissionGranted] = useState<boolean | null>(null);
   const [accessibilityPromptDismissed, setAccessibilityPromptDismissed] = useState(false);
   const docSwitchTimerRef = useRef<number | null>(null);
@@ -208,6 +251,10 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   // brief "just indexed" confirmation shown when the watcher ingests a new file.
   const [fileIndexedNotice, setFileIndexedNotice] = useState<string | null>(null);
   const fileIndexedTimerRef = useRef<number | null>(null);
+  const [activeSubtask, setActiveSubtask] = useState<ActiveSubtaskState | null>(null);
+  const [pendingWriteProposals, setPendingWriteProposals] = useState<FileWriteProposalDto[]>([]);
+  const [writeConfirmations, setWriteConfirmations] = useState<WriteConfirmation[]>([]);
+  const writeConfirmationTimersRef = useRef<Map<number, number>>(new Map());
 
   // phase 15: reorientation banner shown when user returns to a task after 5+
   // minutes away. auto-dismisses after 8 seconds.
@@ -216,7 +263,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
 
   // c3: proactive event banners from background monitor
   const [driftBanner, setDriftBanner] = useState<string | null>(null);
-  const [speculativeSubtask, setSpeculativeSubtask] = useState<{ subtask_id: number; title: string } | null>(null);
+  const [speculativeSubtask, setSpeculativeSubtask] = useState<SpeculativeSubtaskState | null>(null);
   // d1: track whether tts audio is currently playing for the barge-in hint
   const [ttsActivePlaying, setTtsActivePlaying] = useState(false);
   const [ttsBargeInHintDismissed, setTtsBargeInHintDismissed] = useState(false);
@@ -236,6 +283,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     () => tasks.filter((task) => !activeTask || task.id !== activeTask.id).slice(0, 3),
     [activeTask, tasks]
   );
+  const taskSwitcherTasks = useMemo(() => tasks.slice(0, 5), [tasks]);
   const streamingTurnIdRef = useRef<string | null>(null);
   const pendingExpandRef = useRef(false);
   const onboardingSnoozedRef = useRef(false);
@@ -260,7 +308,21 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
-  }, [messages, streamingTurnId, streamingText]);
+  }, [
+    messages,
+    pendingWriteProposals.length,
+    speculativeSubtask,
+    streamingText,
+    streamingTurnId,
+    writeConfirmations.length
+  ]);
+
+  useEffect(() => {
+    return () => {
+      writeConfirmationTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+      writeConfirmationTimersRef.current.clear();
+    };
+  }, []);
 
   const refreshAmbient = useCallback(async () => {
     try {
@@ -286,6 +348,22 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     }
   }, []);
 
+  const refreshCompanionWork = useCallback(async (taskId: number) => {
+    const [subtaskList, proposals] = await Promise.all([
+      listSubtasks(taskId).catch(() => []),
+      listFileWriteProposals(taskId).catch(() => [])
+    ]);
+    const running = subtaskList.find((subtask) => subtask.status === "running") ?? null;
+    setActiveSubtask(
+      running
+        ? { id: running.subtask_id, taskId: running.task_id, title: running.title }
+        : null
+    );
+    setPendingWriteProposals(
+      proposals.filter((proposal) => proposal.status === "pending_approval")
+    );
+  }, []);
+
   const refreshActiveTask = useCallback(async () => {
     try {
       const task = await getActiveTask();
@@ -293,13 +371,17 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
       setTasks(await listTasks().catch(() => []));
       if (task) {
         await refreshMessages(task.id);
+        await refreshCompanionWork(task.id);
       } else {
         setMessages([]);
+        setActiveSubtask(null);
+        setPendingWriteProposals([]);
+        setWriteConfirmations([]);
       }
     } catch (error) {
       setErrorMessage(String(error));
     }
-  }, [refreshMessages]);
+  }, [refreshCompanionWork, refreshMessages]);
 
   const openOnboardingWizard = useCallback(
     async (step: OnboardingStep) => {
@@ -504,12 +586,59 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
 
     // c3: speculative subtask started by background monitor.
     unsubscribers.push(
-      listen<{ subtask_id: number; task_id: number; title: string }>(
+      listen<{ subtask_id: number; task_id: number; title: string; description?: string | null }>(
         "proactive://speculative_subtask",
         (event) => {
-          setSpeculativeSubtask({ subtask_id: event.payload.subtask_id, title: event.payload.title });
+          const active = activeTaskRef.current;
+          if (active && active.id !== event.payload.task_id) return;
+          setSpeculativeSubtask({
+            subtask_id: event.payload.subtask_id,
+            title: event.payload.title,
+            description: event.payload.description ?? null
+          });
         }
       )
+    );
+
+    unsubscribers.push(
+      listen<CompanionStartedPayload>("subtask://companion-started", (event) => {
+        const active = activeTaskRef.current;
+        if (active && active.id !== event.payload.task_id) return;
+        setActiveSubtask({
+          id: event.payload.subtask_id,
+          taskId: event.payload.task_id,
+          title: event.payload.title || "background task"
+        });
+      })
+    );
+
+    unsubscribers.push(
+      listen<CompanionCompletePayload>("subtask://companion-complete", (event) => {
+        const active = activeTaskRef.current;
+        if (active && active.id !== event.payload.task_id) return;
+        setActiveSubtask((current) =>
+          current?.id === event.payload.subtask_id ? null : current
+        );
+        void refreshCompanionWork(event.payload.task_id).catch(() => undefined);
+      })
+    );
+
+    unsubscribers.push(
+      listen<FileWriteProposalDto>("subtask://companion-write-proposal", (event) => {
+        const active = activeTaskRef.current;
+        const proposal = event.payload;
+        if (active && active.id !== proposal.task_id) return;
+        if (proposal.status !== "pending_approval") return;
+        setPendingWriteProposals((current) => {
+          const exists = current.some((item) => item.id === proposal.id);
+          if (exists) {
+            return current.map((item) => (item.id === proposal.id ? proposal : item));
+          }
+          return [...current, proposal];
+        });
+        setMode("expanded");
+        void setOverlayMode("expanded").catch(() => undefined);
+      })
     );
 
     // d2: hotkey pressed while overlay is visible — barge-in or hide.
@@ -830,10 +959,6 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     }
   }, []);
 
-  const handleOpenWorkspace = useCallback(() => {
-    onOpenWorkspace();
-  }, [onOpenWorkspace]);
-
   const handleQuietToggle = useCallback(async () => {
     if (!ambient) return;
     try {
@@ -867,12 +992,14 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
         activeTaskRef.current = next;
         setTasks(await listTasks().catch(() => []));
         await refreshMessages(next.id);
+        await refreshCompanionWork(next.id);
+        setTaskSwitcherOpen(false);
         setDocSwitchBanner(null);
       } catch (error) {
         setErrorMessage(String(error));
       }
     },
-    [refreshMessages]
+    [refreshCompanionWork, refreshMessages]
   );
 
   const handleStartTaskFromDocumentTitle = useCallback(async (documentTitle: string) => {
@@ -885,11 +1012,62 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
       activeTaskRef.current = next;
       setTasks(await listTasks().catch(() => []));
       await refreshMessages(next.id);
+      await refreshCompanionWork(next.id);
       setDocSwitchBanner(null);
     } catch (error) {
       setErrorMessage(String(error));
     }
-  }, [refreshMessages]);
+  }, [refreshCompanionWork, refreshMessages]);
+
+  const handleCancelActiveSubtask = useCallback(async () => {
+    if (!activeSubtask) return;
+    setErrorMessage(null);
+    try {
+      await cancelSubtask(activeSubtask.id);
+      setActiveSubtask(null);
+      await refreshCompanionWork(activeSubtask.taskId);
+    } catch (error) {
+      setErrorMessage(String(error));
+    }
+  }, [activeSubtask, refreshCompanionWork]);
+
+  const showWriteConfirmation = useCallback((fileName: string) => {
+    const id = Date.now();
+    setWriteConfirmations((current) => [...current, { id, fileName }].slice(-3));
+    const timerId = window.setTimeout(() => {
+      setWriteConfirmations((current) => current.filter((item) => item.id !== id));
+      writeConfirmationTimersRef.current.delete(id);
+    }, WRITE_CONFIRMATION_MS);
+    writeConfirmationTimersRef.current.set(id, timerId);
+  }, []);
+
+  const handleApproveWriteProposal = useCallback(
+    async (proposal: FileWriteProposalDto) => {
+      setErrorMessage(null);
+      try {
+        await approveSubtaskFileWrite(proposal.task_id, proposal.id);
+        setPendingWriteProposals((current) =>
+          current.filter((item) => item.id !== proposal.id)
+        );
+        showWriteConfirmation(fileNameFromPath(proposal.proposed_path));
+      } catch (error) {
+        setErrorMessage(String(error));
+      }
+    },
+    [showWriteConfirmation]
+  );
+
+  const handleRejectWriteProposal = useCallback(async (proposal: FileWriteProposalDto) => {
+    setErrorMessage(null);
+    try {
+      await rejectSubtaskFileWrite(proposal.task_id, proposal.id);
+      setPendingWriteProposals((current) =>
+        current.filter((item) => item.id !== proposal.id)
+      );
+    } catch (error) {
+      setErrorMessage(String(error));
+    }
+  }, []);
 
   const handleSubmit = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
@@ -908,6 +1086,8 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
           task = await setActiveTask(created.id).catch(() => created);
           setActiveTaskState(task);
           activeTaskRef.current = task;
+          setTasks(await listTasks().catch(() => []));
+          await refreshCompanionWork(task.id);
         }
 
         await setTrayStatus("working").catch(() => undefined);
@@ -941,7 +1121,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
         }
       }
     },
-    [activeTask, input, refreshMessages, sending]
+    [activeTask, input, refreshCompanionWork, refreshMessages, sending]
   );
 
   const ackNotificationContext = useCallback(async () => {
@@ -1319,6 +1499,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
         setActiveTaskState(task);
         activeTaskRef.current = task;
         setTasks(await listTasks().catch(() => []));
+        await refreshCompanionWork(task.id);
       }
 
       await submitVoiceMessage(task.id, text);
@@ -1331,7 +1512,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
       mediaStreamRef.current = null;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshMessages, submitVoiceMessage]);
+  }, [refreshCompanionWork, refreshMessages, submitVoiceMessage]);
 
   const handleDismissSelectionCapture = useCallback(async () => {
     try {
@@ -1362,6 +1543,11 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   );
 
   const statusLabel = ambient ? describeStatus(ambient.tray_status) : "idle";
+  const hasCompanionStreamItems =
+    pendingWriteProposals.length > 0 ||
+    writeConfirmations.length > 0 ||
+    speculativeSubtask !== null ||
+    streamingTurnId !== null;
 
   return (
     <div
@@ -1425,16 +1611,48 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
       {mode === "expanded" ? (
         <div className="overlay-expanded">
           <div className="overlay-task-row">
-            <div className="overlay-task-label">
-              {activeTask ? activeTask.title : "No active task"}
+            <div className="overlay-task-switcher">
+              <div className="overlay-task-label-row">
+                <span className="overlay-task-label">
+                  {activeTask ? activeTask.title : "No active task"}
+                </span>
+                {tasks.length > 1 ? (
+                  <button
+                    type="button"
+                    className="overlay-task-menu-button"
+                    aria-label="switch task"
+                    aria-expanded={taskSwitcherOpen}
+                    onClick={() => setTaskSwitcherOpen((current) => !current)}
+                    data-testid="overlay-task-switcher"
+                  >
+                    &middot;
+                  </button>
+                ) : null}
+              </div>
+              {taskSwitcherOpen ? (
+                <div className="overlay-task-menu" data-testid="overlay-task-menu">
+                  {taskSwitcherTasks.map((task) => (
+                    <button
+                      key={task.id}
+                      type="button"
+                      className="overlay-task-menu-item"
+                      onClick={() => void handleSwitchTask(task.id)}
+                      data-testid={`overlay-task-option-${task.id}`}
+                    >
+                      <span
+                        className={
+                          activeTask?.id === task.id
+                            ? "overlay-task-active-dot"
+                            : "overlay-task-empty-dot"
+                        }
+                        aria-hidden
+                      />
+                      <span>{task.title}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
             </div>
-            <button
-              type="button"
-              className="overlay-workspace-link"
-              onClick={handleOpenWorkspace}
-            >
-              open full workspace
-            </button>
           </div>
 
           {activeContext && activeContext.document_title ? (
@@ -1460,6 +1678,23 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
               ) : (
                 <span className="overlay-watcher-idle">no folder connected</span>
               )}
+            </div>
+          ) : null}
+
+          {activeTask && activeSubtask ? (
+            <div className="overlay-subtask-line" data-testid="overlay-active-subtask">
+              <span className="overlay-subtask-spinner" aria-hidden />
+              <span className="overlay-subtask-label">
+                jeff is working on: <strong>{activeSubtask.title}</strong>
+              </span>
+              <button
+                type="button"
+                className="overlay-subtask-cancel"
+                onClick={() => void handleCancelActiveSubtask()}
+                data-testid="overlay-cancel-subtask"
+              >
+                cancel
+              </button>
             </div>
           ) : null}
 
@@ -1731,7 +1966,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
               ) : null}
 
               <div className="overlay-messages" data-testid="overlay-messages">
-                {messages.length === 0 ? (
+                {messages.length === 0 && !hasCompanionStreamItems ? (
                   <div className="overlay-empty">No recent messages.</div>
                 ) : (
                   messages.map((message) => (
@@ -1746,11 +1981,84 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                     </div>
                   ))
                 )}
+                {pendingWriteProposals.map((proposal) => (
+                  <div
+                    key={proposal.id}
+                    className="overlay-message overlay-message-assistant overlay-write-card"
+                    data-testid="overlay-file-write-proposal"
+                  >
+                    <div className="overlay-message-role">jeff</div>
+                    <div className="overlay-message-body">
+                      <span className="overlay-write-card-kicker">file write approval</span>
+                      <strong className="overlay-write-path">
+                        {displayProposalPath(proposal.proposed_path)}
+                      </strong>
+                      <pre className="overlay-write-excerpt">
+                        + {proposalExcerpt(proposal.proposed_content)}
+                      </pre>
+                    </div>
+                    <div className="overlay-write-actions">
+                      <button
+                        type="button"
+                        className="overlay-write-approve"
+                        onClick={() => void handleApproveWriteProposal(proposal)}
+                        data-testid={`overlay-file-write-approve-${proposal.id}`}
+                      >
+                        approve
+                      </button>
+                      <button
+                        type="button"
+                        className="overlay-write-reject"
+                        onClick={() => void handleRejectWriteProposal(proposal)}
+                        data-testid={`overlay-file-write-reject-${proposal.id}`}
+                      >
+                        reject
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {writeConfirmations.map((confirmation) => (
+                  <div
+                    key={confirmation.id}
+                    className="overlay-context-line overlay-write-confirmation"
+                    data-testid="overlay-file-written-confirmation"
+                  >
+                    {confirmation.fileName} written
+                  </div>
+                ))}
                 {streamingTurnId ? (
                   <div className="overlay-message overlay-message-assistant overlay-message-streaming">
                     <div className="overlay-message-role">jeff</div>
                     <div className="overlay-message-body">
                       {streamingText.length > 0 ? streamingText : "thinking..."}
+                    </div>
+                  </div>
+                ) : null}
+                {speculativeSubtask ? (
+                  <div className="overlay-message overlay-message-assistant" data-testid="overlay-speculative-subtask">
+                    <div className="overlay-message-role">jeff</div>
+                    <div className="overlay-message-body">
+                      I started {speculativeSubtask.description || speculativeSubtask.title} in the background.
+                    </div>
+                    <div className="overlay-banner-actions overlay-speculative-actions">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void acceptSubtaskResult(speculativeSubtask.subtask_id).catch(() => undefined);
+                          setSpeculativeSubtask(null);
+                        }}
+                      >
+                        keep it
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void rejectSubtaskResult(speculativeSubtask.subtask_id).catch(() => undefined);
+                          setSpeculativeSubtask(null);
+                        }}
+                      >
+                        dismiss
+                      </button>
                     </div>
                   </div>
                 ) : null}
@@ -1811,35 +2119,6 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                   <span className="overlay-selection-capture-message">{driftBanner}</span>
                   <div className="overlay-banner-actions">
                     <button type="button" onClick={() => setDriftBanner(null)}>dismiss</button>
-                  </div>
-                </div>
-              ) : null}
-
-              {speculativeSubtask ? (
-                <div className="overlay-message overlay-message-assistant" data-testid="overlay-speculative-subtask">
-                  <div className="overlay-message-role">jeff</div>
-                  <div className="overlay-message-body">
-                    started &ldquo;{speculativeSubtask.title}&rdquo; in the background.
-                  </div>
-                  <div className="overlay-banner-actions" style={{ marginTop: "6px" }}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void acceptSubtaskResult(speculativeSubtask.subtask_id).catch(() => undefined);
-                        setSpeculativeSubtask(null);
-                      }}
-                    >
-                      keep it
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void rejectSubtaskResult(speculativeSubtask.subtask_id).catch(() => undefined);
-                        setSpeculativeSubtask(null);
-                      }}
-                    >
-                      dismiss
-                    </button>
                   </div>
                 </div>
               ) : null}

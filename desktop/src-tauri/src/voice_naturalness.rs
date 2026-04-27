@@ -4,8 +4,7 @@
 pub const DEFAULT_TTS_VOICE: &str = "alloy";
 
 const AVAILABLE_TTS_VOICES: &[&str] = &[
-    "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
-    "verse",
+    "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
 ];
 
 const FILLER_PHRASES: &[&str] = &[
@@ -230,7 +229,9 @@ mod tests {
         assert!(starts_with_interjection("understood — let me check"));
         assert!(starts_with_interjection("sure"));
         // partial word must not match.
-        assert!(!starts_with_interjection("surely this is not an interjection"));
+        assert!(!starts_with_interjection(
+            "surely this is not an interjection"
+        ));
     }
 
     #[test]

@@ -113,8 +113,7 @@ fn initial_scan_recursive(
                 initial_scan_recursive(&child, watch_root, store, embeddings, task_id);
             }
         } else if !should_ignore_file(&child, watch_root) {
-            if let Err(err) =
-                auto_ingest_file_for_task(store, embeddings.as_ref(), task_id, &child)
+            if let Err(err) = auto_ingest_file_for_task(store, embeddings.as_ref(), task_id, &child)
             {
                 eprintln!(
                     "[jeff watcher] initial scan ingest error {}: {err}",
@@ -174,7 +173,13 @@ pub fn start_watcher(
             let scan_store = store.clone();
             let scan_embeddings = embeddings.clone();
             let _ = tauri::async_runtime::spawn_blocking(move || {
-                initial_scan_recursive(&scan_root, &scan_root, &scan_store, &scan_embeddings, task_id);
+                initial_scan_recursive(
+                    &scan_root,
+                    &scan_root,
+                    &scan_store,
+                    &scan_embeddings,
+                    task_id,
+                );
             })
             .await;
         }

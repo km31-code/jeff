@@ -59,6 +59,19 @@ type OverlayMockOptions = {
   hasStoredKey?: boolean;
   preferredWorkspaceFolder?: string | null;
   activeTask?: { id: number; title: string } | null;
+  tasks?: Array<{ id: number; title: string; is_active?: boolean }>;
+  subtasks?: Array<{ subtask_id: number; task_id: number; title: string; status: string }>;
+  fileWriteProposals?: Array<{
+    id: number;
+    subtask_id: number;
+    step_id: number | null;
+    task_id: number;
+    proposed_path: string;
+    proposed_content: string;
+    status: string;
+    proposed_at: string;
+    resolved_at: string | null;
+  }>;
   accessibilityGranted?: boolean;
 };
 
@@ -66,7 +79,29 @@ function setupInvokeMock(options: OverlayMockOptions = {}) {
   const onboardingComplete = options.onboardingComplete ?? false;
   let hasStoredKey = options.hasStoredKey ?? false;
   let preferredWorkspaceFolder = options.preferredWorkspaceFolder ?? null;
-  const activeTask = options.activeTask ?? null;
+  let activeTask = options.activeTask ?? null;
+  const toTaskDto = (task: { id: number; title: string; is_active?: boolean }) => ({
+    id: task.id,
+    title: task.title,
+    slug: `task-${task.id}`,
+    workspace_path: `/tmp/task-${task.id}`,
+    created_at: "2026-04-22T00:00:00Z",
+    updated_at: "2026-04-22T00:00:00Z",
+    is_active: task.is_active ?? task.id === activeTask?.id
+  });
+  const taskRows =
+    options.tasks?.map(toTaskDto) ??
+    (activeTask
+      ? [
+          toTaskDto({
+            id: activeTask.id,
+            title: activeTask.title,
+            is_active: true
+          })
+        ]
+      : []);
+  let subtasks = options.subtasks ?? [];
+  let fileWriteProposals = options.fileWriteProposals ?? [];
 
   invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     if (command === "ambient_get_state") {
@@ -99,15 +134,7 @@ function setupInvokeMock(options: OverlayMockOptions = {}) {
       if (!activeTask) {
         return null;
       }
-      return {
-        id: activeTask.id,
-        title: activeTask.title,
-        slug: "demo-task",
-        workspace_path: "/tmp/demo",
-        created_at: "2026-04-22T00:00:00Z",
-        updated_at: "2026-04-22T00:00:00Z",
-        is_active: true
-      };
+      return toTaskDto({ ...activeTask, is_active: true });
     }
 
     if (command === "list_messages") {
@@ -115,20 +142,20 @@ function setupInvokeMock(options: OverlayMockOptions = {}) {
     }
 
     if (command === "list_tasks") {
-      if (!activeTask) {
-        return [];
+      return taskRows.map((task) => ({
+        ...task,
+        is_active: task.id === activeTask?.id
+      }));
+    }
+
+    if (command === "set_active_task") {
+      const taskId = Number(args?.taskId);
+      const next = taskRows.find((task) => task.id === taskId);
+      if (!next) {
+        throw new Error(`unknown task ${taskId}`);
       }
-      return [
-        {
-          id: activeTask.id,
-          title: activeTask.title,
-          slug: "demo-task",
-          workspace_path: "/tmp/demo",
-          created_at: "2026-04-22T00:00:00Z",
-          updated_at: "2026-04-22T00:00:00Z",
-          is_active: true
-        }
-      ];
+      activeTask = { id: next.id, title: next.title };
+      return { ...next, is_active: true };
     }
 
     if (command === "get_active_window_context") {
@@ -223,8 +250,61 @@ function setupInvokeMock(options: OverlayMockOptions = {}) {
       command === "ambient_set_quiet_mode" ||
       command === "ambient_notification_clicked" ||
       command === "ambient_hide_overlay" ||
-      command === "ambient_show_workspace"
+      command === "ambient_set_workspace_mode"
     ) {
+      return null;
+    }
+
+    if (command === "list_subtasks") {
+      const taskId = Number(args?.taskId);
+      return subtasks
+        .filter((subtask) => subtask.task_id === taskId)
+        .map((subtask) => ({
+          description: "",
+          execution_type: "draft_generation",
+          result_review_status: "unreviewed",
+          created_at: "2026-04-22T00:00:00Z",
+          updated_at: "2026-04-22T00:00:00Z",
+          result_summary: null,
+          result_payload: null,
+          instruction_source: "system",
+          parent_context_snapshot: "{}",
+          error_message: null,
+          ...subtask
+        }));
+    }
+
+    if (command === "cancel_subtask") {
+      const subtaskId = Number(args?.subtaskId);
+      subtasks = subtasks.map((subtask) =>
+        subtask.subtask_id === subtaskId ? { ...subtask, status: "cancelled" } : subtask
+      );
+      return subtasks.find((subtask) => subtask.subtask_id === subtaskId) ?? null;
+    }
+
+    if (command === "list_file_write_proposals") {
+      const taskId = Number(args?.taskId);
+      return fileWriteProposals.filter((proposal) => proposal.task_id === taskId);
+    }
+
+    if (command === "approve_subtask_file_write" || command === "reject_subtask_file_write") {
+      const proposalId = Number(args?.proposalId);
+      const action = command === "approve_subtask_file_write" ? "approved" : "rejected";
+      fileWriteProposals = fileWriteProposals.map((proposal) =>
+        proposal.id === proposalId ? { ...proposal, status: action } : proposal
+      );
+      return {
+        id: 1,
+        task_id: Number(args?.taskId),
+        subtask_id: 101,
+        proposal_id: proposalId,
+        action,
+        proposed_path: "notes.md",
+        resolved_at: "2026-04-22T00:00:00Z"
+      };
+    }
+
+    if (command === "accept_subtask_result" || command === "reject_subtask_result") {
       return null;
     }
 
@@ -238,7 +318,7 @@ describe("Overlay onboarding", () => {
     openDialogMock.mockResolvedValue("/Users/tester/Documents");
     setupInvokeMock({ onboardingComplete: false, activeTask: null });
 
-    render(<Overlay />);
+    render(<Overlay onOpenWorkspace={() => undefined} />);
 
     // step 1: intro
     await screen.findByTestId("onboarding-step-1");
@@ -284,7 +364,7 @@ describe("Overlay onboarding", () => {
     const user = userEvent.setup();
     setupInvokeMock({ onboardingComplete: false, activeTask: null });
 
-    render(<Overlay />);
+    render(<Overlay onOpenWorkspace={() => undefined} />);
 
     await screen.findByTestId("onboarding-step-1");
     await user.click(screen.getByRole("button", { name: "Cancel" }));
@@ -299,7 +379,7 @@ describe("Overlay onboarding", () => {
   it("shows no-active-task prompt when onboarding is complete", async () => {
     setupInvokeMock({ onboardingComplete: true, activeTask: null });
 
-    render(<Overlay />);
+    render(<Overlay onOpenWorkspace={() => undefined} />);
 
     expect(await screen.findByTestId("overlay-no-active-task")).toHaveTextContent(
       "Tell me what you're working on."
@@ -312,7 +392,7 @@ describe("Overlay onboarding", () => {
       activeTask: { id: 7, title: "runtime smoke task" }
     });
 
-    render(<Overlay />);
+    render(<Overlay onOpenWorkspace={() => undefined} />);
 
     const input = await screen.findByTestId("overlay-input");
     emitEvent("ambient://overlay-shown", { interactive: true });
@@ -330,7 +410,7 @@ describe("Overlay onboarding", () => {
       activeTask: { id: 7, title: "runtime smoke task" }
     });
 
-    render(<Overlay />);
+    render(<Overlay onOpenWorkspace={() => undefined} />);
 
     await user.type(await screen.findByTestId("overlay-input"), "runtime ping");
     await user.click(screen.getByRole("button", { name: "send" }));
@@ -374,7 +454,7 @@ describe("Overlay onboarding", () => {
       accessibilityGranted: false
     });
 
-    render(<Overlay />);
+    render(<Overlay onOpenWorkspace={() => undefined} />);
 
     expect(await screen.findByTestId("accessibility-context-prompt")).toHaveTextContent(
       "Jeff needs accessibility permission to know which document you have open."
@@ -383,5 +463,117 @@ describe("Overlay onboarding", () => {
 
     await user.click(screen.getByTestId("request-accessibility-permission"));
     expect(invokeMock).toHaveBeenCalledWith("request_accessibility_permission");
+  });
+
+  it("switches tasks inline without showing an open workspace button", async () => {
+    const user = userEvent.setup();
+    setupInvokeMock({
+      onboardingComplete: true,
+      activeTask: { id: 1, title: "history storymap" },
+      tasks: [
+        { id: 1, title: "history storymap", is_active: true },
+        { id: 2, title: "physics outline" },
+        { id: 3, title: "literature review" }
+      ]
+    });
+
+    render(<Overlay onOpenWorkspace={() => undefined} />);
+
+    await screen.findByText("history storymap");
+    expect(screen.queryByRole("button", { name: /open full workspace/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("overlay-task-switcher"));
+    expect(await screen.findByTestId("overlay-task-menu")).toHaveTextContent("physics outline");
+
+    await user.click(screen.getByTestId("overlay-task-option-2"));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("set_active_task", { taskId: 2 });
+      expect(screen.getByText("physics outline")).toBeInTheDocument();
+    });
+  });
+
+  it("restores and cancels a running companion subtask", async () => {
+    const user = userEvent.setup();
+    setupInvokeMock({
+      onboardingComplete: true,
+      activeTask: { id: 7, title: "runtime smoke task" },
+      subtasks: [
+        {
+          subtask_id: 101,
+          task_id: 7,
+          title: "draft intro in parallel",
+          status: "running"
+        }
+      ]
+    });
+
+    render(<Overlay onOpenWorkspace={() => undefined} />);
+
+    expect(await screen.findByTestId("overlay-active-subtask")).toHaveTextContent(
+      "jeff is working on: draft intro in parallel"
+    );
+
+    await user.click(screen.getByTestId("overlay-cancel-subtask"));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("cancel_subtask", { subtaskId: 101 });
+      expect(screen.queryByTestId("overlay-active-subtask")).not.toBeInTheDocument();
+    });
+  });
+
+  it("shows companion subtask events and pending file write approvals", async () => {
+    const user = userEvent.setup();
+    setupInvokeMock({
+      onboardingComplete: true,
+      activeTask: { id: 7, title: "runtime smoke task" }
+    });
+
+    render(<Overlay onOpenWorkspace={() => undefined} />);
+
+    await screen.findByTestId("overlay-input");
+    emitEvent("subtask://companion-started", {
+      subtask_id: 202,
+      task_id: 7,
+      title: "outline citations"
+    });
+
+    expect(await screen.findByTestId("overlay-active-subtask")).toHaveTextContent(
+      "outline citations"
+    );
+
+    emitEvent("subtask://companion-write-proposal", {
+      id: 303,
+      subtask_id: 202,
+      step_id: 1,
+      task_id: 7,
+      proposed_path: "/tmp/runtime-smoke/notes.md",
+      proposed_content: "These are the first proposed notes for the draft introduction.",
+      status: "pending_approval",
+      proposed_at: "2026-04-22T00:00:00Z",
+      resolved_at: null
+    });
+
+    expect(await screen.findByTestId("overlay-file-write-proposal")).toHaveTextContent("notes.md");
+    await user.click(screen.getByTestId("overlay-file-write-approve-303"));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("approve_subtask_file_write", {
+        taskId: 7,
+        proposalId: 303
+      });
+      expect(screen.queryByTestId("overlay-file-write-proposal")).not.toBeInTheDocument();
+      expect(screen.getByTestId("overlay-file-written-confirmation")).toHaveTextContent(
+        "notes.md written"
+      );
+    });
+
+    emitEvent("subtask://companion-complete", {
+      subtask_id: 202,
+      task_id: 7,
+      final_status: "completed"
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("overlay-active-subtask")).not.toBeInTheDocument();
+    });
   });
 });

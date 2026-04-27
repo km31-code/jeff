@@ -10,17 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "Jeff — Full Workspace",
-        "width": 960,
-        "height": 680,
-        "resizable": true,
-        "visible": false,
-        "focus": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

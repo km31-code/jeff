@@ -352,7 +352,10 @@ mod tests {
 
     #[test]
     fn strip_title_suffix_is_no_op_when_no_separator_present() {
-        assert_eq!(strip_title_suffix("plain document title"), "plain document title");
+        assert_eq!(
+            strip_title_suffix("plain document title"),
+            "plain document title"
+        );
     }
 
     #[test]

@@ -455,10 +455,7 @@ pub fn ambient_hide_overlay<R: Runtime>(app: AppHandle<R>) -> Result<(), String>
 }
 
 #[tauri::command]
-pub fn ambient_set_workspace_mode<R: Runtime>(
-    app: AppHandle<R>,
-    open: bool,
-) -> Result<(), String> {
+pub fn ambient_set_workspace_mode<R: Runtime>(app: AppHandle<R>, open: bool) -> Result<(), String> {
     set_workspace_mode(&app, open).map_err(|e| e.to_string())
 }
 

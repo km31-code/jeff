@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 // ambient surface can evolve without touching the phase 1-10 ipc contract.
 
 export type TrayStatus = "idle" | "listening" | "working";
-export type OverlayMode = "collapsed" | "expanded";
+export type OverlayMode = "collapsed" | "expanded" | "workspace";
 
 export interface AmbientStateDto {
   tray_status: TrayStatus;
@@ -36,8 +36,8 @@ export function hideOverlay(): Promise<void> {
   return invoke("ambient_hide_overlay");
 }
 
-export function showWorkspace(): Promise<void> {
-  return invoke("ambient_show_workspace");
+export function setWorkspaceMode(open: boolean): Promise<void> {
+  return invoke("ambient_set_workspace_mode", { open });
 }
 
 export function openPrivacyCenter(): Promise<void> {
@@ -52,10 +52,6 @@ export function openOnboarding(): Promise<void> {
 // from an API key error so the user lands directly on key setup.
 export function openOnboardingAtStep(step: number): Promise<void> {
   return invoke("ambient_open_onboarding_at_step", { step });
-}
-
-export function hideWorkspace(): Promise<void> {
-  return invoke("ambient_hide_workspace");
 }
 
 export function setOverlayMode(mode: OverlayMode): Promise<AmbientStateDto> {
@@ -96,12 +92,4 @@ export function reportNotificationClicked(
     contextKind,
     contextId
   });
-}
-
-// detects whether the current webview is the ambient overlay. the overlay
-// window is created with url `index.html#overlay`; everything else is the
-// full workspace.
-export function isOverlayWindow(): boolean {
-  if (typeof window === "undefined") return false;
-  return window.location.hash.replace(/^#/, "").startsWith("overlay");
 }

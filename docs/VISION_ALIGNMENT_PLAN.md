@@ -193,9 +193,8 @@ work rather than on top of it.
   `1px solid rgba(251,191,36,0.22)`. Color `var(--warn)`.
 - [x] `.overlay-error`: color `var(--danger)`. Font-size `12px`.
 - [x] `.overlay-task-label`: color `var(--text-primary)`. Font-weight `500`.
-- [x] `.overlay-workspace-link`: color `var(--accent-purple)`. Font-size `11px`.
-  Opacity `0.7`. Hover: opacity `1`. This button should be de-emphasized
-  (see section F) — small, low-contrast, not the first thing the eye lands on.
+- [x] `.overlay-workspace-link`: removed by section F. The companion no longer
+  exposes a visible "open full workspace" button.
 - [x] `.overlay-watcher-line`: color `var(--text-dim)`. Font `var(--font-mono)`.
   Font-size `10px`.
 - [x] `.overlay-watcher-indexed`: color `var(--success)`.
@@ -495,57 +494,57 @@ step-by-step history as an audit view but is not the only way to interact with
 active parallel work.
 
 ### E1 — Rust: emit companion-visible subtask events
-- [ ] In `src-tauri/src/subtask.rs`: when `run_subtask_chain` starts, emit a new
+- [x] In `src-tauri/src/subtask.rs`: when `run_subtask_chain` starts, emit a new
   event `subtask://companion-started` with payload
   `{ subtask_id, task_id, title }`. The overlay subscribes to this.
-- [ ] In `src-tauri/src/subtask.rs`: when a subtask chain completes (all steps done
+- [x] In `src-tauri/src/subtask.rs`: when a subtask chain completes (all steps done
   or cancelled), emit `subtask://companion-complete` with
   `{ subtask_id, task_id, final_status }`.
-- [ ] In `src-tauri/src/subtask.rs`: when a file write proposal is created
+- [x] In `src-tauri/src/subtask.rs`: when a file write proposal is created
   (`status=pending_approval`), emit `subtask://companion-write-proposal` with the
   full `FileWriteProposalDto`. This is in addition to the existing workspace
   polling path.
 
 ### E2 — Overlay: running subtask indicator
-- [ ] In `src/Overlay.tsx`: add state `activeSubtask: { id: number; title: string } | null`.
+- [x] In `src/Overlay.tsx`: add state `activeSubtask: { id: number; title: string } | null`.
   Subscribe to `subtask://companion-started` to set it.
   Subscribe to `subtask://companion-complete` to clear it.
-- [ ] In `src/Overlay.tsx`: render a running subtask indicator row below the
+- [x] In `src/Overlay.tsx`: render a running subtask indicator row below the
   watcher line when `activeSubtask !== null`. The row shows:
   `jeff is working on: [title]` with a `cancel` button.
   Style: small, dim text (`var(--text-dim)`), with a tiny purple spinner on the
   left (CSS border-radius spin animation, 12px, `var(--accent-purple)`).
-- [ ] The cancel button calls `cancelSubtask(activeSubtask.id)` from `tauriClient`.
+- [x] The cancel button calls `cancelSubtask(activeSubtask.id)` from `tauriClient`.
   On success, clear `activeSubtask`.
-- [ ] On mount, call `listSubtasks(activeTask.id)` and filter for
+- [x] On mount, call `listSubtasks(activeTask.id)` and filter for
   `status === "running"` — restore the active subtask indicator if one is
   already running when the overlay opens.
 
 ### E3 — Overlay: file write approval cards in companion
-- [ ] In `src/Overlay.tsx`: add state `pendingWriteProposals: FileWriteProposalDto[]`.
+- [x] In `src/Overlay.tsx`: add state `pendingWriteProposals: FileWriteProposalDto[]`.
   Subscribe to `subtask://companion-write-proposal` to push new proposals.
-- [ ] On mount and on task switch, call `listFileWriteProposals(taskId)` and filter
+- [x] On mount and on task switch, call `listFileWriteProposals(taskId)` and filter
   for `status === "pending_approval"` — restore any proposals waiting for review.
-- [ ] Render approval cards inside `overlay-messages` list (above the input row).
+- [x] Render approval cards inside `overlay-messages` list (above the input row).
   Each card shows:
   - File path (relative, just the filename unless path is meaningful)
   - A small before/after diff excerpt (first 80 chars of proposed content)
   - `approve` button (purple filled) and `reject` button (ghost)
-- [ ] `approve` calls `approveSubtaskFileWrite(proposalId)`. On success, remove
+- [x] `approve` calls `approveSubtaskFileWrite(proposalId)`. On success, remove
   from `pendingWriteProposals` and show a one-line confirmation inline:
   `[filename] written`.
-- [ ] `reject` calls `rejectSubtaskFileWrite(proposalId)`. On success, remove from
+- [x] `reject` calls `rejectSubtaskFileWrite(proposalId)`. On success, remove from
   `pendingWriteProposals`.
-- [ ] These cards should also appear in the workspace `App.tsx` view (they already
+- [x] These cards should also appear in the workspace `App.tsx` view (they already
   do) — the companion path is additive, not replacing.
 
 ### E4 — Overlay: speculative subtask offer card
-- [ ] When `proactive://speculative_subtask` arrives (from section C3), render an
+- [x] When `proactive://speculative_subtask` arrives (from section C3), render an
   offer card in the companion message stream:
   - "I started [subtask description] in the background."
   - `keep it` button: accepts the speculative result (calls `acceptSubtaskResult`)
   - `dismiss` button: rejects it (calls `rejectSubtaskResult`)
-- [ ] Style the offer card with the purple left-border style (same as Jeff's
+- [x] Style the offer card with the purple left-border style (same as Jeff's
   messages) to visually distinguish it from user messages.
 
 ### E5 — Verify parallel work visibility
@@ -557,6 +556,9 @@ active parallel work.
   companion. Approve from the companion. Verify the file was written.
 - [ ] Manual test: running subtask + cancel button in companion. Verify cancellation
   stops the chain.
+- [x] Automated regression coverage added in `src/Overlay.test.tsx` for restoring
+  running subtasks, event-driven subtask visibility, companion file-write approval,
+  approval confirmation, and task switching.
 
 ---
 
@@ -573,38 +575,38 @@ retains it. Everything a user does in 95% of sessions — chatting, voice, appro
 writes, viewing context, switching tasks — works entirely from the companion.
 
 ### F1 — Remove the workspace link from the companion header
-- [ ] In `src/Overlay.tsx`: remove the `overlay-workspace-link` button
+- [x] In `src/Overlay.tsx`: remove the `overlay-workspace-link` button
   (`"open full workspace"`) from the task row in the expanded companion view.
   This is around line 1319-1329 in the current file.
-- [ ] The tray menu retains the "Open Full Workspace" item — that is the only entry
+- [x] The tray menu retains the "Open Full Workspace" item — that is the only entry
   point for non-technical users who never need to touch it.
-- [ ] The `onOpenWorkspace` prop in Overlay.tsx is still wired (for Root.tsx) but
+- [x] The `onOpenWorkspace` prop in Overlay.tsx is still wired (for Root.tsx) but
   not exposed as a visible button.
 
 ### F2 — Task switching without the workspace
-- [ ] In `src/Overlay.tsx`: add a minimal task switcher to the companion.
+- [x] In `src/Overlay.tsx`: add a minimal task switcher to the companion.
   When the user has more than one task, show a chevron or `·` button next to the
   task label. Clicking it shows an inline dropdown of up to 5 recent tasks.
   Selecting one calls `setActiveTask(taskId)` and refreshes messages.
-- [ ] The task dropdown uses the `tasks` state already loaded in `Overlay.tsx`.
+- [x] The task dropdown uses the `tasks` state already loaded in `Overlay.tsx`.
   Style: dark surface dropdown, `var(--bg-elevated)` background, items use
   `var(--text-secondary)` with hover `var(--text-primary)`. Active task has a
   purple dot indicator.
-- [ ] Creating a new task: typing into the companion input when no active task
+- [x] Creating a new task: typing into the companion input when no active task
   already creates one (this already works). No "Create Task" form in the companion.
 
 ### F3 — Audit App.tsx for developer-only panels
-- [ ] In `src/App.tsx`: identify all panels that exist purely for developer
+- [x] In `src/App.tsx`: identify all panels that exist purely for developer
   debugging (retrieval debug, flow debug, subtask debug, action center / event log,
   session mode debug). These panels should be hidden behind a `?debug=1` URL
   parameter or a dev-only toggle, not visible by default.
-- [ ] Specifically hide by default: `retrievalDebugChunks`, `retrievalDebugMeta`,
+- [x] Specifically hide by default: `retrievalDebugChunks`, `retrievalDebugMeta`,
   `revisionDebug`, `subtaskDebug`, `flowDebug`, `recentEvents`, `sessionModeState`
   debug sections.
-- [ ] Keep visible in the workspace: artifacts, revisions, subtask steps, write
+- [x] Keep visible in the workspace: artifacts, revisions, subtask steps, write
   audit log, privacy center, workload summary, user profile signals. These are
   genuinely useful for a non-technical user.
-- [ ] Add a `show debug panels` toggle at the very bottom of the workspace (small
+- [x] Add a `show debug panels` toggle at the very bottom of the workspace (small
   link text, `var(--text-dim)`). Enabling it shows all the debug sections. This
   preference persists to `localStorage` for the session.
 
@@ -614,6 +616,9 @@ writes, viewing context, switching tasks — works entirely from the companion.
   without ever opening the workspace or the tray menu.
 - [ ] Manual test: fresh session. Use only the companion bar. Never open the
   workspace. Verify that nothing essential is missing.
+- [x] Automated regression coverage added for no visible workspace button in the
+  companion, inline task switching, active subtask cancellation, and companion
+  write approval.
 
 ---
 
@@ -794,9 +799,9 @@ All six sections above are complete when:
 - [ ] Jeff orients the user to their task after a 5+ minute absence, without the
   user opening the overlay.
 - [ ] Starting to type while Jeff speaks stops the audio immediately.
-- [ ] A running subtask is visible and cancellable from the companion bar, without
+- [x] A running subtask is visible and cancellable from the companion bar, without
   opening any other window.
-- [ ] The "open full workspace" button is not visible in the companion bar.
+- [x] The "open full workspace" button is not visible in the companion bar.
 - [ ] The testing guide has no terminal commands in user-facing steps.
 - [ ] The testing guide has a scenario for each of the five felt properties.
 - [ ] A non-technical user can complete a 20-minute work session — chatting,

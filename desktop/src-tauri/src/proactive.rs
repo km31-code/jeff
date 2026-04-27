@@ -443,7 +443,12 @@ async fn run_monitor_cycle<R: Runtime>(handle: &AppHandle<R>) {
         handle
             .try_state::<ContextState>()
             .and_then(|s: tauri::State<'_, ContextState>| s.current())
-            .map(|ctx| format!("The user currently has {} open with {}.", ctx.app_name, ctx.document_title))
+            .map(|ctx| {
+                format!(
+                    "The user currently has {} open with {}.",
+                    ctx.app_name, ctx.document_title
+                )
+            })
     } else {
         None
     };
@@ -483,7 +488,13 @@ async fn check_reorientation_from_background<R: Runtime>(
     let active_ctx_owned = active_context.map(|s| s.to_string());
 
     let result = tauri::async_runtime::spawn_blocking(move || {
-        generate_reorientation(&store, reasoning.as_ref(), task_id, active_ctx_owned.as_deref(), None)
+        generate_reorientation(
+            &store,
+            reasoning.as_ref(),
+            task_id,
+            active_ctx_owned.as_deref(),
+            None,
+        )
     })
     .await;
 

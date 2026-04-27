@@ -223,9 +223,27 @@ type FlowDebugInfo = {
   retrievedChunks: RetrievedChunkDto[];
 };
 
-function App() {
-  const [viewMode, setViewMode] = useState<ViewMode>("home");
-  const [fullWorkspaceVisible, setFullWorkspaceVisible] = useState(false);
+interface AppProps {
+  onCloseWorkspace?: () => void;
+}
+
+const DEBUG_PANELS_STORAGE_KEY = "jeff_show_debug_panels";
+
+function App({ onCloseWorkspace }: AppProps = {}) {
+  // when opened as a workspace window, start directly in workspace mode
+  // with full panels visible — no home screen needed.
+  const [viewMode, setViewMode] = useState<ViewMode>(onCloseWorkspace ? "workspace" : "home");
+  const [fullWorkspaceVisible, setFullWorkspaceVisible] = useState(Boolean(onCloseWorkspace));
+  const [showDebugPanels, setShowDebugPanels] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    const params = new URLSearchParams(window.location.search);
+    return (
+      params.get("debug") === "1" ||
+      window.localStorage.getItem(DEBUG_PANELS_STORAGE_KEY) === "1"
+    );
+  });
 
   const [tasks, setTasks] = useState<TaskDto[]>([]);
   const [activeTask, setActiveTaskState] = useState<TaskDto | null>(null);
@@ -400,6 +418,18 @@ function App() {
   function updateTrayStatus(status: TrayStatus) {
     void setAmbientTrayStatus(status).catch(() => undefined);
   }
+
+  const handleToggleDebugPanels = useCallback(() => {
+    setShowDebugPanels((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(DEBUG_PANELS_STORAGE_KEY, next ? "1" : "0");
+      } catch {
+        // ignore storage failures; the visible state still updates.
+      }
+      return next;
+    });
+  }, []);
 
   const activeSubtasks = useMemo(
     () => subtasks.filter((subtask) => subtask.status === "pending" || subtask.status === "running"),
@@ -2982,30 +3012,31 @@ function App() {
     <main className="shell">
       <header className="header-row">
         <div>
-          <h1>Jeff</h1>
-          <p className="subtitle">Phase 10 shell: companion-first conversation with workspace tools on demand.</p>
+          <h1>jeff</h1>
         </div>
-        {viewMode === "workspace" ? (
-          <div className="row-actions">
-            <button
-              onClick={() => setFullWorkspaceVisible((current) => !current)}
-              data-testid="toggle-full-workspace"
-            >
-              {fullWorkspaceVisible ? "Companion View" : "Open Full Workspace"}
-            </button>
-            <button onClick={() => setViewMode("home")}>Back to Home</button>
-          </div>
-        ) : (
-          <div className="row-actions">
+        <div className="row-actions">
+          {onCloseWorkspace ? (
             <button
               type="button"
-              onClick={() => void handleOpenPrivacyCenter()}
-              data-testid="privacy-center-open-home"
+              className="workspace-back-btn"
+              onClick={onCloseWorkspace}
+              data-testid="close-workspace"
             >
-              What Jeff knows
+              back to companion
             </button>
-          </div>
-        )}
+          ) : viewMode === "workspace" ? (
+            <button type="button" onClick={() => setViewMode("home")}>
+              back to home
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void handleOpenPrivacyCenter()}
+            data-testid="privacy-center-open-home"
+          >
+            What Jeff knows
+          </button>
+        </div>
       </header>
 
       <section className="panel status-panel" data-testid="status-indicator">
@@ -3116,6 +3147,16 @@ function App() {
         >
           {fullWorkspaceVisible ? (
             <div className="panel">
+            {!onCloseWorkspace ? (
+              <div className="row-actions">
+                <button
+                  onClick={() => setFullWorkspaceVisible(false)}
+                  data-testid="toggle-full-workspace"
+                >
+                  companion view
+                </button>
+              </div>
+            ) : null}
             <h2>Task Workspace</h2>
             <p data-testid="workspace-task-title">Task: {activeTask.title}</p>
             <p data-testid="active-task-summary">{taskSummary ? taskSummary.summary_text : "Summary unavailable."}</p>
@@ -3482,6 +3523,16 @@ function App() {
 
           <aside className="panel side-panel" data-testid="companion-view">
             <h2>Chat</h2>
+
+            {!fullWorkspaceVisible ? (
+              <button
+                className="workspace-back-btn"
+                onClick={() => setFullWorkspaceVisible(true)}
+                data-testid="toggle-full-workspace"
+              >
+                workspace tools
+              </button>
+            ) : null}
 
             {!fullWorkspaceVisible ? (
               <section className="settings-panel companion-header" data-testid="companion-context-header">
@@ -4223,7 +4274,7 @@ function App() {
               ) : null}
             </section>
 
-            {fullWorkspaceVisible ? (
+            {fullWorkspaceVisible && showDebugPanels ? (
               <section className="settings-panel" data-testid="action-center-panel">
               <h3>Action Center</h3>
               <p data-testid="action-center-summary">
@@ -4476,12 +4527,16 @@ function App() {
                   Refresh
                 </button>
               </div>
-              <p data-testid="session-mode-label">
-                Mode: {formatModeLabel(sessionModeState?.current_mode ?? "quiet_observing")}
-              </p>
-              <p data-testid="session-mode-reason">
-                {sessionModeState?.mode_reason ?? "Mode reason unavailable."}
-              </p>
+              {showDebugPanels ? (
+                <>
+                  <p data-testid="session-mode-label">
+                    Mode: {formatModeLabel(sessionModeState?.current_mode ?? "quiet_observing")}
+                  </p>
+                  <p data-testid="session-mode-reason">
+                    {sessionModeState?.mode_reason ?? "Mode reason unavailable."}
+                  </p>
+                </>
+              ) : null}
               {suggestionActionMessage ? (
                 <p data-testid="suggestion-action-message">{suggestionActionMessage}</p>
               ) : null}
@@ -4545,10 +4600,12 @@ function App() {
               </label>
               <p>Pause threshold: {coworkingStatus?.pause_threshold_seconds ?? 0}s</p>
               <p>Cooldown remaining: {coworkingStatus?.cooldown_remaining_seconds ?? 0}s</p>
-              <p data-testid="coworking-decision-reason">Decision: {retrievalDebugMeta.decisionReason}</p>
+              {showDebugPanels ? (
+                <p data-testid="coworking-decision-reason">Decision: {retrievalDebugMeta.decisionReason}</p>
+              ) : null}
             </section>
 
-            {fullWorkspaceVisible ? (
+            {fullWorkspaceVisible && showDebugPanels ? (
               <section className="settings-panel" data-testid="runtime-inspector-panel">
               <h3>Runtime Inspector</h3>
               <p>Active task: {activeTask.id} ({activeTask.title})</p>
@@ -4648,7 +4705,7 @@ function App() {
               </button>
             </form>
 
-            {fullWorkspaceVisible ? (
+            {fullWorkspaceVisible && showDebugPanels ? (
               <>
                 <h3>Retrieval Debug</h3>
                 <p>
@@ -4764,6 +4821,17 @@ function App() {
               )}
                 </div>
               </>
+            ) : null}
+
+            {fullWorkspaceVisible ? (
+              <button
+                type="button"
+                className="debug-panels-toggle"
+                onClick={handleToggleDebugPanels}
+                data-testid="debug-panels-toggle"
+              >
+                {showDebugPanels ? "hide debug panels" : "show debug panels"}
+              </button>
             ) : null}
           </aside>
         </section>
