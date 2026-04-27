@@ -249,4 +249,28 @@ mod tests {
         assert_eq!(normalize_tts_voice("nova"), "nova");
         assert_eq!(normalize_tts_voice("not-a-voice"), DEFAULT_TTS_VOICE);
     }
+
+    // d4: explicit filler-at-start removal
+    #[test]
+    fn certainly_prefix_is_stripped_from_tts_text() {
+        let cleaned = remove_tts_filler_phrases("Certainly, here is the answer.");
+        assert_eq!(cleaned, "here is the answer.");
+    }
+
+    // d4: responses under 15 words always receive an interjection prefix
+    #[test]
+    fn twelve_word_response_gets_interjection() {
+        let twelve_words =
+            "The build pipeline always runs tests before deploying to the staging environment.";
+        assert_eq!(word_count(twelve_words), 12);
+        let prepared = prepare_tts_text(twelve_words, "seed-d4");
+        let has_prefix = INTERJECTIONS
+            .iter()
+            .any(|inj| prepared.starts_with(&format!("{inj}. ")));
+        assert!(
+            has_prefix,
+            "expected one of {:?} to be prepended, got: {prepared:?}",
+            INTERJECTIONS
+        );
+    }
 }

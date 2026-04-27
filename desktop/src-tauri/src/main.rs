@@ -70,7 +70,27 @@ fn main() {
                     // double-fire. pressed-only keeps toggle latency tight.
                     if event.state == ShortcutState::Pressed {
                         if ambient::shortcut_matches(shortcut, ambient::DEFAULT_HOTKEY) {
-                            let _ = ambient::toggle_overlay_interactive(app);
+                            // d2: when overlay is already visible, emit a hotkey event
+                            // so the frontend can handle barge-in vs hide.
+                            // when hidden, show the overlay as before.
+                            let overlay_visible = app
+                                .get_webview_window(ambient::OVERLAY_WINDOW_LABEL)
+                                .and_then(|w| w.is_visible().ok())
+                                .unwrap_or(false);
+                            if overlay_visible {
+                                let _ = app.emit(
+                                    "ambient://hotkey-pressed",
+                                    serde_json::json!({ "overlay_visible": true }),
+                                );
+                            } else {
+                                let _ = ambient::show_overlay_interactive(app);
+                            }
+                        } else if ambient::shortcut_matches(
+                            shortcut,
+                            ambient::MIC_SHORTCUT,
+                        ) {
+                            // d3: mic shortcut — frontend toggles mic on/off.
+                            let _ = app.emit("ambient://mic-shortcut", serde_json::json!({}));
                         } else if ambient::shortcut_matches(
                             shortcut,
                             selection_capture::SELECTION_CAPTURE_HOTKEY,
@@ -183,23 +203,8 @@ fn main() {
                 typing_activity::start_global_typing_monitor(typing_state.clone_state());
             }
 
-            // phase 11: main window starts hidden. jeff is tray-resident.
-            // the full workspace is only shown on explicit user action.
-            if let Some(main_window) = handle.get_webview_window(ambient::MAIN_WINDOW_LABEL) {
-                let _ = main_window.hide();
-                let hide_handle = handle.clone();
-                main_window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        if let Some(window) =
-                            hide_handle.get_webview_window(ambient::MAIN_WINDOW_LABEL)
-                        {
-                            let _ = window.hide();
-                        }
-                    }
-                });
-            }
-
+            // single-window design: the overlay is the only window.
+            // workspace mode resizes it; there is no separate main window.
             ambient::build_overlay_window(&handle)
                 .map_err(|error| format!("failed to build overlay window: {error}"))?;
 
@@ -450,6 +455,10 @@ fn main() {
                 });
             }
 
+            // section c: autonomous ambient monitor — runs every 60 seconds.
+            // checks reorientation, drift, stuck state, and stale notifications.
+            proactive::spawn_ambient_monitor(handle.clone());
+
             // phase 24: background update check — delayed 2 seconds so it
             // does not compete with tray-ready or session-restore on startup.
             {
@@ -539,11 +548,10 @@ fn main() {
             ambient::ambient_toggle_overlay,
             ambient::ambient_show_overlay,
             ambient::ambient_hide_overlay,
-            ambient::ambient_show_workspace,
+            ambient::ambient_set_workspace_mode,
             ambient::ambient_open_privacy_center,
             ambient::ambient_open_onboarding,
             ambient::ambient_open_onboarding_at_step,
-            ambient::ambient_hide_workspace,
             ambient::ambient_set_overlay_mode,
             ambient::ambient_set_tray_status,
             ambient::ambient_set_quiet_mode,

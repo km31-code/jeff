@@ -17,12 +17,13 @@ use tauri::{
 // labels used across the window graph. keep stable: the frontend branches on
 // these strings and the tray/hotkey logic looks them up by label.
 pub const OVERLAY_WINDOW_LABEL: &str = "overlay";
-pub const MAIN_WINDOW_LABEL: &str = "main";
 
 // shortcut chosen to avoid common OS-reserved combos on macos/windows/linux.
 // cmd/ctrl + shift + j reads as "summon jeff" and is not bound by default on
 // any of the three platforms as of this writing.
 pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Shift+J";
+// d3: mic toggle shortcut — registered as a secondary global shortcut.
+pub const MIC_SHORTCUT: &str = "CmdOrCtrl+Shift+M";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +54,10 @@ impl TrayStatus {
 pub enum OverlayMode {
     Collapsed,
     Expanded,
+    // workspace mode: single window resizes to full surface rather than
+    // opening a second os window. always-on-top is disabled and the window
+    // is centered so it behaves like a normal application surface.
+    Workspace,
 }
 
 impl Default for OverlayMode {
@@ -175,10 +180,13 @@ struct OverlayShownPayload {
 
 // overlay window sizing. collapsed is a compact bar; expanded is the full
 // companion surface. width stays stable so anchoring does not shift.
+// workspace mode resizes the same window to a full app surface.
 const OVERLAY_WIDTH: f64 = 420.0;
 const OVERLAY_COLLAPSED_HEIGHT: f64 = 72.0;
 const OVERLAY_EXPANDED_HEIGHT: f64 = 520.0;
 const OVERLAY_MARGIN: f64 = 24.0;
+pub const OVERLAY_WORKSPACE_WIDTH: f64 = 960.0;
+pub const OVERLAY_WORKSPACE_HEIGHT: f64 = 700.0;
 
 pub fn build_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     if app.get_webview_window(OVERLAY_WINDOW_LABEL).is_some() {
@@ -301,30 +309,109 @@ pub fn toggle_overlay_interactive<R: Runtime>(app: &AppHandle<R>) -> tauri::Resu
     }
 }
 
+fn reposition_overlay_top_right<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    let placed = match window.primary_monitor() {
+        Ok(Some(monitor)) => {
+            let size: tauri::PhysicalSize<u32> = *monitor.size();
+            let scale = monitor.scale_factor();
+            let logical_width = size.width as f64 / scale;
+            let x = logical_width - OVERLAY_WIDTH - OVERLAY_MARGIN;
+            let y = OVERLAY_MARGIN;
+            window
+                .set_position(PhysicalPosition::new(
+                    (x * scale) as i32,
+                    (y * scale) as i32,
+                ))
+                .is_ok()
+        }
+        _ => false,
+    };
+    if !placed {
+        let _ = window.set_position(PhysicalPosition::new(900_i32, 60_i32));
+    }
+}
+
+fn center_window<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    let placed = match window.primary_monitor() {
+        Ok(Some(monitor)) => {
+            let size: tauri::PhysicalSize<u32> = *monitor.size();
+            let scale = monitor.scale_factor();
+            let logical_width = size.width as f64 / scale;
+            let logical_height = size.height as f64 / scale;
+            let x = (logical_width - OVERLAY_WORKSPACE_WIDTH) / 2.0;
+            let y = (logical_height - OVERLAY_WORKSPACE_HEIGHT) / 2.0;
+            window
+                .set_position(PhysicalPosition::new(
+                    (x * scale) as i32,
+                    (y * scale) as i32,
+                ))
+                .is_ok()
+        }
+        _ => false,
+    };
+    if !placed {
+        let _ = window.set_position(PhysicalPosition::new(160_i32, 80_i32));
+    }
+}
+
 pub fn resize_overlay_for_mode<R: Runtime>(
     app: &AppHandle<R>,
     mode: OverlayMode,
 ) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
-        let height = match mode {
-            OverlayMode::Collapsed => OVERLAY_COLLAPSED_HEIGHT,
-            OverlayMode::Expanded => OVERLAY_EXPANDED_HEIGHT,
-        };
-        window.set_size(LogicalSize::new(OVERLAY_WIDTH, height))?;
+        match mode {
+            OverlayMode::Workspace => {
+                window.set_size(LogicalSize::new(
+                    OVERLAY_WORKSPACE_WIDTH,
+                    OVERLAY_WORKSPACE_HEIGHT,
+                ))?;
+                let _ = window.set_always_on_top(false);
+                center_window(&window);
+            }
+            OverlayMode::Collapsed => {
+                let _ = window.set_always_on_top(true);
+                window.set_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_COLLAPSED_HEIGHT))?;
+                reposition_overlay_top_right(&window);
+            }
+            OverlayMode::Expanded => {
+                let _ = window.set_always_on_top(true);
+                window.set_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_EXPANDED_HEIGHT))?;
+                reposition_overlay_top_right(&window);
+            }
+        }
     }
     Ok(())
 }
 
-pub fn show_workspace<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        window.show()?;
-        window.set_focus()?;
+// set_workspace_mode switches the single overlay window between companion
+// (collapsed/expanded) and full workspace (960×700) modes. open=true enters
+// workspace mode; open=false returns to expanded companion mode.
+pub fn set_workspace_mode<R: Runtime>(app: &AppHandle<R>, open: bool) -> tauri::Result<()> {
+    let mode = if open {
+        OverlayMode::Workspace
+    } else {
+        OverlayMode::Expanded
+    };
+    if let Some(state) = app.try_state::<AmbientState>() {
+        state.set_overlay_mode(mode);
+    }
+    resize_overlay_for_mode(app, mode)?;
+    if open {
+        if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
+            window.show()?;
+            window.set_focus()?;
+        }
+    }
+    if let Some(state) = app.try_state::<AmbientState>() {
+        let _ = app.emit("ambient://state-changed", &state.snapshot());
     }
     Ok(())
 }
 
 pub fn open_privacy_center<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    show_workspace(app)?;
+    // privacy center is now rendered inside the workspace mode of the single window.
+    // switch to workspace mode first so app.tsx is mounted, then emit the event.
+    set_workspace_mode(app, true)?;
     let _ = app.emit("privacy://open", serde_json::json!({}));
     Ok(())
 }
@@ -350,13 +437,6 @@ pub fn open_onboarding_flow_at_step<R: Runtime>(app: &AppHandle<R>, step: u8) ->
     Ok(())
 }
 
-pub fn hide_workspace<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        window.hide()?;
-    }
-    Ok(())
-}
-
 // ---- tauri commands ---------------------------------------------------------
 
 #[tauri::command]
@@ -375,8 +455,11 @@ pub fn ambient_hide_overlay<R: Runtime>(app: AppHandle<R>) -> Result<(), String>
 }
 
 #[tauri::command]
-pub fn ambient_show_workspace<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    show_workspace(&app).map_err(|e| e.to_string())
+pub fn ambient_set_workspace_mode<R: Runtime>(
+    app: AppHandle<R>,
+    open: bool,
+) -> Result<(), String> {
+    set_workspace_mode(&app, open).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -395,11 +478,6 @@ pub fn ambient_open_onboarding_at_step<R: Runtime>(
     step: u8,
 ) -> Result<(), String> {
     open_onboarding_flow_at_step(&app, step).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn ambient_hide_workspace<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    hide_workspace(&app).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -567,7 +645,7 @@ pub fn install_tray<R: Runtime>(
                 let _ = show_overlay_interactive(app);
             }
             "tray:workspace" => {
-                let _ = show_workspace(app);
+                let _ = set_workspace_mode(app, true);
             }
             "tray:setup" => {
                 let _ = open_onboarding_flow(app);
@@ -663,6 +741,16 @@ pub fn register_global_hotkey<R: Runtime>(app: &AppHandle<R>) -> Result<bool, St
             Err(err.to_string())
         }
     };
+
+    // d3: register mic shortcut (non-fatal if already taken).
+    if let Ok(mic_shortcut) = MIC_SHORTCUT.parse::<Shortcut>() {
+        if let Err(err) = app.global_shortcut().register(mic_shortcut) {
+            let _ = app.emit(
+                "ambient://hotkey-conflict",
+                &serde_json::json!({ "hotkey": MIC_SHORTCUT, "error": err.to_string() }),
+            );
+        }
+    }
 
     let selection_shortcut: Result<Shortcut, _> =
         crate::selection_capture::SELECTION_CAPTURE_HOTKEY.parse();

@@ -26,7 +26,6 @@ import {
   setOverlayMode,
   setTrayStatus,
   setQuietMode,
-  showWorkspace
 } from "./ambientClient";
 import {
   ActiveWindowContextDto,
@@ -36,6 +35,7 @@ import {
   SelectionCaptureIndicatorDto,
   TaskDto,
   WatcherStatusDto,
+  acceptSubtaskResult,
   cancelStreamingTurn,
   clearPreferredWorkspaceFolder,
   completeOnboarding,
@@ -50,6 +50,7 @@ import {
   listTasks,
   listMessages,
   recordTaskFocus,
+  rejectSubtaskResult,
   requestAccessibilityPermission,
   sendMessage,
   sendMessageStreaming,
@@ -156,7 +157,11 @@ function isApiKeyIssue(message: string | null): boolean {
   );
 }
 
-export default function Overlay(): JSX.Element {
+interface OverlayProps {
+  onOpenWorkspace: () => void;
+}
+
+export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element {
   const [ambient, setAmbient] = useState<AmbientStateDto | null>(null);
   const [mode, setMode] = useState<OverlayMode>("collapsed");
   const [activeTask, setActiveTaskState] = useState<TaskDto | null>(null);
@@ -208,6 +213,13 @@ export default function Overlay(): JSX.Element {
   // minutes away. auto-dismisses after 8 seconds.
   const [reorientationBanner, setReorientationBanner] = useState<string | null>(null);
   const reorientationTimerRef = useRef<number | null>(null);
+
+  // c3: proactive event banners from background monitor
+  const [driftBanner, setDriftBanner] = useState<string | null>(null);
+  const [speculativeSubtask, setSpeculativeSubtask] = useState<{ subtask_id: number; title: string } | null>(null);
+  // d1: track whether tts audio is currently playing for the barge-in hint
+  const [ttsActivePlaying, setTtsActivePlaying] = useState(false);
+  const [ttsBargeInHintDismissed, setTtsBargeInHintDismissed] = useState(false);
 
   const [onboardingStatus, setOnboardingStatus] =
     useState<OnboardingStatusDto | null>(null);
@@ -391,12 +403,31 @@ export default function Overlay(): JSX.Element {
       listen<{ context_kind: string | null; context_id: number | null }>(
         "ambient://notification-click",
         (event) => {
-          setNotificationContext({
-            kind: event.payload.context_kind ?? null,
-            id: event.payload.context_id ?? null
-          });
+          const kind = event.payload.context_kind ?? null;
+          const id = event.payload.context_id ?? null;
           pendingExpandRef.current = true;
           setMode("expanded");
+
+          // c4: reorientation notification click → fetch and show the summary.
+          if (kind === "reorientation" && id !== null) {
+            void triggerTaskResume(id)
+              .then((result) => {
+                if (result.summary && result.summary.trim().length > 0) {
+                  if (reorientationTimerRef.current !== null) {
+                    window.clearTimeout(reorientationTimerRef.current);
+                  }
+                  setReorientationBanner(result.summary.trim());
+                  reorientationTimerRef.current = window.setTimeout(() => {
+                    setReorientationBanner(null);
+                    reorientationTimerRef.current = null;
+                  }, 10000);
+                }
+              })
+              .catch(() => undefined);
+            return;
+          }
+
+          setNotificationContext({ kind, id });
         }
       )
     );
@@ -414,26 +445,12 @@ export default function Overlay(): JSX.Element {
           }
         });
 
-        // phase 15: when the user explicitly summons the overlay, check for
-        // reorientation (5+ min absence) and record the focus timestamp.
-        // mirrors what App.tsx does on main-window focus for overlay-first users.
+        // c3: reorientation is now driven by the background monitor.
+        // on interactive summon, only record the focus timestamp so the
+        // monitor's cooldown logic stays correct.
         if (event.payload?.interactive) {
           const task = activeTaskRef.current;
           if (task) {
-            void triggerTaskResume(task.id)
-              .then((result) => {
-                if (result.summary && result.summary.trim().length > 0) {
-                  if (reorientationTimerRef.current !== null) {
-                    window.clearTimeout(reorientationTimerRef.current);
-                  }
-                  setReorientationBanner(result.summary.trim());
-                  reorientationTimerRef.current = window.setTimeout(() => {
-                    setReorientationBanner(null);
-                    reorientationTimerRef.current = null;
-                  }, 8000);
-                }
-              })
-              .catch(() => undefined);
             void recordTaskFocus(task.id).catch(() => undefined);
           }
         }
@@ -454,6 +471,82 @@ export default function Overlay(): JSX.Element {
       );
     };
   }, [openOnboardingWizard, refreshActiveTask, refreshOnboarding, schedulePrimaryInteractionFocus]);
+
+  // c3: proactive events from the background monitor.
+  // d2: hotkey-pressed when overlay is already visible.
+  // d3: mic shortcut.
+  useEffect(() => {
+    const unsubscribers: Promise<UnlistenFn>[] = [];
+
+    // c3: background monitor fired a reorientation summary.
+    unsubscribers.push(
+      listen<{ task_id: number; summary: string }>("proactive://reorientation", (event) => {
+        const summary = event.payload.summary?.trim();
+        if (!summary) return;
+        if (reorientationTimerRef.current !== null) {
+          window.clearTimeout(reorientationTimerRef.current);
+        }
+        setReorientationBanner(summary);
+        reorientationTimerRef.current = window.setTimeout(() => {
+          setReorientationBanner(null);
+          reorientationTimerRef.current = null;
+        }, 10000);
+      })
+    );
+
+    // c3: drift detected from background.
+    unsubscribers.push(
+      listen<{ task_id: number; reason: string }>("proactive://drift", (event) => {
+        const reason = event.payload.reason?.trim() || "looks like you may have drifted from your task.";
+        setDriftBanner(reason);
+      })
+    );
+
+    // c3: speculative subtask started by background monitor.
+    unsubscribers.push(
+      listen<{ subtask_id: number; task_id: number; title: string }>(
+        "proactive://speculative_subtask",
+        (event) => {
+          setSpeculativeSubtask({ subtask_id: event.payload.subtask_id, title: event.payload.title });
+        }
+      )
+    );
+
+    // d2: hotkey pressed while overlay is visible — barge-in or hide.
+    unsubscribers.push(
+      listen<{ overlay_visible: boolean }>("ambient://hotkey-pressed", () => {
+        if (ttsActiveTurnIdRef.current !== null) {
+          stopStreamingTtsPlayback();
+          setTtsBargeInHintDismissed(true);
+          setTtsActivePlaying(false);
+          messageInputRef.current?.focus();
+        } else {
+          void hideOverlay();
+        }
+      })
+    );
+
+    return () => {
+      unsubscribers.forEach((p) => p.then((fn) => fn()).catch(() => undefined));
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // d1: global keydown listener — stop tts on first printable keystroke.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (ttsActiveTurnIdRef.current === null) return;
+      if (event.key.length !== 1) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      stopStreamingTtsPlayback();
+      setTtsActivePlaying(false);
+      setTtsBargeInHintDismissed(true);
+      messageInputRef.current?.focus();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!pendingInteractiveFocusRef.current) return;
@@ -737,13 +830,9 @@ export default function Overlay(): JSX.Element {
     }
   }, []);
 
-  const handleOpenWorkspace = useCallback(async () => {
-    try {
-      await showWorkspace();
-    } catch (error) {
-      setErrorMessage(String(error));
-    }
-  }, []);
+  const handleOpenWorkspace = useCallback(() => {
+    onOpenWorkspace();
+  }, [onOpenWorkspace]);
 
   const handleQuietToggle = useCallback(async () => {
     if (!ambient) return;
@@ -993,12 +1082,14 @@ export default function Overlay(): JSX.Element {
     streamTtsNextPhraseRef.current += 1;
     const { audio, url } = next;
     streamTtsCurrentRef.current = audio;
+    setTtsActivePlaying(true);
 
     audio.onended = () => {
       URL.revokeObjectURL(url);
       streamTtsCurrentRef.current = null;
       if (streamTtsQueueRef.current.size === 0) {
         ttsActiveTurnIdRef.current = null;
+        setTtsActivePlaying(false);
         void setTrayStatus("idle").catch(() => undefined);
       }
       scheduleStreamTtsPlayback();
@@ -1008,6 +1099,7 @@ export default function Overlay(): JSX.Element {
       streamTtsCurrentRef.current = null;
       if (streamTtsQueueRef.current.size === 0) {
         ttsActiveTurnIdRef.current = null;
+        setTtsActivePlaying(false);
         void setTrayStatus("idle").catch(() => undefined);
       }
       scheduleStreamTtsPlayback();
@@ -1017,6 +1109,7 @@ export default function Overlay(): JSX.Element {
       streamTtsCurrentRef.current = null;
       if (streamTtsQueueRef.current.size === 0) {
         ttsActiveTurnIdRef.current = null;
+        setTtsActivePlaying(false);
       }
     });
   }
@@ -1034,6 +1127,7 @@ export default function Overlay(): JSX.Element {
     streamTtsQueueRef.current.clear();
     streamTtsNextPhraseRef.current = 1;
     ttsActiveTurnIdRef.current = null;
+    setTtsActivePlaying(false);
   }
 
   // barge-in: stop tts and cancel any in-flight streaming turn.
@@ -1248,6 +1342,20 @@ export default function Overlay(): JSX.Element {
     }
   }, []);
 
+  // d3: mic shortcut listener — placed after voice handlers so they are in scope.
+  useEffect(() => {
+    const unsub = listen("ambient://mic-shortcut", () => {
+      if (recording) {
+        handleStopVoiceRecording();
+      } else {
+        void handleStartVoiceRecording();
+      }
+    });
+    return () => {
+      unsub.then((fn) => fn()).catch(() => undefined);
+    };
+  }, [recording, handleStopVoiceRecording, handleStartVoiceRecording]);
+
   const hotkeyLabel = useMemo(
     () => (ambient ? formatHotkey(ambient.hotkey) : ""),
     [ambient]
@@ -1267,7 +1375,7 @@ export default function Overlay(): JSX.Element {
             className={`overlay-status-dot overlay-status-${statusLabel}`}
             aria-hidden
           />
-          <span className="overlay-status-label">Jeff · {statusLabel}</span>
+          <span className="overlay-status-label">jeff</span>
         </div>
         <div className="overlay-controls">
           {ambient?.quiet_mode ? (
@@ -1631,14 +1739,16 @@ export default function Overlay(): JSX.Element {
                       key={message.id}
                       className={`overlay-message overlay-message-${message.role}`}
                     >
-                      <div className="overlay-message-role">{message.role}</div>
+                      <div className="overlay-message-role">
+                        {message.role === "assistant" ? "jeff" : message.role}
+                      </div>
                       <div className="overlay-message-body">{message.content}</div>
                     </div>
                   ))
                 )}
                 {streamingTurnId ? (
-                  <div className="overlay-message overlay-message-assistant">
-                    <div className="overlay-message-role">assistant</div>
+                  <div className="overlay-message overlay-message-assistant overlay-message-streaming">
+                    <div className="overlay-message-role">jeff</div>
                     <div className="overlay-message-body">
                       {streamingText.length > 0 ? streamingText : "thinking..."}
                     </div>
@@ -1696,6 +1806,50 @@ export default function Overlay(): JSX.Element {
                 </div>
               ) : null}
 
+              {driftBanner ? (
+                <div className="overlay-banner overlay-banner-warn" data-testid="overlay-drift-banner">
+                  <span className="overlay-selection-capture-message">{driftBanner}</span>
+                  <div className="overlay-banner-actions">
+                    <button type="button" onClick={() => setDriftBanner(null)}>dismiss</button>
+                  </div>
+                </div>
+              ) : null}
+
+              {speculativeSubtask ? (
+                <div className="overlay-message overlay-message-assistant" data-testid="overlay-speculative-subtask">
+                  <div className="overlay-message-role">jeff</div>
+                  <div className="overlay-message-body">
+                    started &ldquo;{speculativeSubtask.title}&rdquo; in the background.
+                  </div>
+                  <div className="overlay-banner-actions" style={{ marginTop: "6px" }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void acceptSubtaskResult(speculativeSubtask.subtask_id).catch(() => undefined);
+                        setSpeculativeSubtask(null);
+                      }}
+                    >
+                      keep it
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void rejectSubtaskResult(speculativeSubtask.subtask_id).catch(() => undefined);
+                        setSpeculativeSubtask(null);
+                      }}
+                    >
+                      dismiss
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {ttsActivePlaying && !ttsBargeInHintDismissed ? (
+                <div className="overlay-context-line" data-testid="overlay-tts-hint">
+                  jeff is speaking — type to interrupt
+                </div>
+              ) : null}
+
               <form className="overlay-input-row" onSubmit={handleSubmit}>
                 <input
                   ref={messageInputRef}
@@ -1712,7 +1866,13 @@ export default function Overlay(): JSX.Element {
                         : "Tell me what you're working on"
                   }
                   value={input}
-                  onChange={(event) => setInput(event.target.value)}
+                  onChange={(event) => {
+                    if (ttsActiveTurnIdRef.current !== null) {
+                      stopStreamingTtsPlayback();
+                      setTtsBargeInHintDismissed(true);
+                    }
+                    setInput(event.target.value);
+                  }}
                   disabled={sending || recording}
                 />
                 <button
