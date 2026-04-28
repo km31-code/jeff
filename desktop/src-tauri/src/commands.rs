@@ -406,6 +406,8 @@ pub fn send_message<R: Runtime>(
     let epoch = state.next_interaction_epoch();
     let message_source = normalize_message_source(source);
     let active_ctx = next_message_context(&app, state.inner(), &context_state, &selection_state);
+    let current_snapshot = state.awareness_core.snapshot_immediate();
+    let current_snapshot_summary = crate::awareness_core::snapshot_summary(&current_snapshot);
 
     let response = send_message_for_task(
         &state.store,
@@ -415,6 +417,7 @@ pub fn send_message<R: Runtime>(
         &message,
         &message_source,
         active_ctx.as_deref(),
+        Some(current_snapshot_summary.as_str()).filter(|value| !value.is_empty()),
         || state.current_interaction_epoch() != epoch,
     );
 
@@ -439,6 +442,11 @@ pub fn send_message<R: Runtime>(
                     &value.assistant_response,
                     Some("assistant_answer".to_string()),
                     None,
+                );
+                crate::awareness_core::spawn_awareness_update(
+                    &app,
+                    crate::awareness_core::SnapshotTrigger::NewTurn,
+                    task_id,
                 );
             }
             Ok(value)
@@ -1398,12 +1406,15 @@ pub fn trigger_task_resume(
         });
     }
     let active_ctx = active_context_string_if_enabled(state.inner(), &context_state);
+    let current_snapshot = state.awareness_core.snapshot_immediate();
+    let current_snapshot_summary = crate::awareness_core::snapshot_summary(&current_snapshot);
     crate::proactive::generate_reorientation(
         &state.store,
         state.reasoning.as_ref(),
         task_id,
         active_ctx.as_deref(),
         None, // calendar context injected at the command layer when CalendarState is available
+        Some(current_snapshot_summary.as_str()).filter(|value| !value.is_empty()),
     )
     .map_err(map_jeff_error)
 }
@@ -1498,8 +1509,42 @@ pub fn record_task_focus<R: Runtime>(
         // phase 23: update work-rhythm profile signal
         let _ = user_model::record_focus_hour(&state.store);
     }
+    crate::awareness_core::spawn_awareness_update(
+        &app,
+        crate::awareness_core::SnapshotTrigger::FocusEvent,
+        task_id,
+    );
     let _ = workload::check_stale_task_notifications(&state.store, &app, ambient.is_quiet_mode());
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_situational_snapshot(
+    state: State<'_, JeffState>,
+    task_id: i64,
+) -> Result<crate::awareness_core::SituationalSnapshot, String> {
+    #[cfg(debug_assertions)]
+    {
+        let snapshot = state.awareness_core.snapshot().await;
+        if snapshot.trigger == "initial" {
+            let ambient_placeholder = crate::ambient::AmbientState::new();
+            return Ok(state
+                .awareness_core
+                .update(
+                    crate::awareness_core::SnapshotTrigger::TimeTick,
+                    task_id,
+                    state.inner(),
+                    &ambient_placeholder,
+                )
+                .await);
+        }
+        Ok(snapshot)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = task_id;
+        Err("situational snapshot is available only in debug builds".to_string())
+    }
 }
 
 // phase 16: richer parallel work commands ------------------------------------
@@ -1611,15 +1656,11 @@ pub fn approve_subtask_file_write(
 
     // prefer the user's connected watcher folder as the write destination; fall back to
     // the internal workspace so approval never silently disappears into a hidden directory.
-    let write_root_uncanonical: std::path::PathBuf = match state
-        .store
-        .get_watched_folder(task_id)
-        .ok()
-        .flatten()
-    {
-        Some(folder) => std::path::PathBuf::from(folder.folder_path),
-        None => workspace_uncanonical.clone(),
-    };
+    let write_root_uncanonical: std::path::PathBuf =
+        match state.store.get_watched_folder(task_id).ok().flatten() {
+            Some(folder) => std::path::PathBuf::from(folder.folder_path),
+            None => workspace_uncanonical.clone(),
+        };
     fs::create_dir_all(&write_root_uncanonical).map_err(|e| {
         format!(
             "failed to create write root '{}': {e}",

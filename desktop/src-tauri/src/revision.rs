@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
 use crate::{
+    character::{self, RevisionContext},
     chunking::{chunk_text, DEFAULT_CHUNK_OVERLAP_CHARS, DEFAULT_CHUNK_SIZE_CHARS},
     embedding::EmbeddingProvider,
     message_kind::MessageKind,
@@ -16,8 +17,6 @@ use crate::{
     store::{ChunkEmbeddingInput, NewArtifactVersionInput, NewRevisionProposalInput, TaskStore},
     user_model,
 };
-
-const REVISION_SYSTEM_PROMPT: &str = "You are Jeff, a grounded revision assistant. Rewrite ONLY the target text while preserving intent and factual grounding from provided context. Return strict JSON with keys: proposed_text (string), rationale (string), confidence (number 0-1), grounding_notes (string). If context is weak, keep edits conservative and clearly mark weak grounding_notes.";
 
 #[derive(Debug, Clone)]
 struct ResolvedTarget {
@@ -128,7 +127,12 @@ pub fn propose_artifact_revision(
             .join("\n\n"),
     );
 
-    let revision_system_prompt = build_revision_system_prompt(store);
+    let revision_system_prompt = build_revision_system_prompt(
+        store,
+        &context_pack.task_summary,
+        &resolved_target.target_description,
+        clean_instruction,
+    );
     let raw_candidate = reasoning.generate_response(&revision_system_prompt, &revision_prompt)?;
     let generated = parse_generated_revision(
         &raw_candidate,
@@ -384,10 +388,10 @@ fn parse_generated_revision(
 
     let (mut proposed_text, rationale, json_confidence, grounding_notes) = match parsed {
         Ok(value) => (
-            value.proposed_text.trim().to_string(),
+            character::strip_filler_phrases(value.proposed_text.trim()),
             value
                 .rationale
-                .map(|value| value.trim().to_string())
+                .map(|value| character::strip_filler_phrases(value.trim()))
                 .filter(|value| !value.is_empty()),
             value.confidence,
             value
@@ -395,7 +399,12 @@ fn parse_generated_revision(
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
         ),
-        Err(_) => (raw_candidate.trim().to_string(), None, None, None),
+        Err(_) => (
+            character::strip_filler_phrases(raw_candidate.trim()),
+            None,
+            None,
+            None,
+        ),
     };
 
     if proposed_text.is_empty() {
@@ -450,16 +459,27 @@ fn build_revision_prompt(
     )
 }
 
-fn build_revision_system_prompt(store: &TaskStore) -> String {
-    if store
+fn build_revision_system_prompt(
+    store: &TaskStore,
+    task_summary: &str,
+    target_description: &str,
+    instruction: &str,
+) -> String {
+    let profile_injection = if store
         .get_privacy_user_profile_memory_enabled()
         .unwrap_or(false)
     {
-        if let Some(profile) = user_model::build_profile_injection(store) {
-            return format!("{profile}\n\n{REVISION_SYSTEM_PROMPT}");
-        }
-    }
-    REVISION_SYSTEM_PROMPT.to_string()
+        user_model::build_profile_injection(store)
+    } else {
+        None
+    };
+
+    character::build_revision_system_prompt(&RevisionContext {
+        task_summary: task_summary.to_string(),
+        target_description: target_description.to_string(),
+        instruction: instruction.to_string(),
+        profile_injection,
+    })
 }
 
 fn resolve_target(content: &str, target: Option<&RevisionTargetDto>) -> Result<ResolvedTarget> {
@@ -1060,6 +1080,7 @@ mod tests {
             task_id,
             "What is the primary source requirement?",
             "text",
+            None,
             None,
             || false,
         )

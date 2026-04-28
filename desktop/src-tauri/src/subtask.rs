@@ -11,6 +11,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    character::{self, SubtaskContext},
     embedding::EmbeddingProvider,
     message_kind::MessageKind,
     models::{
@@ -39,10 +40,6 @@ pub enum CompanionEvent {
     WriteProposal(FileWriteProposalDto),
 }
 
-const SUBTASK_SYSTEM_PROMPT: &str = "You are Jeff's bounded subtask executor. Complete exactly one controlled subtask using ONLY provided context. Never claim external research. Return strict JSON with keys: result_summary (string), result_payload (string), grounding_notes (string), confidence (number 0..1).";
-
-const SUBTASK_SUGGESTION_SYSTEM_PROMPT: &str = "You are Jeff's bounded subtask suggester. Suggest one small, useful subtask in the current task materials. Return strict JSON with keys: title, description, execution_type, reason. Execution type must be one of: draft_generation, expansion, synthesis, targeted_research_synthesis.";
-
 // phase 16: multi-step chain constants and prompts
 
 pub const MAX_SUBTASK_STEPS: usize = 5;
@@ -52,12 +49,6 @@ const MAX_CHAIN_STEP_OUTPUT_CHARS: usize = 8_000;
 const MAX_CHAIN_RETRIEVAL_CHUNKS: usize = 8;
 const MAX_CHAIN_FILE_PROPOSAL_CONTENT_CHARS: usize = 24_000;
 const MAX_CHAIN_PATH_CHARS: usize = 240;
-
-const CHAIN_PLANNING_SYSTEM_PROMPT: &str = "You are Jeff's subtask chain planner. Given the subtask goal and context, produce a step-by-step execution plan. Return strict JSON: {\"steps\": [{\"step_type\": \"retrieval|llm_call|file_write_proposal\", \"description\": \"...\", \"proposed_path\": \"relative/path.md\"}]}. Maximum 5 steps. Only include proposed_path for file_write_proposal steps. Use relative paths only (no ..).";
-
-const STEP_LLM_SYSTEM_PROMPT: &str = "You are Jeff's bounded step executor. Complete the described step using ONLY the provided context and prior step outputs. Be concise and grounded.";
-
-const FILE_WRITE_SYSTEM_PROMPT: &str = "You are Jeff's bounded file writer. Draft the file content described, grounded in the provided context and prior step outputs. Output the raw file content only — no JSON wrapper, no explanatory text outside the content.";
 
 #[derive(Debug, Deserialize)]
 struct ChainPlanStep {
@@ -416,7 +407,13 @@ pub fn suggest_subtask_for_task(
             .join("\n\n")
     );
 
-    let raw = reasoning.generate_response(SUBTASK_SUGGESTION_SYSTEM_PROMPT, &prompt)?;
+    let system_prompt = build_subtask_system_prompt(
+        store,
+        &context_pack.task_summary,
+        "suggest bounded subtask",
+        "subtask_suggestion",
+    );
+    let raw = reasoning.generate_response(&system_prompt, &prompt)?;
     let parsed = serde_json::from_str::<SubTaskSuggestionJson>(raw.trim())
         .unwrap_or(SubTaskSuggestionJson {
         title: "Draft a stronger intro paragraph".to_string(),
@@ -665,7 +662,7 @@ fn run_subtask_execution(
     let snapshot: SubTaskContextSnapshot = serde_json::from_str(&running.parent_context_snapshot)
         .context("failed to parse subtask context snapshot")?;
 
-    let result = execute_subtask_with_reasoning(reasoning, &running, &snapshot)?;
+    let result = execute_subtask_with_reasoning(store, reasoning, &running, &snapshot)?;
 
     if cancel_token.load(Ordering::SeqCst) {
         let _ = store.transition_subtask_status(
@@ -803,8 +800,14 @@ fn run_subtask_chain(
 
     // chain planning phase: ask LLM to produce a step list
     let planning_prompt = build_chain_planning_prompt(&subtask, &snapshot);
+    let planning_system_prompt = build_subtask_system_prompt(
+        store,
+        &snapshot.task_summary,
+        &subtask.title,
+        "chain_planning",
+    );
     let raw_plan = reasoning
-        .generate_response(CHAIN_PLANNING_SYSTEM_PROMPT, &planning_prompt)
+        .generate_response(&planning_system_prompt, &planning_prompt)
         .context("chain planning LLM call failed")?;
 
     let mut plan = serde_json::from_str::<ChainPlan>(raw_plan.trim()).unwrap_or(ChainPlan {
@@ -1016,17 +1019,23 @@ fn execute_chain_step(
 
         "llm_call" => {
             let context = build_chain_step_context(subtask, prior_payloads, &step.description);
+            let system_prompt = build_subtask_system_prompt(store, "", &subtask.title, "step_llm");
             let output = reasoning
-                .generate_response(STEP_LLM_SYSTEM_PROMPT, &context)
+                .generate_response(&system_prompt, &context)
                 .context("chain llm_call step failed")?;
-            Ok(truncate_chars(&output, MAX_CHAIN_STEP_OUTPUT_CHARS))
+            Ok(truncate_chars(
+                &character::strip_filler_phrases(&output),
+                MAX_CHAIN_STEP_OUTPUT_CHARS,
+            ))
         }
 
         "file_write_proposal" => {
             let (proposed_path, intent) = parse_file_write_step_description(&step.description);
             let context = build_chain_step_context(subtask, prior_payloads, &intent);
+            let system_prompt =
+                build_subtask_system_prompt(store, "", &subtask.title, "file_write_proposal");
             let content = reasoning
-                .generate_response(FILE_WRITE_SYSTEM_PROMPT, &context)
+                .generate_response(&system_prompt, &context)
                 .context("chain file_write_proposal content generation failed")?;
             if content.chars().count() > MAX_CHAIN_FILE_PROPOSAL_CONTENT_CHARS {
                 return Err(anyhow!(
@@ -1198,7 +1207,31 @@ fn auto_reject_pending_proposals(store: &TaskStore, subtask_id: i64) {
     }
 }
 
+fn build_subtask_system_prompt(
+    store: &TaskStore,
+    task_summary: &str,
+    subtask_title: &str,
+    execution_type: &str,
+) -> String {
+    let profile_injection = if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        crate::user_model::build_profile_injection(store)
+    } else {
+        None
+    };
+
+    character::build_subtask_system_prompt(&SubtaskContext {
+        task_summary: task_summary.to_string(),
+        subtask_title: subtask_title.to_string(),
+        execution_type: execution_type.to_string(),
+        profile_injection,
+    })
+}
+
 fn execute_subtask_with_reasoning(
+    store: &TaskStore,
     reasoning: &dyn ReasoningProvider,
     subtask: &SubTaskDto,
     snapshot: &SubTaskContextSnapshot,
@@ -1257,7 +1290,13 @@ fn execute_subtask_with_reasoning(
         }
     );
 
-    let raw = reasoning.generate_response(SUBTASK_SYSTEM_PROMPT, &prompt)?;
+    let system_prompt = build_subtask_system_prompt(
+        store,
+        &snapshot.task_summary,
+        &subtask.title,
+        &subtask.execution_type,
+    );
+    let raw = reasoning.generate_response(&system_prompt, &prompt)?;
     Ok(parse_subtask_output(&raw, &subtask.execution_type))
 }
 
@@ -1323,19 +1362,19 @@ fn parse_subtask_output(raw: &str, execution_type: &str) -> GeneratedSubTaskOutp
             result_summary: if parsed.result_summary.trim().is_empty() {
                 format!("Completed {} subtask", execution_type)
             } else {
-                parsed.result_summary.trim().to_string()
+                character::strip_filler_phrases(parsed.result_summary.trim())
             },
             result_payload: if parsed.result_payload.trim().is_empty() {
                 "No payload returned.".to_string()
             } else {
-                parsed.result_payload.trim().to_string()
+                character::strip_filler_phrases(parsed.result_payload.trim())
             },
         };
     }
 
     GeneratedSubTaskOutput {
         result_summary: format!("Completed {} subtask", execution_type),
-        result_payload: raw.trim().to_string(),
+        result_payload: character::strip_filler_phrases(raw.trim()),
     }
 }
 
@@ -1685,6 +1724,7 @@ mod tests {
             task_id,
             "What is the primary source requirement?",
             "text",
+            None,
             None,
             || false,
         )

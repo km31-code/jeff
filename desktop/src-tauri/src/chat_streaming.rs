@@ -184,6 +184,8 @@ pub async fn start_streaming_turn(
     let embeddings = state.embeddings.clone();
     let reasoning = OpenAiStreamingReasoningProvider::from_env();
     let tts_voice = state.store.get_tts_voice()?;
+    let current_snapshot = state.awareness_core.snapshot_immediate();
+    let current_snapshot_summary = crate::awareness_core::snapshot_summary(&current_snapshot);
 
     // capture everything needed to run the async pipeline.
     tauri::async_runtime::spawn(run_llm_stream(
@@ -199,6 +201,7 @@ pub async fn start_streaming_turn(
         active_context,
         tts_voice,
         is_first_message,
+        Some(current_snapshot_summary).filter(|value| !value.is_empty()),
     ));
 
     Ok(())
@@ -217,6 +220,7 @@ async fn run_llm_stream<R: Runtime + 'static>(
     active_context: Option<String>,
     tts_voice: String,
     is_first_message: bool,
+    snapshot_summary: Option<String>,
 ) {
     let turn_start = Instant::now();
     let turn_id = token.turn_id.clone();
@@ -288,7 +292,14 @@ async fn run_llm_stream<R: Runtime + 'static>(
     let user_prompt = build_user_prompt(&message, &context_pack, active_context.as_deref());
 
     // phase 20/23: prepend active window context and user profile to system prompt.
-    let effective_system_prompt = build_system_prompt(&store, active_context.as_deref(), is_first_message);
+    let effective_system_prompt = build_system_prompt(
+        &store,
+        &context_pack.task_summary,
+        active_context.as_deref(),
+        is_first_message,
+        &context_pack.recent_transcript,
+        snapshot_summary.as_deref(),
+    );
 
     // open the streaming LLM channel.
     let mut rx = match reasoning.stream_response(
@@ -423,13 +434,15 @@ async fn run_llm_stream<R: Runtime + 'static>(
         ms => Some(ms),
     };
 
-    if let Err(err) = store.finalize_streaming_message(placeholder_id, &full_text, final_kind) {
+    let final_text = crate::character::strip_filler_phrases(&full_text);
+
+    if let Err(err) = store.finalize_streaming_message(placeholder_id, &final_text, final_kind) {
         let _ = app.emit(
             EVENT_TURN_CANCELLED,
             &TurnCancelledPayload {
                 turn_id: turn_id.clone(),
                 reason: format!("finalize_error: {err}"),
-                partial_text: full_text,
+                partial_text: final_text,
                 elapsed_ms: total_ms,
             },
         );
@@ -440,15 +453,17 @@ async fn run_llm_stream<R: Runtime + 'static>(
         .get_privacy_user_profile_memory_enabled()
         .unwrap_or(false)
     {
-        let _ =
-            crate::user_model::record_response_length(&store, full_text.split_whitespace().count());
+        let _ = crate::user_model::record_response_length(
+            &store,
+            final_text.split_whitespace().count(),
+        );
     }
 
     let _ = app.emit(
         EVENT_LLM_COMPLETE,
         &LlmCompletePayload {
             turn_id: turn_id.clone(),
-            full_text: full_text.clone(),
+            full_text: final_text.clone(),
             cancelled: false,
             ttft_ms,
             total_ms,
@@ -468,8 +483,13 @@ async fn run_llm_stream<R: Runtime + 'static>(
     notify_turn_completion_if_backgrounded(
         &app,
         placeholder_id,
-        &full_text,
+        &final_text,
         "Jeff finished a response",
+    );
+    crate::awareness_core::spawn_awareness_update(
+        &app,
+        crate::awareness_core::SnapshotTrigger::NewTurn,
+        task_id,
     );
 }
 

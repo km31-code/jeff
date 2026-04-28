@@ -1,6 +1,8 @@
 mod ambient;
 mod artifact_parser;
+mod awareness_core;
 mod calendar;
+mod character;
 mod chat;
 mod chat_streaming;
 mod chunking;
@@ -184,6 +186,11 @@ fn main() {
                                 task_id,
                                 final_status,
                             } => {
+                                awareness_core::spawn_awareness_update(
+                                    &emit_app,
+                                    awareness_core::SnapshotTrigger::SubtaskCompleted,
+                                    task_id,
+                                );
                                 let _ = emit_app.emit(
                                     "subtask://companion-complete",
                                     serde_json::json!({
@@ -321,6 +328,13 @@ fn main() {
                             continue;
                         };
 
+                        let prior_title = ctx_state.current().map(|ctx| ctx.document_title);
+                        let new_title = new_ctx.as_ref().map(|ctx| ctx.document_title.clone());
+                        let document_title_changed = matches!(
+                            (prior_title.as_deref(), new_title.as_deref()),
+                            (Some(previous), Some(next)) if !next.is_empty() && previous != next
+                        );
+
                         // fire the document-switch nudge before updating state so
                         // we compare the incoming title against the last-known one.
                         if context_observer::is_accessibility_trusted() {
@@ -351,6 +365,18 @@ fn main() {
                         }
 
                         ctx_state.update(new_ctx);
+                        if document_title_changed {
+                            if let Some(task) = poll_handle
+                                .try_state::<JeffState>()
+                                .and_then(|s| s.store.get_active_task().ok().flatten())
+                            {
+                                awareness_core::spawn_awareness_update(
+                                    &poll_handle,
+                                    awareness_core::SnapshotTrigger::WindowSwitch,
+                                    task.id,
+                                );
+                            }
+                        }
 
                         // emit context-updated so the frontend tracks current state
                         // without needing its own polling interval.
@@ -470,6 +496,16 @@ fn main() {
                             "calendar://event-updated",
                             serde_json::to_value(&next_event).unwrap_or(serde_json::Value::Null),
                         );
+                        if let Some(task) = cal_poll_handle
+                            .try_state::<JeffState>()
+                            .and_then(|s| s.store.get_active_task().ok().flatten())
+                        {
+                            awareness_core::spawn_awareness_update(
+                                &cal_poll_handle,
+                                awareness_core::SnapshotTrigger::CalendarEvent,
+                                task.id,
+                            );
+                        }
 
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     }
@@ -616,6 +652,7 @@ fn main() {
             commands::trigger_speculative_subtask,
             commands::dismiss_proactive_trigger,
             commands::record_task_focus,
+            commands::get_situational_snapshot,
             // phase 16
             commands::list_subtask_steps,
             commands::list_file_write_proposals,

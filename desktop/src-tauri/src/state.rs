@@ -9,9 +9,9 @@ use std::{
 use crate::context_observer::ActiveWindowContext;
 
 use crate::{
-    coworking::CoworkingRuntime, embedding::EmbeddingProvider, providers::VoiceProvider,
-    reasoning::ReasoningProvider, store::TaskStore, streaming::SharedRegistry,
-    subtask::SubTaskRunner, watcher::WatcherState,
+    awareness_core::AwarenessCore, coworking::CoworkingRuntime, embedding::EmbeddingProvider,
+    providers::VoiceProvider, reasoning::ReasoningProvider, store::TaskStore,
+    streaming::SharedRegistry, subtask::SubTaskRunner, watcher::WatcherState,
 };
 
 #[derive(Clone)]
@@ -27,6 +27,7 @@ pub struct JeffState {
     pub interactions: SharedRegistry,
     // phase 13: filesystem watcher state per task.
     pub watcher: Arc<Mutex<WatcherState>>,
+    pub awareness_core: Arc<AwarenessCore>,
 }
 
 impl JeffState {
@@ -53,6 +54,7 @@ impl JeffState {
             subtasks: Arc::new(SubTaskRunner::new()),
             interactions: crate::streaming::new_shared_registry(),
             watcher: Arc::new(Mutex::new(WatcherState::new())),
+            awareness_core: Arc::new(AwarenessCore::new()),
         }
     }
 

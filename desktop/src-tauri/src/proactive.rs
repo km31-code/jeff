@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{
     ambient::{AmbientState, NotificationPayload, OVERLAY_WINDOW_LABEL},
+    character::{self, ReorientationContext},
     embedding::EmbeddingProvider,
     models::{DriftFlagDto, ReorientationDto, SubTaskDto},
     reasoning::ReasoningProvider,
@@ -26,9 +27,6 @@ pub const DRIFT_COOLDOWN_SECONDS: i64 = 900;
 pub const STUCK_COOLDOWN_SECONDS: i64 = 1200;
 pub const STUCK_SILENCE_THRESHOLD_SECONDS: i64 = 600;
 pub const DRIFT_SIMILARITY_THRESHOLD: f32 = 0.6;
-
-const REORIENTATION_SYSTEM_PROMPT: &str =
-    "You are Jeff. The user just returned to this task. Write one short sentence (max 25 words) summarizing where they left off. Be specific to the content. No commands. No filler phrases. Sound like a coworker who has been watching, not a system status message. First person. Direct.";
 
 const DRIFT_SYSTEM_PROMPT: &str =
     "You are Jeff's drift detector. Given the task goal and current text, determine if the current text diverges from the stated task goal. Return strict JSON only: {\"is_drifting\": bool, \"reason\": string, \"confidence\": number}";
@@ -163,6 +161,7 @@ pub fn generate_reorientation(
     active_context: Option<&str>,
     // phase 23: upcoming calendar event (within 2 hours), or None.
     calendar_event: Option<&str>,
+    snapshot_summary: Option<&str>,
 ) -> Result<ReorientationDto> {
     let fired_at = now_iso_string();
 
@@ -226,36 +225,22 @@ pub fn generate_reorientation(
         None
     };
 
-    let effective_reorientation_prompt = {
-        let mut parts: Vec<&str> = Vec::new();
-        let profile_str; // needs longer lifetime
-        if let Some(ref p) = profile_prefix {
-            profile_str = p.as_str();
-            parts.push(profile_str);
-        }
-        let ctx_str;
-        if let Some(ctx) = active_context {
-            if !ctx.is_empty() {
-                ctx_str = ctx;
-                parts.push(ctx_str);
-            }
-        }
-        // phase 23: include upcoming calendar event when within 2 hours
-        let cal_str;
-        if let Some(cal) = calendar_event {
-            if !cal.is_empty() {
-                cal_str = cal;
-                parts.push(cal_str);
-            }
-        }
-        parts.push(REORIENTATION_SYSTEM_PROMPT);
-        parts.join("\n\n")
-    };
+    let effective_reorientation_prompt =
+        character::build_reorientation_system_prompt(&ReorientationContext {
+            task_summary: task_summary.summary_text.clone(),
+            last_active: store
+                .get_last_task_focus(task_id)?
+                .unwrap_or_else(|| "unknown".to_string()),
+            profile_injection: profile_prefix,
+            active_window: active_context.map(|value| value.to_string()),
+            calendar_context: calendar_event.map(|value| value.to_string()),
+            snapshot_summary: snapshot_summary.map(|value| value.to_string()),
+        });
     let summary = reasoning
         .generate_response(&effective_reorientation_prompt, &user_prompt)
         .context("reorientation LLM call failed")?;
 
-    let clean_summary = summary.trim().to_string();
+    let clean_summary = character::strip_filler_phrases(summary.trim());
     let _ = store.record_proactive_trigger(task_id, "resume", false);
 
     Ok(ReorientationDto {
@@ -460,6 +445,12 @@ async fn run_monitor_cycle<R: Runtime>(handle: &AppHandle<R>) {
         None
     };
 
+    crate::awareness_core::spawn_awareness_update(
+        handle,
+        crate::awareness_core::SnapshotTrigger::TimeTick,
+        task.id,
+    );
+
     // 1. reorientation check.
     check_reorientation_from_background(handle, &jeff, quiet, task.id, active_ctx.as_deref()).await;
 
@@ -493,6 +484,8 @@ async fn check_reorientation_from_background<R: Runtime>(
     let store = jeff.store.clone();
     let reasoning = jeff.reasoning.clone();
     let active_ctx_owned = active_context.map(|s| s.to_string());
+    let snapshot_summary =
+        crate::awareness_core::snapshot_summary(&jeff.awareness_core.snapshot_immediate());
 
     let result = tauri::async_runtime::spawn_blocking(move || {
         generate_reorientation(
@@ -501,6 +494,7 @@ async fn check_reorientation_from_background<R: Runtime>(
             task_id,
             active_ctx_owned.as_deref(),
             None,
+            Some(snapshot_summary.as_str()).filter(|value| !value.is_empty()),
         )
     })
     .await;
@@ -535,7 +529,9 @@ async fn check_reorientation_from_background<R: Runtime>(
     } else {
         // persist summary so trigger_task_resume can return it on notification click
         // even after the cooldown has been recorded.
-        let _ = jeff.store.set_last_reorientation_summary(task_id, &reorientation.summary);
+        let _ = jeff
+            .store
+            .set_last_reorientation_summary(task_id, &reorientation.summary);
         let _ = crate::ambient::dispatch_notification(
             handle,
             NotificationPayload {
@@ -734,7 +730,7 @@ mod tests {
         };
 
         // no prior focus → treated as first visit; absence is considered infinite
-        let result = generate_reorientation(&store, &reasoning, task.id, None, None).unwrap();
+        let result = generate_reorientation(&store, &reasoning, task.id, None, None, None).unwrap();
         // first visit with no prior focus record: since get_last_task_focus returns None
         // the absence check is skipped and we proceed to fire the LLM
         assert!(
@@ -760,7 +756,7 @@ mod tests {
             drift: r#"{"is_drifting":false,"reason":"","confidence":0.0}"#.to_string(),
         };
 
-        let result = generate_reorientation(&store, &reasoning, task.id, None, None).unwrap();
+        let result = generate_reorientation(&store, &reasoning, task.id, None, None, None).unwrap();
         assert!(
             result.summary.is_empty(),
             "expected suppressed summary within cooldown"
@@ -795,7 +791,8 @@ mod tests {
                 fired_at: String::new(),
             }
         } else {
-            generate_reorientation(&store, &PanicReasoningProvider, task.id, None, None).unwrap()
+            generate_reorientation(&store, &PanicReasoningProvider, task.id, None, None, None)
+                .unwrap()
         };
 
         assert_eq!(response.task_id, task.id);

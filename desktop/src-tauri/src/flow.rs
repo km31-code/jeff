@@ -428,6 +428,7 @@ pub fn accept_suggestion_for_task(
                     &suggestion.description,
                     "text",
                     None,
+                    None,
                     || false,
                 )?;
                 Ok(SuggestionAcceptanceDto {
@@ -1273,6 +1274,7 @@ mod tests {
             "What is the primary source requirement?",
             "text",
             None,
+            None,
             || false,
         )
         .expect("chat failed after flow suggestion route");
@@ -1316,6 +1318,7 @@ mod tests {
             "What are the primary source requirements?",
             "text",
             None,
+            None,
             || false,
         )
         .expect("failed first ask/answer step");
@@ -1335,6 +1338,7 @@ mod tests {
             task_id,
             "How many sections are required?",
             "voice",
+            None,
             None,
             || false,
         )
@@ -1473,6 +1477,7 @@ mod tests {
             task_id,
             "While that runs, remind me about evidence requirements.",
             "text",
+            None,
             None,
             || false,
         )

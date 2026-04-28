@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 
 use crate::{
+    character::{self, ChatContext},
     embedding::EmbeddingProvider,
     message_kind::{classify_user_message_kind, MessageKind},
     models::{SendMessageResponseDto, TaskContextPackDto},
@@ -9,8 +10,6 @@ use crate::{
     store::TaskStore,
     user_model,
 };
-
-const GROUNDING_SYSTEM_PROMPT: &str = "You are Jeff, a task-focused AI coworker. When context chunks are provided in the user prompt, prioritize them and cite the relevant material. When the user asks what they are currently doing, working on, or has open, the Active Window section is the primary signal — use it directly. For all other questions, use retrieved context chunks. When no relevant chunks are available, still help the user — answer the question, give general guidance, suggest next steps, or ask a clarifying question. Be concise. One to three sentences unless the user asks for more. No filler phrases.";
 
 pub fn send_message_for_task(
     store: &TaskStore,
@@ -22,6 +21,7 @@ pub fn send_message_for_task(
     // phase 20: optional active-window context injected as a system-prompt prefix.
     // format: "User's active app: X. Document: Y." — under 30 tokens.
     active_context: Option<&str>,
+    snapshot_summary: Option<&str>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<SendMessageResponseDto> {
     let clean_message = message.trim();
@@ -56,8 +56,17 @@ pub fn send_message_for_task(
     let context_pack = build_task_context_pack(store, embeddings, task_id, clean_message)?;
     let user_prompt = build_user_prompt(clean_message, &context_pack, active_context);
 
-    let effective_system_prompt = build_system_prompt(store, active_context, is_first_message);
-    let assistant_response = reasoning.generate_response(&effective_system_prompt, &user_prompt)?;
+    let effective_system_prompt = build_system_prompt(
+        store,
+        &context_pack.task_summary,
+        active_context,
+        is_first_message,
+        &context_pack.recent_transcript,
+        snapshot_summary,
+    );
+    let assistant_response = character::strip_filler_phrases(
+        &reasoning.generate_response(&effective_system_prompt, &user_prompt)?,
+    );
     if is_cancelled() {
         return Ok(SendMessageResponseDto {
             assistant_response: String::new(),
@@ -87,43 +96,29 @@ pub fn send_message_for_task(
 /// coworker-joining phrase so jeff orients itself to the user's current work.
 pub fn build_system_prompt(
     store: &TaskStore,
+    task_summary: &str,
     active_context: Option<&str>,
     is_first_message: bool,
+    recent_transcript: &[String],
+    snapshot_summary: Option<&str>,
 ) -> String {
-    let mut parts: Vec<String> = Vec::new();
-
-    // phase 23: profile injection (gated on privacy setting)
-    if store
+    let profile_injection = if store
         .get_privacy_user_profile_memory_enabled()
         .unwrap_or(false)
     {
-        if let Some(injection) = user_model::build_profile_injection(store) {
-            parts.push(injection);
-        }
-    }
+        user_model::build_profile_injection(store)
+    } else {
+        None
+    };
 
-    if is_first_message {
-        // g2: inject joining context on first message so jeff treats itself as a
-        // coworker catching up, not a blank assistant being invoked cold.
-        let joining = match active_context {
-            Some(ctx) if !ctx.is_empty() => format!(
-                "The user just told you what they're working on for the first time. \
-                 Their current document is: {ctx}. \
-                 Orient yourself as a coworker who is now joining this work."
-            ),
-            _ => "The user just told you what they're working on for the first time. \
-                  Orient yourself as a coworker who is now joining this work."
-                .to_string(),
-        };
-        parts.push(joining);
-    } else if let Some(ctx) = active_context {
-        if !ctx.is_empty() {
-            parts.push(ctx.to_string());
-        }
-    }
-
-    parts.push(GROUNDING_SYSTEM_PROMPT.to_string());
-    parts.join("\n\n")
+    character::build_chat_system_prompt(&ChatContext {
+        task_summary: task_summary.to_string(),
+        active_window: active_context.map(|value| value.to_string()),
+        profile_injection,
+        recent_transcript: recent_transcript.to_vec(),
+        is_first_message,
+        snapshot_summary: snapshot_summary.map(|value| value.to_string()),
+    })
 }
 
 pub fn build_user_prompt(
@@ -259,6 +254,7 @@ mod tests {
             "What are the primary source requirements?",
             "text",
             None,
+            None,
             || false,
         )
         .expect("failed to send message");
@@ -321,6 +317,7 @@ mod tests {
             "primary source requirement",
             "voice",
             None,
+            None,
             || true,
         )
         .expect("failed to send cancelled message");
@@ -370,6 +367,7 @@ mod tests {
             task.id,
             "What are the primary source requirements?",
             "voice",
+            None,
             None,
             || false,
         )
