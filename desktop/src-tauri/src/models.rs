@@ -426,6 +426,8 @@ pub struct WriteAuditEntryDto {
     pub action: String,
     pub proposed_path: String,
     pub resolved_at: String,
+    // populated at runtime on approve; None when loaded from DB
+    pub resolved_path: Option<String>,
 }
 
 // phase 18: onboarding and secure key setup

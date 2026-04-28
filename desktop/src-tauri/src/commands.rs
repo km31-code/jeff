@@ -1597,7 +1597,7 @@ pub fn approve_subtask_file_write(
         }
     }
 
-    // resolve destination: workspace_path / proposed_path, then enforce canonical parent containment.
+    // ensure the internal task workspace exists (used for auto-ingest even if writing elsewhere)
     let workspace_uncanonical = state
         .store
         .get_task_workspace_path(task_id)
@@ -1608,13 +1608,31 @@ pub fn approve_subtask_file_write(
             workspace_uncanonical.display()
         )
     })?;
-    let workspace = fs::canonicalize(&workspace_uncanonical).map_err(|e| {
+
+    // prefer the user's connected watcher folder as the write destination; fall back to
+    // the internal workspace so approval never silently disappears into a hidden directory.
+    let write_root_uncanonical: std::path::PathBuf = match state
+        .store
+        .get_watched_folder(task_id)
+        .ok()
+        .flatten()
+    {
+        Some(folder) => std::path::PathBuf::from(folder.folder_path),
+        None => workspace_uncanonical.clone(),
+    };
+    fs::create_dir_all(&write_root_uncanonical).map_err(|e| {
         format!(
-            "failed to canonicalize task workspace '{}': {e}",
-            workspace_uncanonical.display()
+            "failed to create write root '{}': {e}",
+            write_root_uncanonical.display()
         )
     })?;
-    let dest = workspace.join(raw_path);
+    let write_root = fs::canonicalize(&write_root_uncanonical).map_err(|e| {
+        format!(
+            "failed to canonicalize write root '{}': {e}",
+            write_root_uncanonical.display()
+        )
+    })?;
+    let dest = write_root.join(raw_path);
 
     // create parent directories if needed, then write
     if let Some(parent) = dest.parent() {
@@ -1630,9 +1648,9 @@ pub fn approve_subtask_file_write(
                 parent.display()
             )
         })?;
-        if !canonical_parent.starts_with(&workspace) {
+        if !canonical_parent.starts_with(&write_root) {
             return Err(format!(
-                "proposed_path '{}' escapes task workspace",
+                "proposed_path '{}' escapes write root",
                 proposal.proposed_path
             ));
         }
@@ -1703,15 +1721,18 @@ pub fn approve_subtask_file_write(
         );
     }
 
-    // fetch and return audit entry (last insert)
+    // fetch and return audit entry (last insert); attach the resolved absolute path
+    // so the frontend can show the user exactly where the file landed.
     let entries = state
         .store
         .list_write_audit_log(task_id, 1)
         .map_err(map_jeff_error)?;
-    entries
+    let mut audit = entries
         .into_iter()
         .next()
-        .ok_or_else(|| "audit entry was written but could not be loaded".to_string())
+        .ok_or_else(|| "audit entry was written but could not be loaded".to_string())?;
+    audit.resolved_path = Some(dest.display().to_string());
+    Ok(audit)
 }
 
 #[tauri::command]

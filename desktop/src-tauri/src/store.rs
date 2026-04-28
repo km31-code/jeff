@@ -4000,6 +4000,7 @@ fn write_audit_from_row(row: &Row<'_>) -> rusqlite::Result<WriteAuditEntryDto> {
         action: row.get(4)?,
         proposed_path: row.get(5)?,
         resolved_at: row.get(6)?,
+        resolved_path: None,
     })
 }
 

@@ -803,6 +803,7 @@ export interface WriteAuditEntryDto {
   action: string;
   proposed_path: string;
   resolved_at: string;
+  resolved_path?: string;
 }
 
 export async function listSubtaskSteps(

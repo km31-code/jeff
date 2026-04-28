@@ -32,6 +32,7 @@ import {
   ApiKeyValidationDto,
   ChatMessageDto,
   FileWriteProposalDto,
+  IntentSlotsDto,
   OnboardingStatusDto,
   SelectionCaptureIndicatorDto,
   TaskDto,
@@ -40,6 +41,7 @@ import {
   acceptSubtaskResult,
   cancelSubtask,
   cancelStreamingTurn,
+  classifyMessageIntent,
   clearPreferredWorkspaceFolder,
   completeOnboarding,
   createTask,
@@ -62,6 +64,7 @@ import {
   sendMessageStreaming,
   setActiveTask,
   setPreferredWorkspaceFolder,
+  startSubtaskChain,
   storeOpenAiApiKey,
   transcribeAudio,
   triggerTaskResume,
@@ -196,6 +199,118 @@ function isApiKeyIssue(message: string | null): boolean {
   );
 }
 
+// intent routing helpers — mirror the logic in App.tsx so the overlay
+// behaves identically to the full workspace for parallel-work and revision
+// requests. all functions are pure and live outside the component.
+
+type OverlayRoutedIntent = "answer" | "revision" | "subtask" | "suggestion" | "unknown";
+
+function containsIntentPhrase(lower: string, phrases: string[]): boolean {
+  return phrases.some((phrase) => lower.includes(phrase));
+}
+
+function inferOverlayMessageIntentKeyword(message: string): OverlayRoutedIntent {
+  const lower = message.toLowerCase();
+  const trimmed = lower.trim();
+
+  if (
+    trimmed === "ok" ||
+    trimmed === "okay" ||
+    trimmed === "hmm" ||
+    trimmed === "yes please" ||
+    trimmed === "..." ||
+    trimmed === "no that's not right"
+  ) {
+    return "unknown";
+  }
+
+  if (
+    containsIntentPhrase(lower, [
+      "fix ",
+      "revise",
+      "tighten",
+      "rewrite",
+      "improve this",
+      "edit this",
+      "fix this intro",
+      "make this more analytical",
+    ])
+  ) {
+    return "revision";
+  }
+
+  if (
+    containsIntentPhrase(lower, [
+      "draft ",
+      "write ",
+      "expand this",
+      "synthesize",
+      "build me a paragraph",
+      "draft better intro",
+    ])
+  ) {
+    return "subtask";
+  }
+
+  if (
+    containsIntentPhrase(lower, [
+      "what should i do next",
+      "what next",
+      "next step",
+      "i'm stuck",
+      "suggest next",
+      "where should i focus",
+    ])
+  ) {
+    return "suggestion";
+  }
+
+  return "answer";
+}
+
+function inferOverlaySubtaskExecutionType(message: string): string {
+  const lower = message.toLowerCase();
+  if (lower.includes("expand")) return "expansion";
+  if (lower.includes("synth")) return "synthesis";
+  if (lower.includes("research")) return "targeted_research_synthesis";
+  return "draft_generation";
+}
+
+function inferOverlaySubtaskExecutionTypeFromDraftType(draftType: string): string {
+  const lower = draftType.toLowerCase();
+  if (lower.includes("expand") || lower.includes("expansion")) return "expansion";
+  if (lower.includes("synth") || lower.includes("summary")) return "synthesis";
+  if (lower.includes("research")) return "targeted_research_synthesis";
+  return "draft_generation";
+}
+
+function deriveOverlaySubtaskTitle(description: string): string {
+  return description.replace(/\s+/g, " ").trim().slice(0, 64) || "background task";
+}
+
+async function classifyOverlayMessageIntentWithFallback(
+  taskId: number,
+  message: string
+): Promise<{ intent: OverlayRoutedIntent; slots: IntentSlotsDto | null }> {
+  const TIMEOUT_MS = 300;
+  try {
+    const result = await Promise.race([
+      classifyMessageIntent(taskId, message),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`intent_classifier_timeout_${TIMEOUT_MS}ms`)),
+          TIMEOUT_MS
+        )
+      ),
+    ]);
+    return { intent: result.intent as OverlayRoutedIntent, slots: result.slots };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(`[jeff] overlay_intent_fallback: ${reason}`);
+    return { intent: inferOverlayMessageIntentKeyword(message), slots: null };
+  }
+}
+
 interface OverlayProps {
   onOpenWorkspace: () => void;
 }
@@ -212,6 +327,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [infoNotice, setInfoNotice] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -316,7 +432,6 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     messages,
     pendingWriteProposals.length,
     speculativeSubtask,
-    streamingText,
     streamingTurnId,
     writeConfirmations.length
   ]);
@@ -358,8 +473,8 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
         listMessages(taskId),
         getWatcherStatus(taskId).catch(() => null),
       ]);
-      // overlay shows only the tail of the conversation.
-      setMessages(list.slice(-6));
+      // overlay shows the recent tail of the conversation.
+      setMessages(list.slice(-20));
       if (status) setWatcherStatus(status);
     } catch (error) {
       setErrorMessage(String(error));
@@ -1081,11 +1196,12 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     async (proposal: FileWriteProposalDto) => {
       setErrorMessage(null);
       try {
-        await approveSubtaskFileWrite(proposal.task_id, proposal.id);
+        const result = await approveSubtaskFileWrite(proposal.task_id, proposal.id);
         setPendingWriteProposals((current) =>
           current.filter((item) => item.id !== proposal.id)
         );
-        showWriteConfirmation(fileNameFromPath(proposal.proposed_path));
+        // show the full resolved path so the user knows where the file landed
+        showWriteConfirmation(result.resolved_path ?? fileNameFromPath(proposal.proposed_path));
       } catch (error) {
         setErrorMessage(String(error));
       }
@@ -1113,6 +1229,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
 
       setSending(true);
       setErrorMessage(null);
+      setInfoNotice(null);
       let streamingStarted = false;
 
       try {
@@ -1124,6 +1241,14 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
           activeTaskRef.current = task;
           setTasks(await listTasks().catch(() => []));
           await refreshCompanionWork(task.id);
+        }
+
+        // classify intent before sending so we can route or bail.
+        const { intent, slots } = await classifyOverlayMessageIntentWithFallback(task.id, trimmed);
+
+        if (intent === "unknown") {
+          setErrorMessage("Not sure — is this a question, a request to draft something, or a revision?");
+          return;
         }
 
         await setTrayStatus("working").catch(() => undefined);
@@ -1142,12 +1267,65 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
           setStreamingText("");
           setInput("");
           await refreshMessages(task.id);
+
+          // subtask intent: start a parallel chain after the stream is initiated.
+          // startSubtaskChain returns quickly (spawns a rust thread); the
+          // companion-started event fires the spinner once the thread is running.
+          if (intent === "subtask") {
+            const executionType = slots?.draft_type
+              ? inferOverlaySubtaskExecutionTypeFromDraftType(slots.draft_type)
+              : inferOverlaySubtaskExecutionType(trimmed);
+            const description = slots?.instruction ?? trimmed;
+            await startSubtaskChain(
+              task.id,
+              deriveOverlaySubtaskTitle(description),
+              description,
+              executionType,
+              "text"
+            ).catch((err: unknown) =>
+              setErrorMessage(`Could not start parallel work: ${String(err)}`)
+            );
+            await refreshCompanionWork(task.id);
+          }
+
+          // revision intent: send the chat message (LLM can discuss) then nudge
+          // the user to open the workspace where the artifact picker lives.
+          if (intent === "revision") {
+            setInfoNotice(
+              "Revision noted. Open the full workspace to choose a document and apply it."
+            );
+          }
+
           return;
         }
 
+        // non-streaming fallback
         await sendMessage(task.id, trimmed, "text");
         setInput("");
         await refreshMessages(task.id);
+
+        if (intent === "subtask") {
+          const executionType = slots?.draft_type
+            ? inferOverlaySubtaskExecutionTypeFromDraftType(slots.draft_type)
+            : inferOverlaySubtaskExecutionType(trimmed);
+          const description = slots?.instruction ?? trimmed;
+          await startSubtaskChain(
+            task.id,
+            deriveOverlaySubtaskTitle(description),
+            description,
+            executionType,
+            "text"
+          ).catch((err: unknown) =>
+            setErrorMessage(`Could not start parallel work: ${String(err)}`)
+          );
+          await refreshCompanionWork(task.id);
+        }
+
+        if (intent === "revision") {
+          setInfoNotice(
+            "Revision noted. Open the full workspace to choose a document and apply it."
+          );
+        }
       } catch (error) {
         setErrorMessage(String(error));
       } finally {
@@ -1431,8 +1609,14 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   const submitVoiceMessage = useCallback(async (taskId: number, text: string) => {
     setSending(true);
     setErrorMessage(null);
+    setInfoNotice(null);
     let streamingStarted = false;
     try {
+      // classify intent. for voice, coerce "unknown" to "answer" — discarding a
+      // transcribed voice message silently would feel broken.
+      const { intent, slots } = await classifyOverlayMessageIntentWithFallback(taskId, text);
+      const routedIntent: OverlayRoutedIntent = intent === "unknown" ? "answer" : intent;
+
       await setTrayStatus("working").catch(() => undefined);
       if (isStreamingEnabled()) {
         if (streamingTurnIdRef.current) {
@@ -1445,9 +1629,55 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
         setStreamingTurnId(turnId);
         setStreamingText("");
         await refreshMessages(taskId);
+
+        if (routedIntent === "subtask") {
+          const executionType = slots?.draft_type
+            ? inferOverlaySubtaskExecutionTypeFromDraftType(slots.draft_type)
+            : inferOverlaySubtaskExecutionType(text);
+          const description = slots?.instruction ?? text;
+          await startSubtaskChain(
+            taskId,
+            deriveOverlaySubtaskTitle(description),
+            description,
+            executionType,
+            "voice"
+          ).catch((err: unknown) =>
+            setErrorMessage(`Could not start parallel work: ${String(err)}`)
+          );
+          await refreshCompanionWork(taskId);
+        }
+
+        if (routedIntent === "revision") {
+          setInfoNotice(
+            "Revision noted. Open the full workspace to choose a document and apply it."
+          );
+        }
       } else {
         await sendMessage(taskId, text, "voice");
         await refreshMessages(taskId);
+
+        if (routedIntent === "subtask") {
+          const executionType = slots?.draft_type
+            ? inferOverlaySubtaskExecutionTypeFromDraftType(slots.draft_type)
+            : inferOverlaySubtaskExecutionType(text);
+          const description = slots?.instruction ?? text;
+          await startSubtaskChain(
+            taskId,
+            deriveOverlaySubtaskTitle(description),
+            description,
+            executionType,
+            "voice"
+          ).catch((err: unknown) =>
+            setErrorMessage(`Could not start parallel work: ${String(err)}`)
+          );
+          await refreshCompanionWork(taskId);
+        }
+
+        if (routedIntent === "revision") {
+          setInfoNotice(
+            "Revision noted. Open the full workspace to choose a document and apply it."
+          );
+        }
       }
     } catch (error) {
       setErrorMessage(String(error));
@@ -1455,7 +1685,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     } finally {
       if (!streamingStarted) setSending(false);
     }
-  }, [refreshMessages]);
+  }, [refreshCompanionWork, refreshMessages]);
 
   const handleStartVoiceRecording = useCallback(async () => {
     if (recording) return;
@@ -2247,6 +2477,17 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                   {sending ? "…" : activeTask ? "send" : "start"}
                 </button>
               </form>
+
+              {infoNotice ? (
+                <div className="overlay-banner overlay-banner-info" data-testid="overlay-info-notice">
+                  <span>{infoNotice}</span>
+                  <div className="overlay-banner-actions">
+                    <button type="button" onClick={() => setInfoNotice(null)}>
+                      dismiss
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               {errorMessage ? (
                 <div className="overlay-error">
