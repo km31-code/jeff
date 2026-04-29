@@ -143,11 +143,11 @@ Expected: The subtask stops. The spinner row disappears. No file write goes thro
 
 **E3.** Switch to another app. Work in it for 6 minutes without opening Jeff.
 
-Expected: A native macOS notification appears from Jeff. It tells you specifically where you left off on your task — not "you have been away," but a sentence about the actual content.
+Expected: A native macOS notification appears from Jeff with title "jeff". Its body is the synthesized orientation text, not a generic "you have been away" placeholder.
 
 **E4.** Click the notification.
 
-Expected: The companion bar expands and shows the reorientation context — what Jeff remembered about your task. This is not a generic "opened from notification" message; it is the actual orientation content.
+Expected: The companion bar expands and the same orientation appears as a normal Jeff assistant bubble in the conversation. There is no "opened from notification" banner, and you can reply directly in the chat box.
 
 **E5.** Enable quiet mode (click **quiet off** in the companion header).
 

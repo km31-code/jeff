@@ -581,41 +581,41 @@ you. The mechanic is the same; the experience is completely different.
 
 ### Implementation checklist
 
-- [ ] In `proactive.rs`: implement `pub async fn deliver_proactive_as_chat_message(store, app, task_id: i64, message: &str, kind: &str) -> Result<()>`:
+- [x] In `proactive.rs`: implement `pub async fn deliver_proactive_as_chat_message(store, app, task_id: i64, message: &str, kind: &str) -> Result<()>`:
       calls `store.insert_chat_message(task_id, "assistant", kind, message)`,
       emits `proactive://message_inserted` via `app.emit_all()`
-- [ ] Update `run_synthesis_check` (from Phase 27): when overlay is visible, call
+- [x] Update `run_synthesis_check` (from Phase 27): when overlay is visible, call
       `deliver_proactive_as_chat_message`; when hidden, call `ambient::dispatch_notification`
       with synthesized text as body
-- [ ] Ensure `store.insert_chat_message` accepts `message_kind` as a parameter
+- [x] Ensure `store.insert_chat_message` accepts `message_kind` as a parameter
       (it currently does per models.rs — verify no schema change needed)
-- [ ] In `Overlay.tsx`: add `proactive://message_inserted` event listener in
+- [x] In `Overlay.tsx`: add `proactive://message_inserted` event listener in
       `useEffect`; on receive, call `loadMessages(activeTask.id)`
-- [ ] In `Overlay.tsx`: add conditional styling for `message.message_kind.startsWith("proactive_")`:
+- [x] In `Overlay.tsx`: add conditional styling for `message.message_kind.startsWith("proactive_")`:
       use `border-left: 2px solid rgba(255,255,255,0.18)` instead of accent-purple
       for the left border on the message bubble. No other visual change.
-- [ ] In `Overlay.tsx`: remove `showReorientationBanner` state and the banner
+- [x] In `Overlay.tsx`: remove `showReorientationBanner` state and the banner
       component that uses it (approximately lines rendering `overlay-banner-info`
       for reorientation context)
-- [ ] In `Overlay.tsx`: remove `driftFlag` state and the banner component that
+- [x] In `Overlay.tsx`: remove `driftFlag` state and the banner component that
       uses it
-- [ ] In `Overlay.tsx`: remove the call to `triggerTaskResume()` on
+- [x] In `Overlay.tsx`: remove the call to `triggerTaskResume()` on
       `ambient://overlay-shown` (this was the remaining hook into the old banner
       path). `recordTaskFocus()` still runs on overlay-shown.
-- [ ] In `Overlay.tsx`: on `ambient://notification-click` with kind containing
+- [x] In `Overlay.tsx`: on `ambient://notification-click` with kind containing
       "reorientation" or "proactive": call `loadMessages()` and scroll to last
       proactive message. Remove the "opened from notification" banner display.
-- [ ] In `ambient.rs` `dispatch_notification`: when called from `run_synthesis_check`,
+- [x] In `ambient.rs` `dispatch_notification`: when called from `run_synthesis_check`,
       the message text is passed as the notification body directly (not a canned
       template)
-- [ ] Update `TESTING_GUIDE.md` Scenario E: step E3 now says "A native macOS
+- [x] Update `TESTING_GUIDE.md` Scenario E: step E3 now says "A native macOS
       notification appears" and step E4 says "The companion expands and the most
       recent message in the chat is Jeff's reorientation" (not "shows the
       reorientation context card")
-- [ ] Write unit test `deliver_proactive_inserts_message_with_correct_kind`:
+- [x] Write unit test `deliver_proactive_inserts_message_with_correct_kind`:
       mock store, call `deliver_proactive_as_chat_message`, assert message_kind
       is stored correctly
-- [ ] Write `scripts/phase28_check.sh`:
+- [x] Write `scripts/phase28_check.sh`:
       - `deliver_proactive_as_chat_message` in `proactive.rs`
       - `proactive://message_inserted` event emitted in `proactive.rs`
       - No `showReorientationBanner` state in `Overlay.tsx`

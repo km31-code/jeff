@@ -1,13 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::{
     ambient::{AmbientState, NotificationPayload, OVERLAY_WINDOW_LABEL},
     awareness_core::{
         self, ProactiveSpeechReason, SituationalSnapshot, SnapshotTrigger, UserProfile,
     },
-    message_kind::MessageKind,
     state::{CalendarState, ContextState, JeffState},
 };
 
@@ -144,7 +143,7 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
         return;
     }
 
-    let delivered = deliver_synthesis_message(handle, &jeff, task.id, &reason, &message);
+    let delivered = deliver_synthesis_message(handle, &jeff, task.id, &reason, &message).await;
     log_synthesis_decision(
         &jeff,
         task.id,
@@ -193,31 +192,26 @@ fn calendar_context<R: Runtime>(
         .and_then(|calendar: tauri::State<'_, CalendarState>| calendar.current())
 }
 
-fn deliver_synthesis_message<R: Runtime>(
+async fn deliver_synthesis_message<R: Runtime>(
     handle: &AppHandle<R>,
     jeff: &JeffState,
     task_id: i64,
     reason: &ProactiveSpeechReason,
     message: &str,
 ) -> bool {
-    // store the proactive message as an actual chat turn so it appears in the
-    // conversation thread rather than as a dismissible banner.
-    if jeff
-        .store
-        .append_chat_message(task_id, "assistant", "assistant", MessageKind::AssistantProactive, message)
-        .is_err()
+    let kind = proactive_message_kind_for_reason(reason);
+    if crate::proactive::deliver_proactive_as_chat_message(
+        &jeff.store,
+        handle,
+        task_id,
+        message,
+        kind,
+    )
+    .await
+    .is_err()
     {
         return false;
     }
-
-    // notify the frontend to refresh its message list.
-    let _ = handle.emit(
-        "jeff://proactive-message-inserted",
-        serde_json::json!({
-            "task_id": task_id,
-            "reason_type": reason.reason_type(),
-        }),
-    );
 
     let overlay_visible = handle
         .get_webview_window(OVERLAY_WINDOW_LABEL)
@@ -225,19 +219,28 @@ fn deliver_synthesis_message<R: Runtime>(
         .unwrap_or(false);
 
     if !overlay_visible {
-        // dispatch a native notification so the user sees it while overlay is hidden.
-        let _ = crate::ambient::dispatch_notification(
+        return crate::ambient::dispatch_notification(
             handle,
             NotificationPayload {
                 title: "jeff".to_string(),
                 body: message.to_string(),
-                context_kind: Some(reason.reason_type().to_string()),
+                context_kind: Some(kind.to_string()),
                 context_id: Some(task_id),
             },
-        );
+        )
+        .is_ok();
     }
 
     true
+}
+
+fn proactive_message_kind_for_reason(reason: &ProactiveSpeechReason) -> &'static str {
+    match reason {
+        ProactiveSpeechReason::TaskReturn { .. } => "proactive_reorientation",
+        ProactiveSpeechReason::DeadlinePressure { .. } => "proactive_deadline",
+        ProactiveSpeechReason::BlockerDetected { .. } => "proactive_blocker",
+        ProactiveSpeechReason::WorkQualityObservation { .. } => "proactive_drift",
+    }
 }
 
 fn log_synthesis_decision(
@@ -287,7 +290,6 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +313,35 @@ mod tests {
                 "task_return".to_string(),
                 Some("idle_minutes=8; suppressed=quiet_mode".to_string())
             )
+        );
+    }
+
+    #[test]
+    fn synthesis_reasons_map_to_proactive_message_kinds() {
+        assert_eq!(
+            proactive_message_kind_for_reason(&ProactiveSpeechReason::TaskReturn {
+                idle_minutes: 6
+            }),
+            "proactive_reorientation"
+        );
+        assert_eq!(
+            proactive_message_kind_for_reason(&ProactiveSpeechReason::DeadlinePressure {
+                event: "standup".to_string(),
+                minutes_until: 12,
+            }),
+            "proactive_deadline"
+        );
+        assert_eq!(
+            proactive_message_kind_for_reason(&ProactiveSpeechReason::BlockerDetected {
+                blocker: "waiting on outline".to_string(),
+            }),
+            "proactive_blocker"
+        );
+        assert_eq!(
+            proactive_message_kind_for_reason(&ProactiveSpeechReason::WorkQualityObservation {
+                observation: "draft is drifting from prompt".to_string(),
+            }),
+            "proactive_drift"
         );
     }
 }

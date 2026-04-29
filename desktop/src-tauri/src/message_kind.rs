@@ -12,9 +12,13 @@ pub enum MessageKind {
     // completion. list_messages returns both to the frontend.
     AssistantPartial,
     AssistantInterrupted,
-    // phase 28: proactive message delivered by the synthesis layer.
-    // stored in the chat thread so the user sees it as a conversation turn.
-    AssistantProactive,
+    // phase 28: proactive messages are stored in the chat thread as normal
+    // assistant turns, with the reason preserved in the message kind.
+    AssistantProactiveReorientation,
+    AssistantProactiveDrift,
+    AssistantProactiveBlocker,
+    AssistantProactiveDeadline,
+    AssistantProactiveSpeculativeSubtask,
 }
 
 impl MessageKind {
@@ -29,7 +33,11 @@ impl MessageKind {
             Self::SystemStatusEvent => "system_status_event",
             Self::AssistantPartial => "assistant_partial",
             Self::AssistantInterrupted => "assistant_interrupted",
-            Self::AssistantProactive => "assistant_proactive",
+            Self::AssistantProactiveReorientation => "proactive_reorientation",
+            Self::AssistantProactiveDrift => "proactive_drift",
+            Self::AssistantProactiveBlocker => "proactive_blocker",
+            Self::AssistantProactiveDeadline => "proactive_deadline",
+            Self::AssistantProactiveSpeculativeSubtask => "proactive_speculative_subtask",
         }
     }
 
@@ -43,8 +51,25 @@ impl MessageKind {
             "system_status_event" => Self::SystemStatusEvent,
             "assistant_partial" => Self::AssistantPartial,
             "assistant_interrupted" => Self::AssistantInterrupted,
-            "assistant_proactive" => Self::AssistantProactive,
+            "proactive_reorientation" | "assistant_proactive" => {
+                Self::AssistantProactiveReorientation
+            }
+            "proactive_drift" => Self::AssistantProactiveDrift,
+            "proactive_blocker" => Self::AssistantProactiveBlocker,
+            "proactive_deadline" => Self::AssistantProactiveDeadline,
+            "proactive_speculative_subtask" => Self::AssistantProactiveSpeculativeSubtask,
             _ => Self::UserStatement,
+        }
+    }
+
+    pub fn from_proactive_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "proactive_reorientation" => Some(Self::AssistantProactiveReorientation),
+            "proactive_drift" => Some(Self::AssistantProactiveDrift),
+            "proactive_blocker" => Some(Self::AssistantProactiveBlocker),
+            "proactive_deadline" => Some(Self::AssistantProactiveDeadline),
+            "proactive_speculative_subtask" => Some(Self::AssistantProactiveSpeculativeSubtask),
+            _ => None,
         }
     }
 }
@@ -102,6 +127,24 @@ mod tests {
         assert_eq!(
             classify_user_message_kind("I drafted the intro paragraph"),
             MessageKind::UserStatement
+        );
+    }
+
+    #[test]
+    fn proactive_message_kinds_round_trip_from_db() {
+        for kind in [
+            "proactive_reorientation",
+            "proactive_drift",
+            "proactive_blocker",
+            "proactive_deadline",
+            "proactive_speculative_subtask",
+        ] {
+            assert_eq!(MessageKind::from_db(kind).as_str(), kind);
+        }
+
+        assert_eq!(
+            MessageKind::from_db("assistant_proactive").as_str(),
+            "proactive_reorientation"
         );
     }
 }

@@ -105,7 +105,8 @@ grep_check "get_synthesis_log registered in invoke handler" "commands::get_synth
 grep_check "frontend synthesis log client present" "getSynthesisLog" "$FRONTEND/tauriClient.ts"
 grep_check "privacy center renders synthesis audit" "privacy-synthesis-audit-list" "$FRONTEND/App.tsx"
 grep_check "frontend mock covers get_synthesis_log" "get_synthesis_log" "$FRONTEND/App.test.tsx"
-grep_check "reorientation dismissals downweight reorientation profile key" "dismissProactiveTrigger.*reorientation" "$FRONTEND/App.tsx" "$FRONTEND/Overlay.tsx"
+grep_check "reorientation profile weight remains modeled" "trigger_weight_reorientation" "$SRC/awareness_core.rs"
+grep_check "proactive dismissal command remains available" "dismiss_proactive_trigger" "$SRC/commands.rs" "$SRC/main.rs"
 if grep -q "triggerTaskResume" "$FRONTEND/App.tsx" || grep -q "triggerSpeculativeSubtask" "$FRONTEND/App.tsx"; then
     check "workspace focus no longer runs old proactive checks" "fail"
 else

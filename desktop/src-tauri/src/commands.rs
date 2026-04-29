@@ -766,7 +766,11 @@ pub fn propose_artifact_revision(
     let snapshot_summary = {
         let snap = state.awareness_core.snapshot_immediate();
         let summary = crate::awareness_core::snapshot_summary(&snap);
-        if summary.is_empty() { None } else { Some(summary) }
+        if summary.is_empty() {
+            None
+        } else {
+            Some(summary)
+        }
     };
     propose_revision_for_artifact(
         &state.store,
@@ -1460,7 +1464,8 @@ pub fn check_task_drift(
 }
 
 #[tauri::command]
-pub fn trigger_speculative_subtask(
+pub async fn trigger_speculative_subtask<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, JeffState>,
     ambient: State<'_, crate::ambient::AmbientState>,
     task_id: i64,
@@ -1473,14 +1478,49 @@ pub fn trigger_speculative_subtask(
     {
         return Ok(None);
     }
-    crate::proactive::propose_speculative_subtask(
+    let store = state.store.clone();
+    let subtask = crate::proactive::propose_speculative_subtask(
         &state.store,
         state.embeddings.as_ref(),
         std::sync::Arc::clone(&state.reasoning),
         &state.subtasks,
         task_id,
     )
-    .map_err(map_jeff_error)
+    .map_err(map_jeff_error)?;
+
+    if let Some(subtask) = subtask.as_ref() {
+        let description = subtask
+            .description
+            .trim()
+            .strip_suffix('.')
+            .unwrap_or_else(|| subtask.description.trim());
+        let subject = if description.is_empty() {
+            subtask.title.trim()
+        } else {
+            description
+        };
+        let message = format!("I started {subject} in the background.");
+        crate::proactive::deliver_proactive_as_chat_message(
+            &store,
+            &app,
+            task_id,
+            &message,
+            "proactive_speculative_subtask",
+        )
+        .await
+        .map_err(map_jeff_error)?;
+        let _ = app.emit(
+            "proactive://speculative_subtask",
+            &serde_json::json!({
+                "subtask_id": subtask.subtask_id,
+                "task_id": subtask.task_id,
+                "title": subtask.title.clone(),
+                "description": subtask.description.clone(),
+            }),
+        );
+    }
+
+    Ok(subtask)
 }
 
 #[tauri::command]

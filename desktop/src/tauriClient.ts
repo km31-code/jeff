@@ -83,7 +83,11 @@ export interface ChatMessageDto {
     | "assistant_revision_proposal"
     | "assistant_revision_status"
     | "system_status_event"
-    | "assistant_proactive"
+    | "proactive_reorientation"
+    | "proactive_drift"
+    | "proactive_blocker"
+    | "proactive_deadline"
+    | "proactive_speculative_subtask"
     | string;
   content: string;
   created_at: string;

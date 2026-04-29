@@ -22,7 +22,6 @@ import {
   getAmbientState,
   hideOverlay,
   markNotificationPermission,
-  reportNotificationClicked,
   setOverlayMode,
   setTrayStatus,
   setQuietMode,
@@ -46,7 +45,6 @@ import {
   completeOnboarding,
   createTask,
   dismissSelectionCapture,
-  dismissProactiveTrigger,
   getActiveTask,
   getActiveWindowContext,
   getAccessibilityPermissionStatus,
@@ -94,7 +92,6 @@ async function blobToBase64(blob: Blob): Promise<string> {
 // bar, expanded shows the last few messages and a send box. this is not the
 // full workspace — it is the always-there companion surface.
 
-type PendingNotificationContext = { kind: string | null; id: number | null };
 type OnboardingStep = 1 | 2 | 3 | 4 | 5;
 type OverlayShownPayload = { interactive?: boolean };
 type ActiveSubtaskState = { id: number; taskId: number; title: string };
@@ -343,8 +340,6 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   const speechRecognitionRef = useRef<OverlaySpeechRecognition | null>(null);
   const partialSttSentRef = useRef<boolean>(false);
   const [hotkeyConflict, setHotkeyConflict] = useState<string | null>(null);
-  const [notificationContext, setNotificationContext] =
-    useState<PendingNotificationContext | null>(null);
   const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
   const [streamingText, setStreamingText] = useState("");
 
@@ -399,7 +394,6 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   );
   const taskSwitcherTasks = useMemo(() => tasks.slice(0, 5), [tasks]);
   const streamingTurnIdRef = useRef<string | null>(null);
-  const pendingExpandRef = useRef(false);
   const onboardingSnoozedRef = useRef(false);
   const messageInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -614,18 +608,20 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
         (event) => {
           const kind = event.payload.context_kind ?? null;
           const id = event.payload.context_id ?? null;
-          pendingExpandRef.current = true;
           setMode("expanded");
+          void setOverlayMode("expanded").catch(() => undefined);
 
           // phase 28: synthesis proactive notifications — message is already in DB,
           // just refresh the thread so the user sees it when the overlay opens.
-          const synthKinds = ["task_return", "deadline_pressure", "blocker", "work_quality_observation"];
-          if (kind && synthKinds.includes(kind) && id !== null) {
+          if (kind?.startsWith("proactive_") && id !== null) {
             void refreshMessages(id).catch(() => undefined);
             return;
           }
 
-          setNotificationContext({ kind, id });
+          const active = activeTaskRef.current;
+          if (active) {
+            void refreshMessages(active.id).catch(() => undefined);
+          }
         }
       )
     );
@@ -668,7 +664,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
         p.then((unlisten) => unlisten()).catch(() => undefined)
       );
     };
-  }, [openOnboardingWizard, refreshActiveTask, refreshOnboarding, schedulePrimaryInteractionFocus]);
+  }, [openOnboardingWizard, refreshActiveTask, refreshMessages, refreshOnboarding, schedulePrimaryInteractionFocus]);
 
   // c3: proactive events from the background monitor.
   // d2: hotkey-pressed when overlay is already visible.
@@ -679,9 +675,14 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     // phase 28: proactive message stored in DB — refresh the message list so it
     // appears in the conversation thread.
     unsubscribers.push(
-      listen<{ task_id: number; reason_type: string }>("jeff://proactive-message-inserted", (event) => {
-        void refreshMessages(event.payload.task_id).catch(() => undefined);
-      })
+      listen<{ task_id: number; message_id: number; kind: string; message_kind: string }>(
+        "proactive://message_inserted",
+        (event) => {
+          const active = activeTaskRef.current;
+          if (active && active.id !== event.payload.task_id) return;
+          void refreshMessages(event.payload.task_id).catch(() => undefined);
+        }
+      )
     );
 
     // c3: speculative subtask started by background monitor.
@@ -890,15 +891,6 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
       );
     };
   }, [refreshMessages]);
-
-  // if a notification click deep-linked us while hidden, the backend has
-  // already set mode=expanded. make sure it is applied locally too.
-  useEffect(() => {
-    if (pendingExpandRef.current) {
-      pendingExpandRef.current = false;
-      setOverlayMode("expanded").catch(() => undefined);
-    }
-  }, [notificationContext]);
 
   // phase 20: poll active window context every 3 seconds.
   // phase 20: subscribe to backend context://context-updated events.
@@ -1304,19 +1296,6 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     },
     [activeTask, input, refreshCompanionWork, refreshMessages, sending]
   );
-
-  const ackNotificationContext = useCallback(async () => {
-    if (!notificationContext) return;
-    try {
-      await reportNotificationClicked(
-        notificationContext.kind,
-        notificationContext.id
-      );
-    } catch {
-      // ignore — event already fired locally.
-    }
-    setNotificationContext(null);
-  }, [notificationContext]);
 
   const handleOnboardingCancel = useCallback(() => {
     onboardingSnoozedRef.current = true;
@@ -1988,23 +1967,6 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
             </div>
           ) : null}
 
-          {notificationContext ? (
-            <div className="overlay-banner overlay-banner-info">
-              <span>
-                opened from notification
-                {notificationContext.kind
-                  ? ` · ${notificationContext.kind}`
-                  : ""}
-                {notificationContext.id !== null
-                  ? ` #${notificationContext.id}`
-                  : ""}
-              </span>
-              <button type="button" onClick={ackNotificationContext}>
-                ok
-              </button>
-            </div>
-          ) : null}
-
           {onboardingVisible ? (
             <section className="overlay-onboarding" data-testid="overlay-onboarding">
               <div className="overlay-onboarding-meta" data-testid="overlay-onboarding-step-count">
@@ -2244,28 +2206,12 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                   messages.map((message) => (
                     <div
                       key={message.id}
-                      className={`overlay-message overlay-message-${message.role}${message.message_kind === "assistant_proactive" ? " overlay-message-proactive" : ""}`}
+                      className={`overlay-message overlay-message-${message.role}${message.message_kind.startsWith("proactive_") ? " overlay-message-proactive" : ""}`}
                     >
                       <div className="overlay-message-role">
                         {message.role === "assistant" ? "jeff" : message.role}
                       </div>
                       <div className="overlay-message-body">{message.content}</div>
-                      {message.message_kind === "assistant_proactive" ? (
-                        <div className="overlay-proactive-actions">
-                          <button
-                            type="button"
-                            className="overlay-proactive-dismiss"
-                            onClick={() => {
-                              const task = activeTaskRef.current;
-                              if (task) {
-                                void dismissProactiveTrigger(task.id, "reorientation").catch(() => undefined);
-                              }
-                            }}
-                          >
-                            not relevant
-                          </button>
-                        </div>
-                      ) : null}
                     </div>
                   ))
                 )}

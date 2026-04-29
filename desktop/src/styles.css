@@ -1109,6 +1109,11 @@ body.overlay-body {
   background: rgba(139, 92, 246, 0.06);
 }
 
+.overlay-message-proactive {
+  border-left-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.045);
+}
+
 /* b5: message role label — mono, small-caps */
 .overlay-message-role {
   font-variant: small-caps;

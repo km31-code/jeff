@@ -3,14 +3,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
-use serde::Deserialize;
-use tauri::{AppHandle, Manager, Runtime};
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{
     ambient::AmbientState,
     character::{self, ReorientationContext},
     embedding::EmbeddingProvider,
+    message_kind::MessageKind,
     models::{DriftFlagDto, ReorientationDto, SubTaskDto},
     reasoning::ReasoningProvider,
     retrieval::retrieve_relevant_chunks,
@@ -27,6 +28,7 @@ pub const DRIFT_COOLDOWN_SECONDS: i64 = 900;
 pub const STUCK_COOLDOWN_SECONDS: i64 = 1200;
 pub const STUCK_SILENCE_THRESHOLD_SECONDS: i64 = 600;
 pub const DRIFT_SIMILARITY_THRESHOLD: f32 = 0.6;
+pub const EVENT_PROACTIVE_MESSAGE_INSERTED: &str = "proactive://message_inserted";
 
 const DRIFT_SYSTEM_PROMPT: &str =
     "You are Jeff's drift detector. Given the task goal and current text, determine if the current text diverges from the stated task goal. Return strict JSON only: {\"is_drifting\": bool, \"reason\": string, \"confidence\": number}";
@@ -36,6 +38,49 @@ struct DriftJson {
     is_drifting: bool,
     reason: String,
     confidence: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct ProactiveMessageInsertedPayload {
+    task_id: i64,
+    message_id: i64,
+    kind: String,
+    message_kind: String,
+}
+
+pub async fn deliver_proactive_as_chat_message<R: Runtime>(
+    store: &TaskStore,
+    app_handle: &AppHandle<R>,
+    task_id: i64,
+    message: &str,
+    kind: &str,
+) -> Result<()> {
+    let inserted = insert_proactive_chat_message(store, task_id, message, kind)?;
+    app_handle
+        .emit(
+            EVENT_PROACTIVE_MESSAGE_INSERTED,
+            &ProactiveMessageInsertedPayload {
+                task_id,
+                message_id: inserted.id,
+                kind: inserted.message_kind.clone(),
+                message_kind: inserted.message_kind,
+            },
+        )
+        .context("failed to emit proactive message inserted event")?;
+    Ok(())
+}
+
+fn insert_proactive_chat_message(
+    store: &TaskStore,
+    task_id: i64,
+    message: &str,
+    kind: &str,
+) -> Result<crate::models::ChatMessageDto> {
+    let message_kind = MessageKind::from_proactive_kind(kind)
+        .ok_or_else(|| anyhow!("unsupported proactive message kind: {kind}"))?;
+    store
+        .append_chat_message(task_id, "assistant", "assistant", message_kind, message)
+        .with_context(|| format!("failed to insert proactive chat message for task_id={task_id}"))
 }
 
 fn unix_now() -> i64 {
@@ -430,6 +475,49 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = TaskStore::initialize(dir.path()).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn deliver_proactive_inserts_message_with_correct_kind() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("phase 28 delivery").unwrap();
+
+        let inserted = insert_proactive_chat_message(
+            &store,
+            task.id,
+            "You were outlining the counterargument; the next step is evidence.",
+            "proactive_reorientation",
+        )
+        .unwrap();
+
+        assert_eq!(inserted.task_id, task.id);
+        assert_eq!(inserted.role, "assistant");
+        assert_eq!(inserted.message_source, "assistant");
+        assert_eq!(inserted.message_kind, "proactive_reorientation");
+
+        let messages = store.list_chat_messages(task.id).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_kind, "proactive_reorientation");
+        assert!(messages[0].message_kind.starts_with("proactive_"));
+    }
+
+    #[test]
+    fn proactive_delivery_rejects_unknown_kind() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("phase 28 invalid kind").unwrap();
+
+        let error = insert_proactive_chat_message(
+            &store,
+            task.id,
+            "This should not be stored.",
+            "task_return",
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("unsupported proactive message kind"));
+        assert!(store.list_chat_messages(task.id).unwrap().is_empty());
     }
 
     #[derive(Clone)]

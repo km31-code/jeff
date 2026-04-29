@@ -3928,13 +3928,20 @@ fn artifact_from_row(row: &Row<'_>) -> rusqlite::Result<ArtifactDto> {
 }
 
 fn chat_message_from_row(row: &Row<'_>) -> rusqlite::Result<ChatMessageDto> {
+    let stored_message_kind: String = row.get(5)?;
+    let message_kind = if stored_message_kind == "assistant_proactive" {
+        "proactive_reorientation".to_string()
+    } else {
+        stored_message_kind
+    };
+
     Ok(ChatMessageDto {
         id: row.get(0)?,
         task_id: row.get(1)?,
         session_id: row.get(2)?,
         role: row.get(3)?,
         message_source: row.get(4)?,
-        message_kind: row.get(5)?,
+        message_kind,
         content: row.get(6)?,
         created_at: row.get(7)?,
     })
@@ -4215,6 +4222,24 @@ mod tests {
         let dir = TempDir::new().expect("failed to create temp dir");
         let store = TaskStore::initialize(dir.path()).expect("failed to initialize store");
         (dir, store)
+    }
+
+    #[test]
+    fn legacy_assistant_proactive_rows_normalize_to_phase_28_kind() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("legacy proactive").unwrap();
+        let conn = store.connect().unwrap();
+        conn.execute(
+            "INSERT INTO chat_messages
+             (task_id, session_id, role, message_source, message_kind, content, created_at)
+             VALUES (?1, NULL, 'assistant', 'assistant', 'assistant_proactive', 'legacy', '2026-04-29T00:00:00Z')",
+            rusqlite::params![task.id],
+        )
+        .unwrap();
+
+        let messages = store.list_chat_messages(task.id).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_kind, "proactive_reorientation");
     }
 
     #[test]
