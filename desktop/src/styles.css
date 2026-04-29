@@ -1203,6 +1203,55 @@ body.overlay-body {
   border-left-color: rgba(52, 211, 153, 0.35);
 }
 
+/* phase 29: revision proposal card */
+.overlay-revision-card {
+  display: grid;
+  gap: 6px;
+}
+
+.overlay-revision-rationale {
+  margin: 4px 0 6px;
+  font-style: italic;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.overlay-revision-proposed {
+  margin: 6px 0 0;
+  padding: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.overlay-revision-alt-btn {
+  background: transparent;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.overlay-revision-alt-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.overlay-revision-alt-card {
+  margin-top: 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 4px;
+}
+
 /* b2: input row */
 .overlay-input-row {
   display: flex;

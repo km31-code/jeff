@@ -33,8 +33,10 @@ use crate::{
         retrieve_relevant_chunks,
     },
     revision::{
-        apply_revision as apply_artifact_revision, get_artifact_content_for_edit,
-        list_artifact_versions_for_artifact, list_pending_revisions_for_artifact,
+        apply_revision as apply_artifact_revision,
+        generate_revision_alternative as generate_revision_alternative_inner,
+        get_artifact_content_for_edit, list_artifact_versions_for_artifact,
+        list_pending_revisions_for_artifact,
         propose_artifact_revision as propose_revision_for_artifact,
         reject_revision as reject_artifact_revision,
         revert_artifact_to_version as revert_artifact_by_version,
@@ -841,6 +843,42 @@ pub fn reject_revision(
     revision_id: i64,
 ) -> Result<RevisionProposalDto, String> {
     reject_artifact_revision(&state.store, revision_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn generate_revision_alternative(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    revision_id: i64,
+) -> Result<RevisionProposalDto, String> {
+    let snapshot_summary = {
+        let snap = state.awareness_core.snapshot_immediate();
+        let summary = crate::awareness_core::snapshot_summary(&snap);
+        if summary.is_empty() {
+            None
+        } else {
+            Some(summary)
+        }
+    };
+    generate_revision_alternative_inner(
+        &state.store,
+        state.reasoning.as_ref(),
+        task_id,
+        revision_id,
+        snapshot_summary.as_deref(),
+    )
+    .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_revision_alternatives(
+    state: State<'_, JeffState>,
+    revision_id: i64,
+) -> Result<Vec<RevisionProposalDto>, String> {
+    state
+        .store
+        .list_alternative_revisions(revision_id)
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]

@@ -701,43 +701,43 @@ what I produced and what I think of it."
 
 ### Implementation checklist
 
-- [ ] In `revision.rs`: after receiving LLM output, call `extract_assessment_sentence(output: &str) -> Option<String>`:
+- [x] In `revision.rs`: after receiving LLM output, call `extract_assessment_sentence(output: &str) -> Option<String>`:
       heuristic: if the first sentence (up to first `.` or `?` or `!`) is
       under 120 chars, does not contain markdown formatting, and contains
       first-person pronouns ("I ", "my "), extract it as assessment.
       Store as `rationale` on the RevisionProposalDto.
-- [ ] In `revision.rs`: store the result of `extract_assessment_sentence` in the
+- [x] In `revision.rs`: store the result of `extract_assessment_sentence` in the
       `rationale` column of the revisions table (this column already exists per
       models.rs `RevisionProposalDto.rationale: Option<String>`)
-- [ ] In `Overlay.tsx` revision proposal card: render `proposal.rationale` as
+- [x] In `Overlay.tsx` revision proposal card: render `proposal.rationale` as
       first element in the card, above the diff/proposed text. Style: `font-style:
       italic; color: var(--text-dim); font-size: 12px; margin-bottom: 6px;`. Only
       render when `proposal.rationale` is non-null and non-empty.
-- [ ] In `Overlay.tsx` subtask offer card: render `subtask.result_summary` as
+- [x] In `Overlay.tsx` subtask offer card: render `subtask.result_summary` as
       first element before the result excerpt. Same dim italic styling. Only
       when non-null.
-- [ ] Add `parent_revision_id INTEGER` column to `revisions` table via idempotent
+- [x] Add `parent_revision_id INTEGER` column to `revisions` table via idempotent
       `ALTER TABLE IF NOT EXISTS revisions ADD COLUMN parent_revision_id INTEGER;`
       migration in `store.rs`
-- [ ] Add `parent_revision_id: Option<i64>` field to `RevisionProposalDto` in `models.rs`
-- [ ] Implement `generate_revision_alternative(revision_id: i64, store, api_key) -> Result<RevisionProposalDto>`:
+- [x] Add `parent_revision_id: Option<i64>` field to `RevisionProposalDto` in `models.rs`
+- [x] Implement `generate_revision_alternative(revision_id: i64, store, api_key) -> Result<RevisionProposalDto>`:
       loads original revision's rationale and proposed text; calls revision LLM
       with instruction to take the alternative approach described in the rationale;
       stores new proposal with `parent_revision_id = original.id`
-- [ ] Add tauri command `generate_revision_alternative(task_id, revision_id)`
-- [ ] In `Overlay.tsx` revision card: add "see alternative" button (ghost style,
+- [x] Add tauri command `generate_revision_alternative(task_id, revision_id)`
+- [x] In `Overlay.tsx` revision card: add "see alternative" button (ghost style,
       small) when `proposal.rationale` is non-empty AND no sibling alternative
       exists yet. Clicking calls `generateRevisionAlternative()`. While loading,
       show spinner in button. On complete, render new card inline below.
-- [ ] Write unit test `extract_assessment_sentence_extracts_first_person_sentence`:
+- [x] Write unit test `extract_assessment_sentence_extracts_first_person_sentence`:
       input "I moved the argument to the front. The conclusion now:\n\nYour new
       argument..." → extracted: "I moved the argument to the front."
-- [ ] Write unit test `extract_assessment_sentence_returns_none_for_no_first_person`:
+- [x] Write unit test `extract_assessment_sentence_returns_none_for_no_first_person`:
       input "The revision restructures the paragraph." → None (no first person)
-- [ ] Write unit test `revision_system_prompt_includes_assessment_instruction`:
+- [x] Write unit test `revision_system_prompt_includes_assessment_instruction`:
       `build_revision_system_prompt()` output contains the assessment instruction
       from `base_character_prompt()`
-- [ ] Write `scripts/phase29_check.sh`:
+- [x] Write `scripts/phase29_check.sh`:
       - `extract_assessment_sentence` function in `revision.rs`
       - `parent_revision_id` column in revisions migration
       - `generate_revision_alternative` in commands list

@@ -175,6 +175,7 @@ export interface RevisionProposalDto {
   status: "pending" | "accepted" | "rejected" | string;
   created_at: string;
   updated_at: string;
+  parent_revision_id: number | null;
 }
 
 export interface ArtifactVersionDto {
@@ -514,6 +515,19 @@ export async function applyRevision(revisionId: number): Promise<RevisionApplyRe
 
 export async function rejectRevision(revisionId: number): Promise<RevisionProposalDto> {
   return invoke<RevisionProposalDto>("reject_revision", { revisionId });
+}
+
+export async function generateRevisionAlternative(
+  taskId: number,
+  revisionId: number,
+): Promise<RevisionProposalDto> {
+  return invoke<RevisionProposalDto>("generate_revision_alternative", { taskId, revisionId });
+}
+
+export async function listRevisionAlternatives(
+  revisionId: number,
+): Promise<RevisionProposalDto[]> {
+  return invoke<RevisionProposalDto[]>("list_revision_alternatives", { revisionId });
 }
 
 export async function listArtifactVersions(artifactId: number): Promise<ArtifactVersionDto[]> {

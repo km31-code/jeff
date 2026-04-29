@@ -33,11 +33,13 @@ import {
   FileWriteProposalDto,
   IntentSlotsDto,
   OnboardingStatusDto,
+  RevisionProposalDto,
   SelectionCaptureIndicatorDto,
   TaskDto,
   WatcherStatusDto,
   approveSubtaskFileWrite,
   acceptSubtaskResult,
+  applyRevision,
   cancelSubtask,
   cancelStreamingTurn,
   classifyMessageIntent,
@@ -45,6 +47,7 @@ import {
   completeOnboarding,
   createTask,
   dismissSelectionCapture,
+  generateRevisionAlternative,
   getActiveTask,
   getActiveWindowContext,
   getAccessibilityPermissionStatus,
@@ -52,10 +55,13 @@ import {
   getSelectionCaptureIndicator,
   getWatcherStatus,
   listFileWriteProposals,
+  listRevisionAlternatives,
   listSubtasks,
   listTasks,
   listMessages,
+  listTaskPendingRevisions,
   recordTaskFocus,
+  rejectRevision,
   rejectSubtaskResult,
   rejectSubtaskFileWrite,
   requestAccessibilityPermission,
@@ -97,7 +103,7 @@ type OverlayShownPayload = { interactive?: boolean };
 type ActiveSubtaskState = { id: number; taskId: number; title: string };
 type CompanionStartedPayload = { subtask_id: number; task_id: number; title: string };
 type CompanionCompletePayload = { subtask_id: number; task_id: number; final_status: string };
-type SpeculativeSubtaskState = { subtask_id: number; title: string; description?: string | null };
+type SpeculativeSubtaskState = { subtask_id: number; title: string; description?: string | null; result_summary?: string | null };
 type WriteConfirmation = { id: number; fileName: string };
 
 const WRITE_CONFIRMATION_MS = 3500;
@@ -371,6 +377,12 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   const [writeConfirmations, setWriteConfirmations] = useState<WriteConfirmation[]>([]);
   const writeConfirmationTimersRef = useRef<Map<number, number>>(new Map());
 
+  // phase 29: pending revision cards with assessment-first rendering
+  const [pendingRevisions, setPendingRevisions] = useState<RevisionProposalDto[]>([]);
+  // map from original revision_id → loaded alternative proposal
+  const [alternativeRevisions, setAlternativeRevisions] = useState<Record<number, RevisionProposalDto>>({});
+  const [loadingAlternativeFor, setLoadingAlternativeFor] = useState<number | null>(null);
+
   // phase 28: proactive messages are delivered as chat bubbles; no banner state needed.
   const [speculativeSubtask, setSpeculativeSubtask] = useState<SpeculativeSubtaskState | null>(null);
   // d1: track whether tts audio is currently playing for the barge-in hint
@@ -470,9 +482,10 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   }, []);
 
   const refreshCompanionWork = useCallback(async (taskId: number) => {
-    const [subtaskList, proposals] = await Promise.all([
+    const [subtaskList, proposals, revisions] = await Promise.all([
       listSubtasks(taskId).catch(() => []),
-      listFileWriteProposals(taskId).catch(() => [])
+      listFileWriteProposals(taskId).catch(() => []),
+      listTaskPendingRevisions(taskId).catch(() => []),
     ]);
     const running = subtaskList.find((subtask) => subtask.status === "running") ?? null;
     setActiveSubtask(
@@ -482,6 +495,11 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     );
     setPendingWriteProposals(
       proposals.filter((proposal) => proposal.status === "pending_approval")
+    );
+    // only surface revisions that are originals (not alternatives) in the overlay card list.
+    // alternatives are loaded inline when "see alternative" is clicked.
+    setPendingRevisions(
+      revisions.filter((r) => r.parent_revision_id === null)
     );
   }, []);
 
@@ -497,6 +515,8 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
         setMessages([]);
         setActiveSubtask(null);
         setPendingWriteProposals([]);
+        setPendingRevisions([]);
+        setAlternativeRevisions({});
         setWriteConfirmations([]);
       }
     } catch (error) {
@@ -720,6 +740,17 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
         setActiveSubtask((current) =>
           current?.id === event.payload.subtask_id ? null : current
         );
+        // if this is the speculative subtask, load result_summary to surface the assessment
+        void listSubtasks(event.payload.task_id).then((subtasks) => {
+          const completed = subtasks.find((s) => s.subtask_id === event.payload.subtask_id);
+          if (completed?.result_summary) {
+            setSpeculativeSubtask((current) =>
+              current?.subtask_id === event.payload.subtask_id
+                ? { ...current, result_summary: completed.result_summary }
+                : current
+            );
+          }
+        }).catch(() => undefined);
         void refreshCompanionWork(event.payload.task_id).catch(() => undefined);
       })
     );
@@ -1179,6 +1210,70 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
       setErrorMessage(String(error));
     }
   }, []);
+
+  // phase 29: revision card handlers
+  const handleApplyRevision = useCallback(async (revision: RevisionProposalDto) => {
+    setErrorMessage(null);
+    try {
+      await applyRevision(revision.revision_id);
+      setPendingRevisions((current) =>
+        current.filter((r) => r.revision_id !== revision.revision_id)
+      );
+      setAlternativeRevisions((current) => {
+        const next = { ...current };
+        delete next[revision.revision_id];
+        return next;
+      });
+    } catch (error) {
+      setErrorMessage(String(error));
+    }
+  }, []);
+
+  const handleRejectRevision = useCallback(async (revision: RevisionProposalDto) => {
+    setErrorMessage(null);
+    try {
+      await rejectRevision(revision.revision_id);
+      setPendingRevisions((current) =>
+        current.filter((r) => r.revision_id !== revision.revision_id)
+      );
+      setAlternativeRevisions((current) => {
+        const next = { ...current };
+        delete next[revision.revision_id];
+        return next;
+      });
+    } catch (error) {
+      setErrorMessage(String(error));
+    }
+  }, []);
+
+  const handleLoadAlternative = useCallback(
+    async (revision: RevisionProposalDto) => {
+      if (!activeTask) return;
+      setLoadingAlternativeFor(revision.revision_id);
+      setErrorMessage(null);
+      try {
+        // check if an alternative already exists on disk first
+        const existing = await listRevisionAlternatives(revision.revision_id).catch(() => []);
+        if (existing.length > 0) {
+          setAlternativeRevisions((current) => ({
+            ...current,
+            [revision.revision_id]: existing[0],
+          }));
+        } else {
+          const alt = await generateRevisionAlternative(activeTask.id, revision.revision_id);
+          setAlternativeRevisions((current) => ({
+            ...current,
+            [revision.revision_id]: alt,
+          }));
+        }
+      } catch (error) {
+        setErrorMessage(String(error));
+      } finally {
+        setLoadingAlternativeFor(null);
+      }
+    },
+    [activeTask]
+  );
 
   const handleSubmit = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
@@ -1764,6 +1859,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   const statusLabel = ambient ? describeStatus(ambient.tray_status) : "idle";
   const hasCompanionStreamItems =
     pendingWriteProposals.length > 0 ||
+    pendingRevisions.length > 0 ||
     writeConfirmations.length > 0 ||
     speculativeSubtask !== null ||
     streamingTurnId !== null;
@@ -2251,6 +2347,87 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                     </div>
                   </div>
                 ))}
+                {pendingRevisions.map((revision) => {
+                  const alt = alternativeRevisions[revision.revision_id] ?? null;
+                  const hasRationale = !!revision.rationale;
+                  const altLoading = loadingAlternativeFor === revision.revision_id;
+                  return (
+                    <div
+                      key={revision.revision_id}
+                      className="overlay-message overlay-message-assistant overlay-revision-card"
+                      data-testid="overlay-revision-proposal"
+                    >
+                      <div className="overlay-message-role">jeff</div>
+                      <div className="overlay-message-body">
+                        <span className="overlay-write-card-kicker">revision proposal</span>
+                        {hasRationale ? (
+                          <p className="overlay-revision-rationale" data-testid="overlay-revision-rationale">
+                            {revision.rationale}
+                          </p>
+                        ) : null}
+                        <pre className="overlay-revision-proposed" data-testid="overlay-revision-proposed">
+                          {revision.proposed_text.length > 300
+                            ? revision.proposed_text.slice(0, 300) + "..."
+                            : revision.proposed_text}
+                        </pre>
+                      </div>
+                      <div className="overlay-write-actions">
+                        <button
+                          type="button"
+                          className="overlay-write-approve"
+                          onClick={() => void handleApplyRevision(revision)}
+                          data-testid={`overlay-revision-apply-${revision.revision_id}`}
+                        >
+                          apply
+                        </button>
+                        {hasRationale && !alt ? (
+                          <button
+                            type="button"
+                            className="overlay-revision-alt-btn"
+                            onClick={() => void handleLoadAlternative(revision)}
+                            disabled={altLoading}
+                            data-testid={`overlay-revision-alt-${revision.revision_id}`}
+                          >
+                            {altLoading ? "..." : "see alternative"}
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="overlay-write-reject"
+                          onClick={() => void handleRejectRevision(revision)}
+                          data-testid={`overlay-revision-reject-${revision.revision_id}`}
+                        >
+                          dismiss
+                        </button>
+                      </div>
+                      {alt ? (
+                        <div className="overlay-revision-alt-card" data-testid={`overlay-revision-alt-card-${revision.revision_id}`}>
+                          <span className="overlay-write-card-kicker">alternative approach</span>
+                          {alt.rationale ? (
+                            <p className="overlay-revision-rationale">
+                              {alt.rationale}
+                            </p>
+                          ) : null}
+                          <pre className="overlay-revision-proposed">
+                            {alt.proposed_text.length > 300
+                              ? alt.proposed_text.slice(0, 300) + "..."
+                              : alt.proposed_text}
+                          </pre>
+                          <div className="overlay-write-actions">
+                            <button
+                              type="button"
+                              className="overlay-write-approve"
+                              onClick={() => void handleApplyRevision(alt)}
+                              data-testid={`overlay-revision-alt-apply-${alt.revision_id}`}
+                            >
+                              apply alternative
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
                 {writeConfirmations.map((confirmation) => (
                   <div
                     key={confirmation.id}
@@ -2272,7 +2449,12 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                   <div className="overlay-message overlay-message-assistant" data-testid="overlay-speculative-subtask">
                     <div className="overlay-message-role">jeff</div>
                     <div className="overlay-message-body">
-                      I started {speculativeSubtask.description || speculativeSubtask.title} in the background.
+                      {speculativeSubtask.result_summary ? (
+                        <p className="overlay-revision-rationale" data-testid="overlay-subtask-assessment">
+                          {speculativeSubtask.result_summary}
+                        </p>
+                      ) : null}
+                      I drafted {speculativeSubtask.description || speculativeSubtask.title || "something"} in the background.
                     </div>
                     <div className="overlay-banner-actions overlay-speculative-actions">
                       <button

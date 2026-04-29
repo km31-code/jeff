@@ -158,6 +158,7 @@ pub fn propose_artifact_revision(
         rationale: generated.rationale.clone(),
         grounding_notes: generated.grounding_notes.clone(),
         retrieval_confidence: generated.confidence,
+        parent_revision_id: None,
     })?;
 
     store.append_chat_message(
@@ -635,6 +636,135 @@ fn char_to_byte_offset(content: &str, char_index: usize) -> usize {
     }
 
     content.len()
+}
+
+/// Extracts a first-person assessment sentence from LLM output.
+/// Heuristic: the first sentence (up to `.`, `?`, or `!`) qualifies when it:
+/// - is under 120 characters
+/// - contains no markdown formatting (no `*`, `#`, `:` pairs, or backticks)
+/// - contains a first-person pronoun ("I " or "my ")
+pub fn extract_assessment_sentence(output: &str) -> Option<String> {
+    let trimmed = output.trim();
+    let end = trimmed
+        .find(|c| c == '.' || c == '?' || c == '!')
+        .map(|i| i + 1)
+        .unwrap_or(trimmed.len());
+    let sentence = trimmed[..end].trim();
+
+    if sentence.is_empty() || sentence.len() > 120 {
+        return None;
+    }
+
+    // reject sentences with markdown structural markers
+    if sentence.contains('*')
+        || sentence.contains('#')
+        || sentence.contains('`')
+        || sentence.contains("**")
+    {
+        return None;
+    }
+
+    let lower = sentence.to_ascii_lowercase();
+    if lower.contains("i ") || lower.contains("i'm") || lower.contains("i've") || lower.starts_with("i ") || lower.contains(" my ") || lower.starts_with("my ") {
+        Some(sentence.to_string())
+    } else {
+        None
+    }
+}
+
+pub fn generate_revision_alternative(
+    store: &TaskStore,
+    reasoning: &dyn crate::reasoning::ReasoningProvider,
+    task_id: i64,
+    revision_id: i64,
+    snapshot_summary: Option<&str>,
+) -> Result<RevisionProposalDto> {
+    let original = store
+        .get_revision_by_id(revision_id)?
+        .ok_or_else(|| anyhow!("revision id={} not found", revision_id))?;
+
+    if original.task_id != task_id {
+        return Err(anyhow!(
+            "revision id={} does not belong to task id={}",
+            revision_id,
+            task_id
+        ));
+    }
+
+    // only allow generating an alternative for an original (not already an alternative)
+    if original.parent_revision_id.is_some() {
+        return Err(anyhow!(
+            "revision id={} is already an alternative; cannot generate alternative of an alternative",
+            revision_id
+        ));
+    }
+
+    // verify no alternative already exists
+    let existing = store.list_alternative_revisions(revision_id)?;
+    if !existing.is_empty() {
+        return Err(anyhow!(
+            "revision id={} already has an alternative (id={})",
+            revision_id,
+            existing[0].revision_id
+        ));
+    }
+
+    let prior_rationale = original
+        .rationale
+        .as_deref()
+        .unwrap_or("a direct approach");
+
+    let artifact = get_artifact_content_for_edit(store, original.artifact_id)?;
+    let profile_injection = if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        user_model::build_profile_injection(store)
+    } else {
+        None
+    };
+
+    let system_prompt = character::build_revision_system_prompt(&character::RevisionContext {
+        task_summary: artifact.file_name.clone(),
+        target_description: original.target_description.clone(),
+        instruction: format!(
+            "Generate an ALTERNATIVE approach to what was described in the prior assessment: \"{}\". \
+             The prior revision took that path. Now take a meaningfully different path — different structure, \
+             different emphasis, or different tradeoff. Your assessment sentence must describe what makes \
+             this approach different.",
+            prior_rationale
+        ),
+        profile_injection,
+        snapshot_summary: snapshot_summary.map(|s| s.to_string()),
+    });
+
+    let user_prompt = format!(
+        "Original text:\n{}\n\nPrior proposed revision:\n{}\n\nPrior assessment: {}\n\nNow produce an alternative approach. Return strict JSON only.",
+        original.original_text,
+        original.proposed_text,
+        prior_rationale
+    );
+
+    let raw_candidate = reasoning.generate_response(&system_prompt, &user_prompt)?;
+    let generated = parse_generated_revision(&raw_candidate, &original.proposed_text, 0.5, false);
+
+    let proposal = store.create_revision_proposal(&NewRevisionProposalInput {
+        task_id,
+        artifact_id: original.artifact_id,
+        target_start_offset: original.target_start_offset,
+        target_end_offset: original.target_end_offset,
+        target_description: original.target_description.clone(),
+        original_text: original.original_text.clone(),
+        proposed_text: generated.proposed_text,
+        instruction_text: format!("alternative to revision #{}", revision_id),
+        instruction_source: "system".to_string(),
+        rationale: generated.rationale,
+        grounding_notes: generated.grounding_notes,
+        retrieval_confidence: generated.confidence,
+        parent_revision_id: Some(revision_id),
+    })?;
+
+    Ok(proposal)
 }
 
 #[cfg(test)]
@@ -1171,5 +1301,37 @@ mod tests {
 
         assert_eq!(parsed.proposed_text, "This is plain text proposal");
         assert!(parsed.confidence <= 0.35);
+    }
+
+    #[test]
+    fn extract_assessment_sentence_extracts_first_person_sentence() {
+        let input = "I moved the argument to the front. The conclusion now:\n\nYour new argument here.";
+        let result = super::extract_assessment_sentence(input);
+        assert_eq!(result, Some("I moved the argument to the front.".to_string()));
+    }
+
+    #[test]
+    fn extract_assessment_sentence_returns_none_for_no_first_person() {
+        let input = "The revision restructures the paragraph. Original below.";
+        let result = super::extract_assessment_sentence(input);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn revision_system_prompt_includes_assessment_instruction() {
+        use crate::character::{self, RevisionContext};
+        let prompt = character::build_revision_system_prompt(&RevisionContext {
+            task_summary: "test task".to_string(),
+            target_description: "intro paragraph".to_string(),
+            instruction: "tighten this".to_string(),
+            profile_injection: None,
+            snapshot_summary: None,
+        });
+        let lower = prompt.to_ascii_lowercase();
+        // the assessment instruction tells jeff to lead with the judgment it made
+        assert!(
+            lower.contains("assessment") || lower.contains("tradeoff") || lower.contains("before presenting"),
+            "revision system prompt does not contain the assessment instruction"
+        );
     }
 }

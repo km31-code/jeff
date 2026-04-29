@@ -604,6 +604,8 @@ fn main() {
             commands::list_task_pending_revisions,
             commands::apply_revision,
             commands::reject_revision,
+            commands::generate_revision_alternative,
+            commands::list_revision_alternatives,
             commands::list_artifact_versions,
             commands::revert_artifact_to_version,
             commands::create_subtask,

@@ -92,6 +92,7 @@ pub struct NewRevisionProposalInput {
     pub rationale: Option<String>,
     pub grounding_notes: Option<String>,
     pub retrieval_confidence: f32,
+    pub parent_revision_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -524,6 +525,11 @@ impl TaskStore {
         );
         let _ = conn.execute_batch(
             "ALTER TABLE live_edit_receipts ADD COLUMN after_text TEXT NOT NULL DEFAULT '';",
+        );
+
+        // phase 29: opinionated output — alternative revision linking
+        let _ = conn.execute_batch(
+            "ALTER TABLE artifact_revisions ADD COLUMN parent_revision_id INTEGER;",
         );
 
         Ok(())
@@ -1293,12 +1299,13 @@ impl TaskStore {
                    rationale,
                    grounding_notes,
                    retrieval_confidence,
+                   parent_revision_id,
                    status,
                    created_at,
                    updated_at
                  )
                  VALUES
-                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'pending', ({now}), ({now}))",
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'pending', ({now}), ({now}))",
                 now = SQLITE_NOW_EXPR,
             ),
             params![
@@ -1314,6 +1321,7 @@ impl TaskStore {
                 input.rationale,
                 input.grounding_notes,
                 input.retrieval_confidence,
+                input.parent_revision_id,
             ],
         )
         .context("failed to insert revision proposal")?;
@@ -1357,7 +1365,8 @@ impl TaskStore {
                         retrieval_confidence,
                         status,
                         created_at,
-                        updated_at
+                        updated_at,
+                        parent_revision_id
                  FROM artifact_revisions
                  WHERE task_id = ?1
                    AND artifact_id = ?2
@@ -1399,7 +1408,8 @@ impl TaskStore {
                         retrieval_confidence,
                         status,
                         created_at,
-                        updated_at
+                        updated_at,
+                        parent_revision_id
                  FROM artifact_revisions
                  WHERE task_id = ?1
                    AND status = 'pending'
@@ -1437,7 +1447,8 @@ impl TaskStore {
                         retrieval_confidence,
                         status,
                         created_at,
-                        updated_at
+                        updated_at,
+                        parent_revision_id
                  FROM artifact_revisions
                  WHERE revision_id = ?1",
                 params![revision_id],
@@ -1446,6 +1457,47 @@ impl TaskStore {
             .optional()
             .context("failed to query revision by id")?;
         Ok(revision)
+    }
+
+    pub fn list_alternative_revisions(
+        &self,
+        parent_revision_id: i64,
+    ) -> Result<Vec<RevisionProposalDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT revision_id,
+                        task_id,
+                        artifact_id,
+                        target_start_offset,
+                        target_end_offset,
+                        target_description,
+                        original_text,
+                        proposed_text,
+                        instruction_text,
+                        instruction_source,
+                        rationale,
+                        grounding_notes,
+                        retrieval_confidence,
+                        status,
+                        created_at,
+                        updated_at,
+                        parent_revision_id
+                 FROM artifact_revisions
+                 WHERE parent_revision_id = ?1
+                 ORDER BY revision_id ASC",
+            )
+            .context("failed to prepare list_alternative_revisions query")?;
+
+        let rows = stmt
+            .query_map(params![parent_revision_id], revision_from_row)
+            .context("failed to query alternative revisions")?;
+
+        let mut revisions = Vec::new();
+        for row in rows {
+            revisions.push(row.context("failed to map alternative revision row")?);
+        }
+        Ok(revisions)
     }
 
     pub fn set_revision_status(
@@ -3965,6 +4017,7 @@ fn revision_from_row(row: &Row<'_>) -> rusqlite::Result<RevisionProposalDto> {
         status: row.get(13)?,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
+        parent_revision_id: row.get(16)?,
     })
 }
 

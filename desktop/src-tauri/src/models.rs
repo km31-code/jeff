@@ -172,6 +172,7 @@ pub struct RevisionProposalDto {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    pub parent_revision_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
