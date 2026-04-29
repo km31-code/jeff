@@ -30,6 +30,7 @@ mod state;
 mod store;
 mod streaming;
 mod subtask;
+mod synthesis;
 mod typing_activity;
 mod user_model;
 mod voice;
@@ -533,7 +534,7 @@ fn main() {
             }
 
             // section c: autonomous ambient monitor — runs every 60 seconds.
-            // checks reorientation, drift, stuck state, and stale notifications.
+            // phase 27 consolidates proactive speech through synthesis.
             proactive::spawn_ambient_monitor(handle.clone());
 
             // phase 24: background update check — delayed 2 seconds so it
@@ -673,6 +674,7 @@ fn main() {
             commands::set_privacy_surface_enabled,
             commands::clear_user_profile_memory,
             commands::list_proactive_trigger_audit_log,
+            commands::get_synthesis_log,
             commands::clear_active_task_data,
             commands::clear_all_jeff_data,
             // phase 22

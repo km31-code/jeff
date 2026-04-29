@@ -13,8 +13,8 @@ use crate::{
         ArtifactContentDto, ArtifactDto, ArtifactVersionDto, ChatMessageDto, EventLogEntryDto,
         FileWriteProposalDto, OpenResourceDto, ProactiveAuditEntryDto, RecentlyLearnedItemDto,
         RevisionProposalDto, SessionModeStateDto, SubTaskDto, SubTaskStepDto, SuggestionDto,
-        TaskDto, TaskSummaryDto, WatchedFileRegistryEntry, WatchedFolderDto, WorkspaceInfoDto,
-        WriteAuditEntryDto,
+        SynthesisLogEntryDto, TaskDto, TaskSummaryDto, WatchedFileRegistryEntry, WatchedFolderDto,
+        WorkspaceInfoDto, WriteAuditEntryDto,
     },
     onboarding::{
         APP_SETTING_ONBOARDING_COMPLETE, APP_SETTING_ONBOARDING_LAST_COMPLETED_AT,
@@ -411,6 +411,24 @@ impl TaskStore {
 
             CREATE INDEX IF NOT EXISTS idx_proactive_trigger_task_type
                 ON proactive_trigger_log(task_id, trigger_type, id DESC);
+
+            CREATE TABLE IF NOT EXISTS synthesis_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+                reason_type TEXT NOT NULL,
+                reason_detail TEXT,
+                snapshot_confidence REAL NOT NULL,
+                snapshot_attention_state TEXT NOT NULL,
+                message TEXT,
+                delivered INTEGER NOT NULL DEFAULT 0,
+                delivered_at TEXT,
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_synthesis_log_task
+                ON synthesis_log(task_id, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_synthesis_log_delivered
+                ON synthesis_log(task_id, delivered, delivered_at DESC);
 
             CREATE TABLE IF NOT EXISTS task_focus_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3207,6 +3225,88 @@ impl TaskStore {
         Ok(entries)
     }
 
+    pub fn log_synthesis_decision(
+        &self,
+        task_id: Option<i64>,
+        reason_type: &str,
+        reason_detail: Option<&str>,
+        snapshot_confidence: f32,
+        snapshot_attention_state: &str,
+        message: Option<&str>,
+        delivered: bool,
+    ) -> Result<i64> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO synthesis_log
+                 (task_id, reason_type, reason_detail, snapshot_confidence,
+                  snapshot_attention_state, message, delivered, delivered_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                         CASE WHEN ?7 = 1 THEN ({now}) ELSE NULL END,
+                         ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                task_id,
+                reason_type.trim(),
+                reason_detail,
+                snapshot_confidence,
+                snapshot_attention_state.trim(),
+                message,
+                if delivered { 1 } else { 0 },
+            ],
+        )
+        .context("failed to log synthesis decision")?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_last_synthesis_at(&self, task_id: i64) -> Result<Option<i64>> {
+        let conn = self.connect()?;
+        let value = conn
+            .query_row(
+                "SELECT CAST(strftime('%s', delivered_at) AS INTEGER)
+                 FROM synthesis_log
+                 WHERE task_id = ?1
+                   AND delivered = 1
+                   AND delivered_at IS NOT NULL
+                 ORDER BY delivered_at DESC, id DESC
+                 LIMIT 1",
+                params![task_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("failed to query last synthesis timestamp")?;
+        Ok(value)
+    }
+
+    pub fn list_synthesis_log(
+        &self,
+        task_id: i64,
+        limit: usize,
+    ) -> Result<Vec<SynthesisLogEntryDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, reason_type, reason_detail, snapshot_confidence,
+                        snapshot_attention_state, message, delivered, delivered_at, created_at
+                 FROM synthesis_log
+                 WHERE task_id = ?1
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )
+            .context("failed to prepare synthesis log query")?;
+
+        let rows = stmt
+            .query_map(params![task_id, limit as i64], synthesis_log_from_row)
+            .context("failed to query synthesis log")?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.context("failed to map synthesis log row")?);
+        }
+        Ok(entries)
+    }
+
     // ---------------------------------------------------------------------
     // phase 23: user profile
     // ---------------------------------------------------------------------
@@ -3506,6 +3606,11 @@ impl TaskStore {
             params![task_id],
         )
         .context("failed to clear proactive trigger log")?;
+        tx.execute(
+            "DELETE FROM synthesis_log WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear synthesis log")?;
         tx.execute(
             "DELETE FROM task_focus_log WHERE task_id = ?1",
             params![task_id],
@@ -4014,6 +4119,21 @@ fn proactive_audit_from_row(row: &Row<'_>) -> rusqlite::Result<ProactiveAuditEnt
     })
 }
 
+fn synthesis_log_from_row(row: &Row<'_>) -> rusqlite::Result<SynthesisLogEntryDto> {
+    Ok(SynthesisLogEntryDto {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        reason_type: row.get(2)?,
+        reason_detail: row.get(3)?,
+        snapshot_confidence: row.get(4)?,
+        snapshot_attention_state: row.get(5)?,
+        message: row.get(6)?,
+        delivered: row.get::<_, i64>(7)? != 0,
+        delivered_at: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
 fn compact_preview(content: &str, max_chars: usize) -> String {
     let compact = content.split_whitespace().collect::<Vec<&str>>().join(" ");
 
@@ -4112,7 +4232,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(count, 25, "expected 25 application tables after phase 23");
+        assert_eq!(count, 26, "expected 26 application tables after phase 27");
     }
 
     #[test]
@@ -4254,6 +4374,76 @@ mod tests {
             .get_last_proactive_trigger(task.id, "resume")
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn synthesis_log_round_trips_suppressed_and_delivered_entries() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Synthesis").unwrap();
+
+        let suppressed_id = store
+            .log_synthesis_decision(
+                Some(task.id),
+                "suppressed",
+                Some("no_reason"),
+                0.2,
+                "idle",
+                None,
+                false,
+            )
+            .unwrap();
+        assert!(suppressed_id > 0);
+        assert!(store.get_last_synthesis_at(task.id).unwrap().is_none());
+
+        let delivered_id = store
+            .log_synthesis_decision(
+                Some(task.id),
+                "task_return",
+                Some("idle_minutes=8"),
+                0.8,
+                "returning",
+                Some("You have been away for a bit; the launch memo is still open."),
+                true,
+            )
+            .unwrap();
+        assert!(delivered_id > suppressed_id);
+
+        let entries = store.list_synthesis_log(task.id, 10).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].reason_type, "task_return");
+        assert!(entries[0].delivered);
+        assert!(entries[0].delivered_at.is_some());
+        assert_eq!(entries[1].reason_type, "suppressed");
+        assert!(!entries[1].delivered);
+        assert!(entries[1].delivered_at.is_none());
+        assert!(store.get_last_synthesis_at(task.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn synthesis_log_records_quiet_mode_suppression() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Quiet Synthesis").unwrap();
+
+        store
+            .log_synthesis_decision(
+                Some(task.id),
+                "task_return",
+                Some("idle_minutes=8; suppressed=quiet_mode"),
+                0.8,
+                "returning",
+                None,
+                false,
+            )
+            .unwrap();
+
+        let entries = store.list_synthesis_log(task.id, 10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].reason_detail.as_deref(),
+            Some("idle_minutes=8; suppressed=quiet_mode")
+        );
+        assert!(!entries[0].delivered);
+        assert!(entries[0].message.is_none());
     }
 
     #[test]
@@ -4630,6 +4820,17 @@ mod tests {
         store
             .record_proactive_trigger(task.id, "resume", false)
             .unwrap();
+        store
+            .log_synthesis_decision(
+                Some(task.id),
+                "suppressed",
+                Some("no_reason"),
+                0.1,
+                "idle",
+                None,
+                false,
+            )
+            .unwrap();
 
         let task_workspace = PathBuf::from(&task.workspace_path);
         fs::write(task_workspace.join("scratch.txt"), "private").unwrap();
@@ -4647,6 +4848,7 @@ mod tests {
             .list_proactive_trigger_audit_log(task.id, 10)
             .unwrap()
             .is_empty());
+        assert!(store.list_synthesis_log(task.id, 10).unwrap().is_empty());
         assert!(!task_workspace.join("scratch.txt").exists());
         assert!(task_workspace.exists());
     }

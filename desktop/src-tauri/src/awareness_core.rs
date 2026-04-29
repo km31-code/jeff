@@ -1,8 +1,9 @@
 use std::{
     sync::Mutex as StdMutex,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::Mutex;
@@ -11,7 +12,12 @@ use crate::{
     ambient::AmbientState,
     models::CalendarEventDto,
     state::{CalendarState, ContextState, JeffState},
+    store::TaskStore,
 };
+
+const PROACTIVE_COOLDOWN_SECONDS: i64 = 600;
+const DEFAULT_RETURN_IDLE_THRESHOLD_SECONDS: i64 = 300;
+const DOWNWEIGHTED_RETURN_IDLE_THRESHOLD_SECONDS: i64 = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SituationalSnapshot {
@@ -22,6 +28,7 @@ pub struct SituationalSnapshot {
     pub pending_work: Vec<PendingItem>,
     pub time_pressure: Option<TimePressure>,
     pub last_meaningful_turn: Option<i64>,
+    pub last_focus_at: Option<i64>,
     pub snapshot_confidence: f32,
     pub updated_at: i64,
     pub trigger: String,
@@ -37,6 +44,7 @@ impl Default for SituationalSnapshot {
             pending_work: Vec::new(),
             time_pressure: None,
             last_meaningful_turn: None,
+            last_focus_at: None,
             snapshot_confidence: 0.0,
             updated_at: unix_now(),
             trigger: "initial".to_string(),
@@ -75,6 +83,78 @@ pub enum SnapshotTrigger {
     SubtaskCompleted,
     CalendarEvent,
     TimeTick,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProactiveSpeechReason {
+    TaskReturn { idle_minutes: u64 },
+    DeadlinePressure { event: String, minutes_until: i64 },
+    BlockerDetected { blocker: String },
+    WorkQualityObservation { observation: String },
+}
+
+impl ProactiveSpeechReason {
+    pub fn reason_type(&self) -> &'static str {
+        match self {
+            Self::TaskReturn { .. } => "task_return",
+            Self::DeadlinePressure { .. } => "deadline_pressure",
+            Self::BlockerDetected { .. } => "blocker",
+            Self::WorkQualityObservation { .. } => "work_quality_observation",
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match self {
+            Self::TaskReturn { idle_minutes } => format!("idle_minutes={idle_minutes}"),
+            Self::DeadlinePressure {
+                event,
+                minutes_until,
+            } => {
+                format!("{event} in {minutes_until} minutes")
+            }
+            Self::BlockerDetected { blocker } => blocker.clone(),
+            Self::WorkQualityObservation { observation } => observation.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UserProfile {
+    pub trigger_weight_reorientation: f32,
+}
+
+impl Default for UserProfile {
+    fn default() -> Self {
+        Self {
+            trigger_weight_reorientation: 1.0,
+        }
+    }
+}
+
+impl UserProfile {
+    pub fn from_store(store: &TaskStore) -> Self {
+        let trigger_weight_reorientation = store
+            .get_profile_value("trigger_weight_reorientation")
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(1.0);
+        Self {
+            trigger_weight_reorientation,
+        }
+    }
+}
+
+impl AttentionState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Focused => "focused",
+            Self::Drifting => "drifting",
+            Self::Returning => "returning",
+            Self::Idle => "idle",
+        }
+    }
 }
 
 impl SnapshotTrigger {
@@ -225,6 +305,128 @@ pub fn snapshot_summary(snapshot: &SituationalSnapshot) -> String {
     truncate_chars(&lines.join("\n"), 600)
 }
 
+pub fn should_speak_proactively(
+    snapshot: &SituationalSnapshot,
+    profile: &UserProfile,
+    last_proactive_at: Option<i64>,
+    now: i64,
+) -> Option<ProactiveSpeechReason> {
+    if snapshot.snapshot_confidence < 0.3 {
+        return None;
+    }
+
+    if last_proactive_at
+        .map(|last| now.saturating_sub(last) < PROACTIVE_COOLDOWN_SECONDS)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    // use the most recent of last_focus_at or last_meaningful_turn as "last active" time
+    // so idle_seconds reflects actual disengagement, not just conversational silence.
+    let last_active_at = [snapshot.last_focus_at, snapshot.last_meaningful_turn]
+        .iter()
+        .flatten()
+        .max()
+        .copied();
+    let idle_seconds = last_active_at.map(|t| now.saturating_sub(t)).unwrap_or(0);
+    let idle_threshold = if profile.trigger_weight_reorientation < 0.5 {
+        DOWNWEIGHTED_RETURN_IDLE_THRESHOLD_SECONDS
+    } else {
+        DEFAULT_RETURN_IDLE_THRESHOLD_SECONDS
+    };
+
+    if snapshot.attention_state == AttentionState::Returning && idle_seconds > idle_threshold {
+        return Some(ProactiveSpeechReason::TaskReturn {
+            idle_minutes: (idle_seconds / 60).max(1) as u64,
+        });
+    }
+
+    if let Some(time_pressure) = snapshot.time_pressure.as_ref() {
+        if let Some(minutes_until) = time_pressure.minutes_until {
+            if minutes_until < 90 {
+                return Some(ProactiveSpeechReason::DeadlinePressure {
+                    event: time_pressure.description.clone(),
+                    minutes_until,
+                });
+            }
+        }
+    }
+
+    if !snapshot.current_blockers.is_empty() && idle_seconds > 600 {
+        return Some(ProactiveSpeechReason::BlockerDetected {
+            blocker: snapshot.current_blockers[0].clone(),
+        });
+    }
+
+    None
+}
+
+pub async fn synthesize_proactive_message(
+    reason: &ProactiveSpeechReason,
+    snapshot: &SituationalSnapshot,
+    api_key: &str,
+) -> Result<String> {
+    let system_prompt = crate::character::build_reorientation_system_prompt(
+        &crate::character::ReorientationContext {
+            task_summary: snapshot.current_goal.clone().unwrap_or_default(),
+            last_active: snapshot
+                .last_meaningful_turn
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            profile_injection: None,
+            active_window: None,
+            calendar_context: snapshot
+                .time_pressure
+                .as_ref()
+                .map(|pressure| pressure.description.clone()),
+            snapshot_summary: Some(snapshot_summary(snapshot)),
+        },
+    );
+    let user_prompt = format!(
+        "Reason: {}\nDetail: {}\n\nCurrent snapshot:\n{}\n\nIn 1-2 sentences, speak as a coworker who has been watching. Reference the specific situation. Do not be a notification. Start a conversation. Maximum 40 words.",
+        reason.reason_type(),
+        reason.detail(),
+        snapshot_summary(snapshot)
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("failed to build synthesis http client")?;
+    let response = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": "gpt-4o-mini",
+            "temperature": 0.2,
+            "max_tokens": 80,
+            "messages": [
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": user_prompt }
+            ]
+        }))
+        .send()
+        .await
+        .context("synthesis LLM request failed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("synthesis LLM status {status}: {body}");
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .context("failed to decode synthesis LLM response")?;
+    let text = json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .trim();
+    Ok(crate::character::strip_filler_phrases(text))
+}
+
 fn assemble_snapshot(
     trigger: SnapshotTrigger,
     task_id: i64,
@@ -252,21 +454,36 @@ fn assemble_snapshot(
             .map(|summary| summary.summary_text)
     });
 
-    let recent_progress = recent_messages
-        .iter()
-        .rev()
-        .find(|message| {
-            message.role == "assistant"
-                && matches!(
-                    message.message_kind.as_str(),
-                    "subtask_result" | "revision_accepted"
-                )
+    // find the most recently accepted/completed subtask with a result summary.
+    // the old approach (searching for non-existent message_kind strings) always
+    // returned None because "subtask_result" and "revision_accepted" are not valid
+    // MessageKind values.
+    let recent_progress = state
+        .store
+        .list_subtasks(task_id)
+        .ok()
+        .and_then(|subtasks| {
+            subtasks
+                .into_iter()
+                .filter(|s| {
+                    s.result_summary.is_some()
+                        && (s.result_review_status == "accepted" || s.status == "completed")
+                })
+                .max_by_key(|s| parse_sqlite_datetime_to_unix(&s.updated_at).unwrap_or(0))
         })
-        .map(|message| truncate_chars(&message.content, 80));
+        .and_then(|s| s.result_summary)
+        .map(|summary| truncate_chars(&summary, 80));
 
     let last_meaningful_turn = recent_messages
         .last()
         .and_then(|message| parse_sqlite_datetime_to_unix(&message.created_at));
+
+    let last_focus_at = state
+        .store
+        .get_last_task_focus(task_id)
+        .ok()
+        .flatten()
+        .and_then(|value| parse_sqlite_datetime_to_unix(&value));
 
     let attention_state = compute_attention_state(task_id, state, last_meaningful_turn, now);
     let pending_work = collect_pending_work(task_id, state);
@@ -306,6 +523,7 @@ fn assemble_snapshot(
         pending_work,
         time_pressure,
         last_meaningful_turn,
+        last_focus_at,
         snapshot_confidence: snapshot_confidence.min(1.0),
         updated_at: now,
         trigger: trigger.as_str().to_string(),
@@ -395,18 +613,19 @@ fn classify_attention_state(
         return AttentionState::Returning;
     }
 
-    if last_drift_at
-        .map(|last_drift| now.saturating_sub(last_drift) <= 900)
-        .unwrap_or(false)
-    {
-        return AttentionState::Drifting;
-    }
-
+    // focused takes priority over drifting: active chat trumps a stale drift flag.
     if last_meaningful_turn
         .map(|turn| now.saturating_sub(turn) <= 120)
         .unwrap_or(false)
     {
         return AttentionState::Focused;
+    }
+
+    if last_drift_at
+        .map(|last_drift| now.saturating_sub(last_drift) <= 900)
+        .unwrap_or(false)
+    {
+        return AttentionState::Drifting;
     }
 
     AttentionState::Idle
@@ -441,27 +660,15 @@ fn collect_pending_work(task_id: i64, state: &JeffState) -> Vec<PendingItem> {
 }
 
 fn collect_blockers(
-    task_id: i64,
-    state: &JeffState,
+    _task_id: i64,
+    _state: &JeffState,
     attention_state: &AttentionState,
     pending_work: &[PendingItem],
     now: i64,
 ) -> Vec<String> {
     let mut blockers = Vec::new();
     if *attention_state == AttentionState::Drifting {
-        blockers.push(
-            state
-                .store
-                .list_proactive_trigger_audit_log(task_id, 5)
-                .ok()
-                .and_then(|entries| {
-                    entries
-                        .into_iter()
-                        .find(|entry| entry.trigger_type == "drift" && !entry.suppressed)
-                })
-                .map(|_| "current work appears to be drifting from the task goal".to_string())
-                .unwrap_or_else(|| "current work may be drifting from the task goal".to_string()),
-        );
+        blockers.push("current work appears to be drifting from the task goal".to_string());
     }
 
     for item in pending_work {
@@ -602,6 +809,7 @@ mod tests {
                 minutes_until: Some(42),
             }),
             last_meaningful_turn: Some(1),
+            last_focus_at: None,
             snapshot_confidence: 1.0,
             updated_at: 2,
             trigger: "test".to_string(),
@@ -630,6 +838,107 @@ mod tests {
         assert_eq!(
             classify_attention_state(None, None, Some(940), 1_000),
             AttentionState::Focused
+        );
+    }
+
+    fn speech_test_snapshot(now: i64) -> SituationalSnapshot {
+        SituationalSnapshot {
+            current_goal: Some("finish the launch memo".to_string()),
+            recent_progress: Some("drafted the overview".to_string()),
+            current_blockers: Vec::new(),
+            attention_state: AttentionState::Returning,
+            pending_work: Vec::new(),
+            time_pressure: None,
+            last_meaningful_turn: Some(now - 360),
+            last_focus_at: None,
+            snapshot_confidence: 0.8,
+            updated_at: now,
+            trigger: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn should_speak_returns_none_when_low_confidence() {
+        let now = 10_000;
+        let mut snapshot = speech_test_snapshot(now);
+        snapshot.snapshot_confidence = 0.2;
+
+        assert_eq!(
+            should_speak_proactively(&snapshot, &UserProfile::default(), None, now),
+            None
+        );
+    }
+
+    #[test]
+    fn should_speak_returns_task_return_after_5min_idle() {
+        let now = 10_000;
+        let snapshot = speech_test_snapshot(now);
+
+        assert_eq!(
+            should_speak_proactively(&snapshot, &UserProfile::default(), None, now),
+            Some(ProactiveSpeechReason::TaskReturn { idle_minutes: 6 })
+        );
+    }
+
+    #[test]
+    fn should_speak_returns_none_within_cooldown() {
+        let now = 10_000;
+        let snapshot = speech_test_snapshot(now);
+
+        assert_eq!(
+            should_speak_proactively(&snapshot, &UserProfile::default(), Some(now - 300), now),
+            None
+        );
+    }
+
+    #[test]
+    fn should_speak_deadline_pressure_at_89_minutes() {
+        let now = 10_000;
+        let mut snapshot = speech_test_snapshot(now);
+        snapshot.attention_state = AttentionState::Focused;
+        snapshot.last_meaningful_turn = Some(now - 60);
+        snapshot.time_pressure = Some(TimePressure {
+            source: "calendar".to_string(),
+            description: "Design review in 89 minutes".to_string(),
+            minutes_until: Some(89),
+        });
+
+        assert_eq!(
+            should_speak_proactively(&snapshot, &UserProfile::default(), None, now),
+            Some(ProactiveSpeechReason::DeadlinePressure {
+                event: "Design review in 89 minutes".to_string(),
+                minutes_until: 89,
+            })
+        );
+    }
+
+    #[test]
+    fn should_speak_raises_threshold_after_dismissals() {
+        let now = 10_000;
+        let snapshot = speech_test_snapshot(now);
+        let profile = UserProfile {
+            trigger_weight_reorientation: 0.3,
+        };
+
+        assert_eq!(
+            should_speak_proactively(&snapshot, &profile, None, now),
+            None
+        );
+    }
+
+    #[test]
+    fn should_speak_detects_blocker_after_silence() {
+        let now = 10_000;
+        let mut snapshot = speech_test_snapshot(now);
+        snapshot.attention_state = AttentionState::Idle;
+        snapshot.last_meaningful_turn = Some(now - 700);
+        snapshot.current_blockers = vec!["waiting on your decision about outline.md".to_string()];
+
+        assert_eq!(
+            should_speak_proactively(&snapshot, &UserProfile::default(), None, now),
+            Some(ProactiveSpeechReason::BlockerDetected {
+                blocker: "waiting on your decision about outline.md".to_string()
+            })
         );
     }
 }

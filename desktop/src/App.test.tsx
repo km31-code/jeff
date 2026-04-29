@@ -601,6 +601,10 @@ function setupInvokeMock(options?: {
       return [];
     }
 
+    if (command === "get_synthesis_log") {
+      return [];
+    }
+
     if (command === "clear_active_task_data") {
       messages.length = 0;
       recentlyLearned.length = 0;

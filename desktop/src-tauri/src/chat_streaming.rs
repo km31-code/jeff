@@ -325,6 +325,11 @@ async fn run_llm_stream<R: Runtime + 'static>(
     let mut full_text = String::new();
     let mut token_index: u32 = 0;
     let mut ttft_ms: Option<u64> = None;
+    // buffer the first chunk of tokens to strip filler phrases before emitting.
+    // filler like "Certainly," would otherwise flash briefly on the first frame.
+    let mut startup_buf = String::new();
+    let mut startup_done = false;
+    const STARTUP_FILTER_CHARS: usize = 40;
 
     loop {
         tokio::select! {
@@ -345,6 +350,21 @@ async fn run_llm_stream<R: Runtime + 'static>(
             msg = rx.recv() => {
                 match msg {
                     None => {
+                        // flush startup buffer if stream ended before threshold
+                        if !startup_done && !startup_buf.is_empty() {
+                            let cleaned = crate::character::strip_filler_phrases(&startup_buf);
+                            if !cleaned.is_empty() {
+                                phrase_buf.push_str(&cleaned);
+                                let _ = app.emit(
+                                    EVENT_LLM_TOKEN,
+                                    &LlmTokenPayload {
+                                        turn_id: turn_id.clone(),
+                                        delta: cleaned,
+                                        index: token_index,
+                                    },
+                                );
+                            }
+                        }
                         // channel closed = stream complete.
                         break;
                     }
@@ -366,17 +386,38 @@ async fn run_llm_stream<R: Runtime + 'static>(
                         }
 
                         full_text.push_str(&delta);
-                        phrase_buf.push_str(&delta);
 
-                        let _ = app.emit(
-                            EVENT_LLM_TOKEN,
-                            &LlmTokenPayload {
-                                turn_id: turn_id.clone(),
-                                delta,
-                                index: token_index,
-                            },
-                        );
-                        token_index += 1;
+                        if !startup_done {
+                            startup_buf.push_str(&delta);
+                            if startup_buf.len() >= STARTUP_FILTER_CHARS {
+                                startup_done = true;
+                                let cleaned = crate::character::strip_filler_phrases(&startup_buf);
+                                startup_buf.clear();
+                                if !cleaned.is_empty() {
+                                    phrase_buf.push_str(&cleaned);
+                                    let _ = app.emit(
+                                        EVENT_LLM_TOKEN,
+                                        &LlmTokenPayload {
+                                            turn_id: turn_id.clone(),
+                                            delta: cleaned,
+                                            index: token_index,
+                                        },
+                                    );
+                                    token_index += 1;
+                                }
+                            }
+                        } else {
+                            phrase_buf.push_str(&delta);
+                            let _ = app.emit(
+                                EVENT_LLM_TOKEN,
+                                &LlmTokenPayload {
+                                    turn_id: turn_id.clone(),
+                                    delta,
+                                    index: token_index,
+                                },
+                            );
+                            token_index += 1;
+                        }
 
                         // synthesize completed phrases as they arrive so tts
                         // playback starts before the full llm response is done.

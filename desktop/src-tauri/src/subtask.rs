@@ -545,6 +545,7 @@ pub fn convert_subtask_result_to_revision(
         selection_or_range,
         &instruction,
         "system",
+        None,
     )?;
 
     let _ = store.set_subtask_result_review_status(subtask_id, "converted");

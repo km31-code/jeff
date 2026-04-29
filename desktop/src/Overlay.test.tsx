@@ -308,6 +308,10 @@ function setupInvokeMock(options: OverlayMockOptions = {}) {
       return null;
     }
 
+    if (command === "dismiss_proactive_trigger") {
+      return null;
+    }
+
     throw new Error(`unexpected command ${command}`);
   });
 }

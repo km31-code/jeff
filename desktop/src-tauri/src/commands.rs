@@ -24,8 +24,9 @@ use crate::{
         SelectionBridgeStatusDto, SelectionCaptureIndicatorDto, SendMessageResponseDto,
         SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto, SubTaskDto, SubTaskStepDto,
         SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto, SuggestionEvaluationDto,
-        TaskContextPackDto, TaskDto, TaskSummaryDto, TranscriptionResultDto, UserProfileSignalDto,
-        WatcherStatusDto, WorkloadSummaryDto, WorkspaceInfoDto, WriteAuditEntryDto,
+        SynthesisLogEntryDto, TaskContextPackDto, TaskDto, TaskSummaryDto, TranscriptionResultDto,
+        UserProfileSignalDto, WatcherStatusDto, WorkloadSummaryDto, WorkspaceInfoDto,
+        WriteAuditEntryDto,
     },
     retrieval::{
         auto_ingest_file_for_task, build_task_context_pack, import_artifact_for_task,
@@ -762,6 +763,11 @@ pub fn propose_artifact_revision(
     instruction_source: Option<String>,
 ) -> Result<RevisionProposalResultDto, String> {
     let source = instruction_source.unwrap_or_else(|| "typed".to_string());
+    let snapshot_summary = {
+        let snap = state.awareness_core.snapshot_immediate();
+        let summary = crate::awareness_core::snapshot_summary(&snap);
+        if summary.is_empty() { None } else { Some(summary) }
+    };
     propose_revision_for_artifact(
         &state.store,
         state.embeddings.as_ref(),
@@ -771,6 +777,7 @@ pub fn propose_artifact_revision(
         selection_or_range,
         &instruction,
         &source,
+        snapshot_summary.as_deref(),
     )
     .map_err(map_jeff_error)
 }
@@ -2111,6 +2118,17 @@ pub fn list_proactive_trigger_audit_log(
     state
         .store
         .list_proactive_trigger_audit_log(task_id, 100)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn get_synthesis_log(
+    state: State<'_, JeffState>,
+    task_id: i64,
+) -> Result<Vec<SynthesisLogEntryDto>, String> {
+    state
+        .store
+        .list_synthesis_log(task_id, 100)
         .map_err(map_jeff_error)
 }
 

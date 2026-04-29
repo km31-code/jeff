@@ -68,7 +68,7 @@ grep_check "new-turn awareness update wired for streaming chat" "SnapshotTrigger
 grep_check "focus-event update wired" "SnapshotTrigger::FocusEvent" "$SRC/commands.rs"
 grep_check "window-switch update wired" "SnapshotTrigger::WindowSwitch" "$SRC/main.rs"
 grep_check "subtask-completed update wired" "SnapshotTrigger::SubtaskCompleted" "$SRC/main.rs"
-grep_check "time-tick update wired" "SnapshotTrigger::TimeTick" "$SRC/proactive.rs"
+grep_check "time-tick update wired" "SnapshotTrigger::TimeTick" "$SRC/proactive.rs" "$SRC/synthesis.rs"
 grep_check "calendar-event update wired" "SnapshotTrigger::CalendarEvent" "$SRC/main.rs"
 grep_check "chat prompt accepts snapshot summary" "snapshot_summary" "$SRC/chat.rs" "$SRC/character.rs"
 grep_check "reorientation prompt accepts snapshot summary" "snapshot_summary" "$SRC/proactive.rs" "$SRC/character.rs"

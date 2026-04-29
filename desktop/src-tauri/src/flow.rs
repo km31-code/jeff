@@ -344,6 +344,7 @@ pub fn accept_suggestion_for_task(
                 selection_or_range,
                 &instruction,
                 "system",
+                None,
             )?;
 
             Ok(SuggestionAcceptanceDto {
@@ -410,6 +411,7 @@ pub fn accept_suggestion_for_task(
                     selection_or_range,
                     &suggestion.description,
                     "system",
+                    None,
                 )?;
 
                 Ok(SuggestionAcceptanceDto {

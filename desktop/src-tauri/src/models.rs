@@ -499,6 +499,20 @@ pub struct ProactiveAuditEntryDto {
     pub suppressed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SynthesisLogEntryDto {
+    pub id: i64,
+    pub task_id: Option<i64>,
+    pub reason_type: String,
+    pub reason_detail: Option<String>,
+    pub snapshot_confidence: f32,
+    pub snapshot_attention_state: String,
+    pub message: Option<String>,
+    pub delivered: bool,
+    pub delivered_at: Option<String>,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataClearResultDto {
     pub cleared: bool,

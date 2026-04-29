@@ -83,6 +83,7 @@ export interface ChatMessageDto {
     | "assistant_revision_proposal"
     | "assistant_revision_status"
     | "system_status_event"
+    | "assistant_proactive"
     | string;
   content: string;
   created_at: string;
@@ -955,6 +956,19 @@ export interface ProactiveAuditEntryDto {
   suppressed: boolean;
 }
 
+export interface SynthesisLogEntryDto {
+  id: number;
+  task_id: number | null;
+  reason_type: string;
+  reason_detail: string | null;
+  snapshot_confidence: number;
+  snapshot_attention_state: string;
+  message: string | null;
+  delivered: boolean;
+  delivered_at: string | null;
+  created_at: string;
+}
+
 export interface DataClearResultDto {
   cleared: boolean;
   active_task_id: number | null;
@@ -1005,6 +1019,10 @@ export async function listProactiveTriggerAuditLog(
   taskId: number
 ): Promise<ProactiveAuditEntryDto[]> {
   return invoke<ProactiveAuditEntryDto[]>("list_proactive_trigger_audit_log", { taskId });
+}
+
+export async function getSynthesisLog(taskId: number): Promise<SynthesisLogEntryDto[]> {
+  return invoke<SynthesisLogEntryDto[]>("get_synthesis_log", { taskId });
 }
 
 export async function clearActiveTaskData(): Promise<DataClearResultDto> {

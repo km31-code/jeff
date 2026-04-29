@@ -67,6 +67,7 @@ pub fn propose_artifact_revision(
     selection_or_range: Option<RevisionTargetDto>,
     instruction: &str,
     instruction_source: &str,
+    snapshot_summary: Option<&str>,
 ) -> Result<RevisionProposalResultDto> {
     let clean_instruction = instruction.trim();
     if clean_instruction.is_empty() {
@@ -132,6 +133,7 @@ pub fn propose_artifact_revision(
         &context_pack.task_summary,
         &resolved_target.target_description,
         clean_instruction,
+        snapshot_summary,
     );
     let raw_candidate = reasoning.generate_response(&revision_system_prompt, &revision_prompt)?;
     let generated = parse_generated_revision(
@@ -464,6 +466,7 @@ fn build_revision_system_prompt(
     task_summary: &str,
     target_description: &str,
     instruction: &str,
+    snapshot_summary: Option<&str>,
 ) -> String {
     let profile_injection = if store
         .get_privacy_user_profile_memory_enabled()
@@ -479,6 +482,7 @@ fn build_revision_system_prompt(
         target_description: target_description.to_string(),
         instruction: instruction.to_string(),
         profile_injection,
+        snapshot_summary: snapshot_summary.map(|s| s.to_string()),
     })
 }
 
@@ -791,6 +795,7 @@ mod tests {
             }),
             "make this more analytical",
             "typed",
+            None,
         )
         .expect("failed to propose revision")
         .proposal;
@@ -810,6 +815,7 @@ mod tests {
             None,
             "make this more analytical",
             "typed",
+            None,
         )
         .expect("failed to propose second revision")
         .proposal;
@@ -844,6 +850,7 @@ mod tests {
             }),
             "tighten this thesis and connect it to broader citizenship debates",
             "typed",
+            None,
         )
         .expect("failed to propose targeted revision");
 
@@ -894,6 +901,7 @@ mod tests {
             None,
             "make this more analytical",
             "typed",
+            None,
         )
         .expect("failed to propose revision")
         .proposal;
@@ -928,6 +936,7 @@ mod tests {
             None,
             "tighten this thesis and connect it to broader citizenship debates",
             "typed",
+            None,
         )
         .expect("failed to propose revision")
         .proposal;
@@ -952,6 +961,7 @@ mod tests {
             None,
             "tighten this thesis and connect it to broader citizenship debates",
             "voice",
+            None,
         )
         .expect("failed to propose voice revision");
 
@@ -972,6 +982,7 @@ mod tests {
             None,
             "make this more analytical",
             "typed",
+            None,
         )
         .expect("failed to propose revision");
 
@@ -1010,6 +1021,7 @@ mod tests {
             None,
             "make this section more analytical",
             "typed",
+            None,
         )
         .expect("failed to propose analytical revision");
 
@@ -1035,6 +1047,7 @@ mod tests {
             None,
             "tighten this thesis and connect it to broader citizenship debates",
             "typed",
+            None,
         )
         .expect("failed to propose thesis revision");
 
@@ -1063,6 +1076,7 @@ mod tests {
             None,
             "make this section more analytical",
             "typed",
+            None,
         )
         .expect("failed to propose revision");
 
@@ -1119,6 +1133,7 @@ mod tests {
             None,
             "make this section more analytical",
             "typed",
+            None,
         )
         .expect("failed to propose revision");
         let _ = apply_revision(

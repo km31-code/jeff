@@ -5,16 +5,16 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::{
-    ambient::{AmbientState, NotificationPayload, OVERLAY_WINDOW_LABEL},
+    ambient::AmbientState,
     character::{self, ReorientationContext},
     embedding::EmbeddingProvider,
     models::{DriftFlagDto, ReorientationDto, SubTaskDto},
     reasoning::ReasoningProvider,
     retrieval::retrieve_relevant_chunks,
-    state::{ContextState, JeffState},
+    state::JeffState,
     store::TaskStore,
     subtask::{create_subtask_and_start, suggest_subtask_for_task, SubTaskRunner},
     user_model,
@@ -241,6 +241,7 @@ pub fn generate_reorientation(
         .context("reorientation LLM call failed")?;
 
     let clean_summary = character::strip_filler_phrases(summary.trim());
+    let _ = store.set_last_reorientation_summary(task_id, &clean_summary);
     let _ = store.record_proactive_trigger(task_id, "resume", false);
 
     Ok(ReorientationDto {
@@ -412,273 +413,10 @@ async fn run_monitor_cycle<R: Runtime>(handle: &AppHandle<R>) {
         return;
     };
 
-    // skip everything if proactive triggers are disabled in privacy settings.
-    let proactive_enabled = jeff
-        .store
-        .get_privacy_proactive_triggers_enabled()
-        .unwrap_or(false);
-    if !proactive_enabled {
-        return;
-    }
+    crate::synthesis::run_synthesis_check(handle).await;
 
-    // get active task; nothing to do without one.
-    let Some(task) = jeff.store.get_active_task().ok().flatten() else {
-        return;
-    };
-
-    // build active-window context string (respects privacy gate).
-    let active_ctx = if jeff
-        .store
-        .get_privacy_active_window_context_enabled()
-        .unwrap_or(true)
-    {
-        handle
-            .try_state::<ContextState>()
-            .and_then(|s: tauri::State<'_, ContextState>| s.current())
-            .map(|ctx| {
-                format!(
-                    "The user currently has {} open with {}.",
-                    ctx.app_name, ctx.document_title
-                )
-            })
-    } else {
-        None
-    };
-
-    crate::awareness_core::spawn_awareness_update(
-        handle,
-        crate::awareness_core::SnapshotTrigger::TimeTick,
-        task.id,
-    );
-
-    // 1. reorientation check.
-    check_reorientation_from_background(handle, &jeff, quiet, task.id, active_ctx.as_deref()).await;
-
-    // 2. drift check (c2).
-    check_drift_from_background(handle, &jeff, quiet, task.id, active_ctx.as_deref()).await;
-
-    // 3. stuck / speculative subtask check.
-    check_stuck_from_background(handle, &jeff, quiet, task.id).await;
-
-    // 4. stale-task workload notifications (already exists in workload.rs).
+    // stale-task workload notifications are not part of proactive speech synthesis.
     let _ = crate::workload::check_stale_task_notifications(&jeff.store, handle, quiet);
-}
-
-async fn check_reorientation_from_background<R: Runtime>(
-    handle: &AppHandle<R>,
-    jeff: &JeffState,
-    quiet: bool,
-    task_id: i64,
-    active_context: Option<&str>,
-) {
-    // check if the user has been away long enough (presence check via last focus).
-    // if absent < threshold, skip entirely — the cooldown inside generate_reorientation
-    // would catch it anyway, but this saves an LLM call.
-    let last_focus = jeff.store.get_last_task_focus(task_id).ok().flatten();
-    if let Some(ref focus_ts) = last_focus {
-        if seconds_since(focus_ts) < REORIENTATION_MIN_ABSENCE_SECONDS {
-            return;
-        }
-    }
-
-    let store = jeff.store.clone();
-    let reasoning = jeff.reasoning.clone();
-    let active_ctx_owned = active_context.map(|s| s.to_string());
-    let snapshot_summary =
-        crate::awareness_core::snapshot_summary(&jeff.awareness_core.snapshot_immediate());
-
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        generate_reorientation(
-            &store,
-            reasoning.as_ref(),
-            task_id,
-            active_ctx_owned.as_deref(),
-            None,
-            Some(snapshot_summary.as_str()).filter(|value| !value.is_empty()),
-        )
-    })
-    .await;
-
-    let Ok(Ok(reorientation)) = result else {
-        return;
-    };
-    if reorientation.summary.is_empty() {
-        return;
-    }
-
-    // in quiet mode: cooldown was still ticked inside generate_reorientation.
-    // suppress all output.
-    if quiet {
-        return;
-    }
-
-    let overlay_visible = handle
-        .get_webview_window(OVERLAY_WINDOW_LABEL)
-        .and_then(|w: tauri::WebviewWindow<R>| w.is_visible().ok())
-        .unwrap_or(false);
-
-    if overlay_visible {
-        let _ = handle.emit(
-            "proactive://reorientation",
-            serde_json::json!({
-                "task_id": reorientation.task_id,
-                "summary": reorientation.summary,
-                "fired_at": reorientation.fired_at,
-            }),
-        );
-    } else {
-        // persist summary so trigger_task_resume can return it on notification click
-        // even after the cooldown has been recorded.
-        let _ = jeff
-            .store
-            .set_last_reorientation_summary(task_id, &reorientation.summary);
-        let _ = crate::ambient::dispatch_notification(
-            handle,
-            NotificationPayload {
-                title: "jeff".to_string(),
-                body: reorientation.summary,
-                context_kind: Some("reorientation".to_string()),
-                context_id: Some(task_id),
-            },
-        );
-    }
-}
-
-async fn check_drift_from_background<R: Runtime>(
-    handle: &AppHandle<R>,
-    jeff: &JeffState,
-    quiet: bool,
-    task_id: i64,
-    active_context: Option<&str>,
-) {
-    // only run if there is recent indexed file content to check against.
-    let recent_learned = jeff
-        .store
-        .list_recently_learned(task_id, 3)
-        .unwrap_or_default();
-
-    let file_content: Vec<String> = recent_learned
-        .iter()
-        .filter(|item| item.source == "file")
-        .map(|item| item.preview_text.clone())
-        .collect();
-
-    if file_content.is_empty() {
-        return;
-    }
-
-    let current_text = file_content.join("\n\n");
-
-    let store = jeff.store.clone();
-    let reasoning = jeff.reasoning.clone();
-    let embeddings = jeff.embeddings.clone();
-    let active_ctx_owned = active_context.map(|s| s.to_string());
-
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        evaluate_drift(
-            &store,
-            reasoning.as_ref(),
-            embeddings.as_ref(),
-            task_id,
-            &current_text,
-            active_ctx_owned.as_deref(),
-        )
-    })
-    .await;
-
-    let Ok(Ok(drift)) = result else {
-        return;
-    };
-    if !drift.is_drifting {
-        return;
-    }
-
-    if quiet {
-        return;
-    }
-
-    let overlay_visible = handle
-        .get_webview_window(OVERLAY_WINDOW_LABEL)
-        .and_then(|w: tauri::WebviewWindow<R>| w.is_visible().ok())
-        .unwrap_or(false);
-
-    let body = if drift.flag_reason.is_empty() {
-        "looks like you may have drifted from your task goal.".to_string()
-    } else {
-        drift.flag_reason.clone()
-    };
-
-    if overlay_visible {
-        let _ = handle.emit(
-            "proactive://drift",
-            serde_json::json!({
-                "task_id": drift.task_id,
-                "reason": drift.flag_reason,
-                "confidence": drift.confidence,
-            }),
-        );
-    } else {
-        let _ = crate::ambient::dispatch_notification(
-            handle,
-            NotificationPayload {
-                title: "jeff".to_string(),
-                body,
-                context_kind: Some("drift".to_string()),
-                context_id: Some(task_id),
-            },
-        );
-    }
-}
-
-async fn check_stuck_from_background<R: Runtime>(
-    handle: &AppHandle<R>,
-    jeff: &JeffState,
-    quiet: bool,
-    task_id: i64,
-) {
-    if quiet {
-        return;
-    }
-
-    let store = jeff.store.clone();
-    let embeddings = jeff.embeddings.clone();
-    let reasoning = jeff.reasoning.clone();
-    let runner = jeff.subtasks.clone();
-
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        propose_speculative_subtask(&store, embeddings.as_ref(), reasoning, &runner, task_id)
-    })
-    .await;
-
-    let Ok(Ok(Some(subtask))) = result else {
-        return;
-    };
-
-    let overlay_visible = handle
-        .get_webview_window(OVERLAY_WINDOW_LABEL)
-        .and_then(|w: tauri::WebviewWindow<R>| w.is_visible().ok())
-        .unwrap_or(false);
-
-    if overlay_visible {
-        let _ = handle.emit(
-            "proactive://speculative_subtask",
-            serde_json::json!({
-                "subtask_id": subtask.subtask_id,
-                "task_id": subtask.task_id,
-                "title": subtask.title,
-            }),
-        );
-    } else {
-        let _ = crate::ambient::dispatch_notification(
-            handle,
-            NotificationPayload {
-                title: "jeff".to_string(),
-                body: format!("started \"{}\" in the background.", subtask.title),
-                context_kind: Some("speculative_subtask".to_string()),
-                context_id: Some(subtask.subtask_id),
-            },
-        );
-    }
 }
 
 #[cfg(test)]

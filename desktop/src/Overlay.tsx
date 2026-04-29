@@ -46,6 +46,7 @@ import {
   completeOnboarding,
   createTask,
   dismissSelectionCapture,
+  dismissProactiveTrigger,
   getActiveTask,
   getActiveWindowContext,
   getAccessibilityPermissionStatus,
@@ -67,7 +68,6 @@ import {
   startSubtaskChain,
   storeOpenAiApiKey,
   transcribeAudio,
-  triggerTaskResume,
   validateOpenAiApiKey
 } from "./tauriClient";
 
@@ -376,13 +376,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   const [writeConfirmations, setWriteConfirmations] = useState<WriteConfirmation[]>([]);
   const writeConfirmationTimersRef = useRef<Map<number, number>>(new Map());
 
-  // phase 15: reorientation banner shown when user returns to a task after 5+
-  // minutes away. auto-dismisses after 8 seconds.
-  const [reorientationBanner, setReorientationBanner] = useState<string | null>(null);
-  const reorientationTimerRef = useRef<number | null>(null);
-
-  // c3: proactive event banners from background monitor
-  const [driftBanner, setDriftBanner] = useState<string | null>(null);
+  // phase 28: proactive messages are delivered as chat bubbles; no banner state needed.
   const [speculativeSubtask, setSpeculativeSubtask] = useState<SpeculativeSubtaskState | null>(null);
   // d1: track whether tts audio is currently playing for the barge-in hint
   const [ttsActivePlaying, setTtsActivePlaying] = useState(false);
@@ -623,22 +617,11 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
           pendingExpandRef.current = true;
           setMode("expanded");
 
-          // c4: reorientation notification click → fetch and show the summary.
-          if (kind === "reorientation" && id !== null) {
-            void triggerTaskResume(id)
-              .then((result) => {
-                if (result.summary && result.summary.trim().length > 0) {
-                  if (reorientationTimerRef.current !== null) {
-                    window.clearTimeout(reorientationTimerRef.current);
-                  }
-                  setReorientationBanner(result.summary.trim());
-                  reorientationTimerRef.current = window.setTimeout(() => {
-                    setReorientationBanner(null);
-                    reorientationTimerRef.current = null;
-                  }, 10000);
-                }
-              })
-              .catch(() => undefined);
+          // phase 28: synthesis proactive notifications — message is already in DB,
+          // just refresh the thread so the user sees it when the overlay opens.
+          const synthKinds = ["task_return", "deadline_pressure", "blocker", "work_quality_observation"];
+          if (kind && synthKinds.includes(kind) && id !== null) {
+            void refreshMessages(id).catch(() => undefined);
             return;
           }
 
@@ -693,27 +676,11 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   useEffect(() => {
     const unsubscribers: Promise<UnlistenFn>[] = [];
 
-    // c3: background monitor fired a reorientation summary.
+    // phase 28: proactive message stored in DB — refresh the message list so it
+    // appears in the conversation thread.
     unsubscribers.push(
-      listen<{ task_id: number; summary: string }>("proactive://reorientation", (event) => {
-        const summary = event.payload.summary?.trim();
-        if (!summary) return;
-        if (reorientationTimerRef.current !== null) {
-          window.clearTimeout(reorientationTimerRef.current);
-        }
-        setReorientationBanner(summary);
-        reorientationTimerRef.current = window.setTimeout(() => {
-          setReorientationBanner(null);
-          reorientationTimerRef.current = null;
-        }, 10000);
-      })
-    );
-
-    // c3: drift detected from background.
-    unsubscribers.push(
-      listen<{ task_id: number; reason: string }>("proactive://drift", (event) => {
-        const reason = event.payload.reason?.trim() || "looks like you may have drifted from your task.";
-        setDriftBanner(reason);
+      listen<{ task_id: number; reason_type: string }>("jeff://proactive-message-inserted", (event) => {
+        void refreshMessages(event.payload.task_id).catch(() => undefined);
       })
     );
 
@@ -2277,12 +2244,28 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                   messages.map((message) => (
                     <div
                       key={message.id}
-                      className={`overlay-message overlay-message-${message.role}`}
+                      className={`overlay-message overlay-message-${message.role}${message.message_kind === "assistant_proactive" ? " overlay-message-proactive" : ""}`}
                     >
                       <div className="overlay-message-role">
                         {message.role === "assistant" ? "jeff" : message.role}
                       </div>
                       <div className="overlay-message-body">{message.content}</div>
+                      {message.message_kind === "assistant_proactive" ? (
+                        <div className="overlay-proactive-actions">
+                          <button
+                            type="button"
+                            className="overlay-proactive-dismiss"
+                            onClick={() => {
+                              const task = activeTaskRef.current;
+                              if (task) {
+                                void dismissProactiveTrigger(task.id, "reorientation").catch(() => undefined);
+                              }
+                            }}
+                          >
+                            not relevant
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                   ))
                 )}
@@ -2370,25 +2353,6 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                 <div ref={messagesEndRef} />
               </div>
 
-              {reorientationBanner ? (
-                <div className="overlay-banner overlay-banner-info" data-testid="overlay-reorientation-banner">
-                  <span className="overlay-selection-capture-message">{reorientationBanner}</span>
-                  <div className="overlay-banner-actions">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (reorientationTimerRef.current !== null) {
-                          window.clearTimeout(reorientationTimerRef.current);
-                          reorientationTimerRef.current = null;
-                        }
-                        setReorientationBanner(null);
-                      }}
-                    >
-                      dismiss
-                    </button>
-                  </div>
-                </div>
-              ) : null}
 
               {selectionCaptureIndicator ? (
                 <div
@@ -2419,14 +2383,6 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                 </div>
               ) : null}
 
-              {driftBanner ? (
-                <div className="overlay-banner overlay-banner-warn" data-testid="overlay-drift-banner">
-                  <span className="overlay-selection-capture-message">{driftBanner}</span>
-                  <div className="overlay-banner-actions">
-                    <button type="button" onClick={() => setDriftBanner(null)}>dismiss</button>
-                  </div>
-                </div>
-              ) : null}
 
               {ttsActivePlaying && !ttsBargeInHintDismissed ? (
                 <div className="overlay-context-line" data-testid="overlay-tts-hint">

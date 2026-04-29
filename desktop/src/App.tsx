@@ -94,13 +94,10 @@ import {
   getClipboardCaptureSetting,
   IntentSlotsDto,
   classifyMessageIntent,
-  triggerTaskResume,
   checkTaskDrift,
-  triggerSpeculativeSubtask,
   dismissProactiveTrigger,
   recordTaskFocus,
   DriftFlagDto,
-  ReorientationDto,
   FileWriteProposalDto,
   SubTaskStepDto,
   WriteAuditEntryDto,
@@ -118,6 +115,7 @@ import {
   SelectionCaptureIndicatorDto,
   SelectionBridgeStatusDto,
   ProactiveAuditEntryDto,
+  SynthesisLogEntryDto,
   DataClearResultDto,
   getPrivacyCenterDashboard,
   setPrivacySurfaceEnabled,
@@ -127,6 +125,7 @@ import {
   setTtsVoice,
   clearUserProfileMemory,
   listProactiveTriggerAuditLog,
+  getSynthesisLog,
   clearActiveTaskData,
   clearAllJeffData,
   // phase 23
@@ -315,11 +314,9 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [clipboardCaptureEnabled, setClipboardCaptureEnabled] = useState(false);
 
   // phase 15: proactive initiation state
-  const [reorientationBanner, setReorientationBanner] = useState<string | null>(null);
   const [driftNotice, setDriftNotice] = useState<string | null>(null);
   const [speculativeSubtask, setSpeculativeSubtask] = useState<SubTaskDto | null>(null);
   const [quietMode, setQuietModeState] = useState(false);
-  const reorientationDismissTimerRef = useRef<number | null>(null);
 
   // phase 16: richer parallel work state
   const [fileWriteProposals, setFileWriteProposals] = useState<FileWriteProposalDto[]>([]);
@@ -337,6 +334,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [privacyCenterOpen, setPrivacyCenterOpen] = useState(false);
   const [privacyDashboard, setPrivacyDashboard] = useState<PrivacyCenterDashboardDto | null>(null);
   const [proactiveAuditLog, setProactiveAuditLog] = useState<ProactiveAuditEntryDto[]>([]);
+  const [synthesisLog, setSynthesisLog] = useState<SynthesisLogEntryDto[]>([]);
   const [privacyActionMessage, setPrivacyActionMessage] = useState<string | null>(null);
   const [clearAllConfirmation, setClearAllConfirmation] = useState("");
 
@@ -721,36 +719,14 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     void refreshRecentlyLearned(activeTask.id, { ensureWatcher: true }).catch(() => undefined);
   }, [activeTask?.id]);
 
-  // phase 15: window focus triggers proactive checks, then records focus timestamp.
-  // recording after resume avoids suppressing re-orientation due to near-zero "absence".
+  // phase 27: foreground focus only records presence. Proactive speech is owned
+  // by the synthesis monitor so resume, drift, and stuck signals are not split.
   useEffect(() => {
     const handleFocus = async () => {
       if (!activeTask) return;
       const taskId = activeTask.id;
 
-      try {
-        const result = await triggerTaskResume(taskId);
-        if (result.summary && result.summary.trim().length > 0) {
-          if (reorientationDismissTimerRef.current !== null) {
-            window.clearTimeout(reorientationDismissTimerRef.current);
-          }
-          setReorientationBanner(result.summary);
-          reorientationDismissTimerRef.current = window.setTimeout(() => {
-            setReorientationBanner(null);
-            reorientationDismissTimerRef.current = null;
-          }, 8000);
-        }
-      } catch {
-        // non-critical; swallow reorientation errors
-      }
-
       void recordTaskFocus(taskId).catch(() => undefined);
-
-      void triggerSpeculativeSubtask(taskId)
-        .then((subtask) => {
-          if (subtask) setSpeculativeSubtask(subtask);
-        })
-        .catch(() => undefined);
     };
 
     window.addEventListener("focus", handleFocus);
@@ -1079,15 +1055,18 @@ function App({ onCloseWorkspace }: AppProps = {}) {
         setCalendarEvent(null);
       }
       if (dashboard.active_task_id !== null) {
-        const [triggerLog, writeLog] = await Promise.all([
+        const [triggerLog, writeLog, synthesisEntries] = await Promise.all([
           listProactiveTriggerAuditLog(dashboard.active_task_id),
-          listWriteAuditLog(dashboard.active_task_id)
+          listWriteAuditLog(dashboard.active_task_id),
+          getSynthesisLog(dashboard.active_task_id)
         ]);
         setProactiveAuditLog(triggerLog);
         setWriteAuditLog(writeLog);
+        setSynthesisLog(synthesisEntries);
       } else {
         setProactiveAuditLog([]);
         setWriteAuditLog([]);
+        setSynthesisLog([]);
       }
     } catch (error) {
       setOperationError("Failed to refresh Privacy Center", error);
@@ -1967,12 +1946,18 @@ function App({ onCloseWorkspace }: AppProps = {}) {
         void getCalendarNextEvent().then(setCalendarEvent).catch(() => undefined);
       }
       if (dashboard.active_task_id !== null) {
-        const [triggerLog, writeLog] = await Promise.all([
+        const [triggerLog, writeLog, synthesisEntries] = await Promise.all([
           listProactiveTriggerAuditLog(dashboard.active_task_id),
-          listWriteAuditLog(dashboard.active_task_id)
+          listWriteAuditLog(dashboard.active_task_id),
+          getSynthesisLog(dashboard.active_task_id)
         ]);
         setProactiveAuditLog(triggerLog);
         setWriteAuditLog(writeLog);
+        setSynthesisLog(synthesisEntries);
+      } else {
+        setProactiveAuditLog([]);
+        setWriteAuditLog([]);
+        setSynthesisLog([]);
       }
     } catch (error) {
       setOperationError("Failed to update privacy setting", error);
@@ -2049,14 +2034,6 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   }
 
   // phase 15: proactive initiation handlers
-
-  function dismissReorientationBanner() {
-    if (reorientationDismissTimerRef.current !== null) {
-      window.clearTimeout(reorientationDismissTimerRef.current);
-      reorientationDismissTimerRef.current = null;
-    }
-    setReorientationBanner(null);
-  }
 
   function dismissDriftNotice() {
     setDriftNotice(null);
@@ -3616,15 +3593,6 @@ function App({ onCloseWorkspace }: AppProps = {}) {
               </div>
             ) : null}
 
-            {reorientationBanner ? (
-              <div className="companion-card" data-testid="reorientation-banner">
-                <p>{reorientationBanner}</p>
-                <button type="button" onClick={dismissReorientationBanner} data-testid="reorientation-dismiss">
-                  Dismiss
-                </button>
-              </div>
-            ) : null}
-
             {driftNotice ? (
               <div className="companion-card" data-testid="drift-flag-notice">
                 <p>Heads up: {driftNotice}</p>
@@ -3887,6 +3855,21 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                               <li key={`privacy-trigger-${entry.id}`}>
                                 {entry.trigger_type} at {entry.fired_at}{" "}
                                 {entry.suppressed ? "(suppressed)" : "(surfaced)"}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+
+                        <p className="task-meta">Synthesis decisions</p>
+                        {synthesisLog.length === 0 ? (
+                          <p data-testid="privacy-synthesis-audit-empty">No synthesis decisions for this task.</p>
+                        ) : (
+                          <ul className="compact-list" data-testid="privacy-synthesis-audit-list">
+                            {synthesisLog.map((entry) => (
+                              <li key={`privacy-synthesis-${entry.id}`}>
+                                {entry.reason_type} at {entry.created_at}{" "}
+                                {entry.delivered ? "(delivered)" : "(suppressed)"}
+                                {entry.reason_detail ? ` - ${entry.reason_detail}` : ""}
                               </li>
                             ))}
                           </ul>

@@ -12,6 +12,9 @@ pub enum MessageKind {
     // completion. list_messages returns both to the frontend.
     AssistantPartial,
     AssistantInterrupted,
+    // phase 28: proactive message delivered by the synthesis layer.
+    // stored in the chat thread so the user sees it as a conversation turn.
+    AssistantProactive,
 }
 
 impl MessageKind {
@@ -26,6 +29,7 @@ impl MessageKind {
             Self::SystemStatusEvent => "system_status_event",
             Self::AssistantPartial => "assistant_partial",
             Self::AssistantInterrupted => "assistant_interrupted",
+            Self::AssistantProactive => "assistant_proactive",
         }
     }
 
@@ -39,6 +43,7 @@ impl MessageKind {
             "system_status_event" => Self::SystemStatusEvent,
             "assistant_partial" => Self::AssistantPartial,
             "assistant_interrupted" => Self::AssistantInterrupted,
+            "assistant_proactive" => Self::AssistantProactive,
             _ => Self::UserStatement,
         }
     }
