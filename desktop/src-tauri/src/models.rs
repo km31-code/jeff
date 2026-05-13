@@ -489,6 +489,11 @@ pub struct PrivacyCenterDashboardDto {
     pub typing_activity_enabled: bool,
     pub tts_voice: String,
     pub available_tts_voices: Vec<String>,
+    // phase 31: content observation status fields
+    pub content_observation_enabled: bool,
+    pub content_observation_last_captured_at: Option<String>,
+    pub content_observation_capture_failed: bool,
+    pub content_observation_failed_app: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

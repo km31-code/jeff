@@ -937,6 +937,11 @@ export interface PrivacyCenterDashboardDto {
   typing_activity_enabled: boolean;
   tts_voice: string;
   available_tts_voices: string[];
+  // phase 31: content observation
+  content_observation_enabled: boolean;
+  content_observation_last_captured_at: string | null;
+  content_observation_capture_failed: boolean;
+  content_observation_failed_app: string | null;
 }
 
 export type SelectionCaptureStatus = "captured" | "failed";
@@ -1031,6 +1036,21 @@ export async function setTtsVoice(voice: string): Promise<PrivacyCenterDashboard
 
 export async function clearUserProfileMemory(): Promise<PrivacyCenterDashboardDto> {
   return invoke<PrivacyCenterDashboardDto>("clear_user_profile_memory");
+}
+
+export async function setContentObservationEnabled(
+  taskId: number,
+  enabled: boolean
+): Promise<PrivacyCenterDashboardDto> {
+  return invoke<PrivacyCenterDashboardDto>("set_content_observation_enabled", { taskId, enabled });
+}
+
+export async function getContentObservationEnabled(taskId: number): Promise<boolean> {
+  return invoke<boolean>("get_content_observation_enabled", { taskId });
+}
+
+export async function clearContentObservation(): Promise<void> {
+  return invoke<void>("clear_content_observation");
 }
 
 export async function listProactiveTriggerAuditLog(

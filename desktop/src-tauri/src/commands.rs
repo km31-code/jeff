@@ -1928,6 +1928,7 @@ fn build_privacy_center_dashboard(
     ambient: &ambient::AmbientState,
 ) -> Result<PrivacyCenterDashboardDto, String> {
     let active_task = state.store.get_active_task().map_err(map_jeff_error)?;
+    let active_task_id_for_content = active_task.as_ref().map(|t| t.id);
     let active_task_id = active_task.as_ref().map(|task| task.id);
 
     let (workspace_folder_path, workspace_watched_file_count, workspace_watcher_running) =
@@ -2018,6 +2019,28 @@ fn build_privacy_center_dashboard(
             .map_err(map_jeff_error)?,
         tts_voice: state.store.get_tts_voice().map_err(map_jeff_error)?,
         available_tts_voices: crate::voice_naturalness::available_tts_voices(),
+        // phase 31: content observation status
+        content_observation_enabled: active_task_id_for_content
+            .and_then(|tid| state.store.get_content_observation_enabled(tid).ok())
+            .unwrap_or(false),
+        content_observation_last_captured_at: state
+            .content_observation
+            .lock()
+            .ok()
+            .and_then(|g| {
+                g.last_captured_at.map(|ts| {
+                    // format as a readable timestamp for the UI
+                    let secs = ts as u64;
+                    format!("{secs}")
+                })
+            }),
+        content_observation_capture_failed: state
+            .content_observation
+            .lock()
+            .ok()
+            .map(|g| g.capture_failed_count >= 3)
+            .unwrap_or(false),
+        content_observation_failed_app: None,
     })
 }
 
@@ -2142,6 +2165,42 @@ pub fn clear_user_profile_memory(
     state.store.clear_user_profile().map_err(map_jeff_error)?;
     relational_model::clear_relational_profile(&state.store).map_err(map_jeff_error)?;
     build_privacy_center_dashboard(state.inner(), &ambient)
+}
+
+// phase 31: content observation commands --------------------------------------
+
+#[tauri::command]
+pub fn set_content_observation_enabled(
+    state: State<'_, JeffState>,
+    ambient: State<'_, ambient::AmbientState>,
+    task_id: i64,
+    enabled: bool,
+) -> Result<PrivacyCenterDashboardDto, String> {
+    state
+        .store
+        .set_content_observation_enabled(task_id, enabled)
+        .map_err(map_jeff_error)?;
+    build_privacy_center_dashboard(state.inner(), &ambient)
+}
+
+#[tauri::command]
+pub fn get_content_observation_enabled(
+    state: State<'_, JeffState>,
+    task_id: i64,
+) -> Result<bool, String> {
+    state
+        .store
+        .get_content_observation_enabled(task_id)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn clear_content_observation(state: State<'_, JeffState>) -> Result<(), String> {
+    if let Ok(mut guard) = state.content_observation.lock() {
+        guard.raw_text = None;
+        guard.prior_text = None;
+    }
+    Ok(())
 }
 
 // phase 30: relational profile commands ---------------------------------------

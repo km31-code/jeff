@@ -2896,6 +2896,18 @@ impl TaskStore {
         )
     }
 
+    // per-task content observation toggle (off by default).
+    // key format: privacy_content_observation_task_[task_id]
+    pub fn get_content_observation_enabled(&self, task_id: i64) -> Result<bool> {
+        let key = format!("privacy_content_observation_task_{task_id}");
+        Ok(self.get_app_setting_bool(&key)?.unwrap_or(false))
+    }
+
+    pub fn set_content_observation_enabled(&self, task_id: i64, enabled: bool) -> Result<()> {
+        let key = format!("privacy_content_observation_task_{task_id}");
+        self.set_app_setting(&key, if enabled { "true" } else { "false" })
+    }
+
     pub fn get_tts_voice(&self) -> Result<String> {
         let configured = self
             .get_app_setting(APP_SETTING_TTS_VOICE)?

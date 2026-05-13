@@ -538,6 +538,16 @@ fn main() {
             // phase 27 consolidates proactive speech through synthesis.
             proactive::spawn_ambient_monitor(handle.clone());
 
+            // phase 31: content observation poll — every 10 seconds.
+            // reads the active document text via AXUIElement when the per-task
+            // privacy toggle is enabled. JEFF_DISABLE_CONTENT_OBSERVATION=1 skips.
+            {
+                let content_poll_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    spawn_content_observation_poll(content_poll_handle).await;
+                });
+            }
+
             // phase 24: background update check — delayed 2 seconds so it
             // does not compete with tray-ready or session-restore on startup.
             {
@@ -708,6 +718,10 @@ fn main() {
             commands::reject_live_edit,
             commands::list_live_edit_receipts,
             commands::get_pending_live_edits,
+            // phase 31: content observation
+            commands::set_content_observation_enabled,
+            commands::get_content_observation_enabled,
+            commands::clear_content_observation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Jeff desktop app");
@@ -744,6 +758,102 @@ async fn perform_update_check(app: tauri::AppHandle) {
             .download_and_install(|_chunk, _total| {}, || {})
             .await;
         app.restart();
+    }
+}
+
+// phase 31: content observation polling loop.
+async fn spawn_content_observation_poll(handle: tauri::AppHandle) {
+    if std::env::var("JEFF_DISABLE_CONTENT_OBSERVATION").is_ok() {
+        return;
+    }
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(
+            context_observer::CONTENT_OBSERVATION_POLL_INTERVAL_SECONDS,
+        ))
+        .await;
+
+        let quiet = handle
+            .try_state::<AmbientState>()
+            .map(|s| s.is_quiet_mode())
+            .unwrap_or(false);
+        if quiet {
+            continue;
+        }
+
+        let Some(jeff_state) = handle.try_state::<state::JeffState>() else {
+            continue;
+        };
+        let Some(task) = jeff_state.store.get_active_task().ok().flatten() else {
+            continue;
+        };
+        let task_id = task.id;
+
+        let enabled = jeff_state
+            .store
+            .get_content_observation_enabled(task_id)
+            .unwrap_or(false);
+        if !enabled {
+            continue;
+        }
+
+        let failed_count = jeff_state
+            .content_observation
+            .lock()
+            .ok()
+            .map(|g| g.capture_failed_count)
+            .unwrap_or(0);
+        if failed_count >= 3 {
+            continue;
+        }
+
+        let Some(pid) = context_observer::get_frontmost_pid() else {
+            continue;
+        };
+
+        let text_opt = context_observer::read_ax_document_text(pid);
+
+        let mut should_update_awareness = false;
+        if let Ok(mut guard) = jeff_state.content_observation.lock() {
+            guard.capture_attempt_count += 1;
+            match text_opt {
+                None => {
+                    guard.capture_failed_count += 1;
+                }
+                Some(text) => {
+                    guard.capture_failed_count = 0;
+                    let prior_wc = guard
+                        .observation
+                        .as_ref()
+                        .map(|o| o.word_count)
+                        .unwrap_or(0);
+                    let prior_stable = guard
+                        .observation
+                        .as_ref()
+                        .map(|o| o.stable_for_ticks)
+                        .unwrap_or(0);
+                    let prior_text_ref = guard.raw_text.clone();
+                    let observation = context_observer::summarize_content_observation(
+                        &text,
+                        prior_text_ref.as_deref(),
+                        prior_wc,
+                        prior_stable,
+                    );
+                    guard.last_captured_at = Some(observation.captured_at);
+                    guard.prior_text = guard.raw_text.take();
+                    guard.raw_text = Some(text);
+                    guard.observation = Some(observation);
+                    should_update_awareness = true;
+                }
+            }
+        }
+
+        if should_update_awareness {
+            awareness_core::spawn_awareness_update(
+                &handle,
+                awareness_core::SnapshotTrigger::ContentObservation,
+                task_id,
+            );
+        }
     }
 }
 

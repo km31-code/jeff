@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use crate::context_observer::ActiveWindowContext;
+use crate::context_observer::{ActiveWindowContext, ContentObservationState};
 
 use crate::{
     awareness_core::AwarenessCore, coworking::CoworkingRuntime, embedding::EmbeddingProvider,
@@ -28,6 +28,8 @@ pub struct JeffState {
     // phase 13: filesystem watcher state per task.
     pub watcher: Arc<Mutex<WatcherState>>,
     pub awareness_core: Arc<AwarenessCore>,
+    // phase 31: content observation state — raw text never leaves context_observer.
+    pub content_observation: Arc<Mutex<ContentObservationState>>,
 }
 
 impl JeffState {
@@ -55,6 +57,7 @@ impl JeffState {
             interactions: crate::streaming::new_shared_registry(),
             watcher: Arc::new(Mutex::new(WatcherState::new())),
             awareness_core: Arc::new(AwarenessCore::new()),
+            content_observation: Arc::new(Mutex::new(ContentObservationState::default())),
         }
     }
 

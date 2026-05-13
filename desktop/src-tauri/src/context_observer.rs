@@ -3,8 +3,50 @@
 // focused window title. all macOS api calls are in the inner module gated on
 // cfg(target_os = "macos"). on other platforms the module provides stubs that
 // always return None / false so the rest of the codebase compiles unchanged.
+//
+// phase 31: adds content observation polling — reads active document text
+// via AXUIElement to compute a deterministic ContentObservation summary.
+// raw text never leaves this module; only the summary crosses the boundary.
 
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+pub const CONTENT_OBSERVATION_POLL_INTERVAL_SECONDS: u64 = 10;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DraftState {
+    Early,
+    Mid,
+    Late,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChangeMagnitude {
+    None,
+    Minor,
+    Major,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentObservation {
+    pub word_count: usize,
+    pub draft_state: DraftState,
+    pub content_changed: bool,
+    pub change_magnitude: ChangeMagnitude,
+    pub stable_for_ticks: u32,
+    pub captured_at: i64,
+}
+
+#[derive(Debug, Default)]
+pub struct ContentObservationState {
+    pub raw_text: Option<String>,
+    pub prior_text: Option<String>,
+    pub observation: Option<ContentObservation>,
+    pub last_captured_at: Option<i64>,
+    pub capture_attempt_count: u32,
+    pub capture_failed_count: u32,
+}
 
 #[derive(Debug, Clone)]
 pub struct ActiveWindowContext {
@@ -73,6 +115,8 @@ mod inner {
             key_callbacks: *const c_void,
             value_callbacks: *const c_void,
         ) -> *const c_void;
+        fn CFArrayGetCount(the_array: *const c_void) -> i64;
+        fn CFArrayGetValueAtIndex(the_array: *const c_void, idx: i64) -> *const c_void;
     }
 
     // create a CFString from a Rust str. caller must CFRelease the result.
@@ -148,6 +192,155 @@ mod inner {
 
             let _: () = msg_send![pool, drain];
             result
+        }
+    }
+
+    pub fn get_frontmost_pid() -> Option<i32> {
+        let (app_name, pid) = get_frontmost_app()?;
+        if matches!(app_name.as_str(), "Jeff" | "jeff-desktop" | "jeff") {
+            return None;
+        }
+        Some(pid)
+    }
+
+    // read the text content of the frontmost application's focused text area
+    // via the macOS Accessibility API. returns None silently on any failure.
+    // does not call AXIsProcessTrustedWithOptions — the Phase 20 title-polling
+    // path already asserts permission before this is called.
+    // result is truncated to 50,000 characters as a memory guard.
+    pub fn read_ax_document_text(pid: i32) -> Option<String> {
+        unsafe {
+            let app_el = AXUIElementCreateApplication(pid);
+            if app_el.is_null() {
+                return None;
+            }
+
+            // try the focused UI element first (fast path for most text editors).
+            let focused_attr = make_cf_string("AXFocusedUIElement");
+            let mut focused_el: *const c_void = std::ptr::null();
+            let focus_err = if !focused_attr.is_null() {
+                let err = AXUIElementCopyAttributeValue(app_el, focused_attr, &mut focused_el);
+                CFRelease(focused_attr);
+                err
+            } else {
+                -1
+            };
+
+            if focus_err == AX_SUCCESS && !focused_el.is_null() {
+                let role = get_element_role(focused_el);
+                if matches!(role.as_deref(), Some("AXTextArea") | Some("AXWebArea")) {
+                    if let Some(text) = get_element_value(focused_el) {
+                        CFRelease(focused_el);
+                        CFRelease(app_el);
+                        return Some(truncate_ax_text(text, 50_000));
+                    }
+                }
+                CFRelease(focused_el);
+            }
+
+            // fall back: traverse children of the focused window (max depth 4).
+            let window_attr = make_cf_string("AXFocusedWindow");
+            let mut window_el: *const c_void = std::ptr::null();
+            let win_err = if !window_attr.is_null() {
+                let err = AXUIElementCopyAttributeValue(app_el, window_attr, &mut window_el);
+                CFRelease(window_attr);
+                err
+            } else {
+                -1
+            };
+            CFRelease(app_el);
+
+            if win_err != AX_SUCCESS || window_el.is_null() {
+                return None;
+            }
+
+            let result = find_text_in_children(window_el, "AXTextArea", 4)
+                .or_else(|| find_text_in_children(window_el, "AXWebArea", 4));
+            CFRelease(window_el);
+            result.map(|t| truncate_ax_text(t, 50_000))
+        }
+    }
+
+    // depth-first search for an element with the given role, returns its AXValue.
+    // the CFArrayRef for each level's children is kept alive while its children
+    // are examined, so element pointers remain valid throughout.
+    unsafe fn find_text_in_children(
+        element: *const c_void,
+        target_role: &str,
+        depth: u32,
+    ) -> Option<String> {
+        if depth == 0 {
+            return None;
+        }
+        let children_attr = make_cf_string("AXChildren");
+        if children_attr.is_null() {
+            return None;
+        }
+        let mut children_ref: *const c_void = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(element, children_attr, &mut children_ref);
+        CFRelease(children_attr);
+        if err != AX_SUCCESS || children_ref.is_null() {
+            return None;
+        }
+        let count = CFArrayGetCount(children_ref);
+        let mut result = None;
+        'search: for i in 0..count {
+            let child = CFArrayGetValueAtIndex(children_ref, i);
+            if child.is_null() {
+                continue;
+            }
+            if get_element_role(child).as_deref() == Some(target_role) {
+                if let Some(text) = get_element_value(child) {
+                    result = Some(text);
+                    break 'search;
+                }
+            }
+            if let Some(text) = find_text_in_children(child, target_role, depth - 1) {
+                result = Some(text);
+                break 'search;
+            }
+        }
+        CFRelease(children_ref);
+        result
+    }
+
+    unsafe fn get_element_role(element: *const c_void) -> Option<String> {
+        let attr = make_cf_string("AXRole");
+        if attr.is_null() {
+            return None;
+        }
+        let mut val_ref: *const c_void = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(element, attr, &mut val_ref);
+        CFRelease(attr);
+        if err != AX_SUCCESS || val_ref.is_null() {
+            return None;
+        }
+        let role = cf_string_to_rust(val_ref);
+        CFRelease(val_ref);
+        role
+    }
+
+    unsafe fn get_element_value(element: *const c_void) -> Option<String> {
+        let attr = make_cf_string("AXValue");
+        if attr.is_null() {
+            return None;
+        }
+        let mut val_ref: *const c_void = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(element, attr, &mut val_ref);
+        CFRelease(attr);
+        if err != AX_SUCCESS || val_ref.is_null() {
+            return None;
+        }
+        let text = cf_string_to_rust(val_ref);
+        CFRelease(val_ref);
+        text
+    }
+
+    fn truncate_ax_text(s: String, max_chars: usize) -> String {
+        if s.chars().count() <= max_chars {
+            s
+        } else {
+            s.chars().take(max_chars).collect()
         }
     }
 
@@ -274,9 +467,20 @@ mod inner {
     pub fn poll_active_window() -> Option<ActiveWindowContext> {
         None
     }
+
+    pub fn get_frontmost_pid() -> Option<i32> {
+        None
+    }
+
+    pub fn read_ax_document_text(_pid: i32) -> Option<String> {
+        None
+    }
 }
 
-pub use inner::{is_accessibility_trusted, poll_active_window, request_accessibility_permission};
+pub use inner::{
+    get_frontmost_pid, is_accessibility_trusted, poll_active_window,
+    read_ax_document_text, request_accessibility_permission,
+};
 
 // strip common app-name suffixes from window titles so the document name
 // presented to the LLM and the nudge logic is clean.
@@ -297,6 +501,58 @@ pub fn strip_title_suffix(title: &str) -> String {
         }
     }
     title.to_string()
+}
+
+// ---- content observation summarizer ----------------------------------------
+
+// pure, deterministic summary of captured document text. no i/o, no llm call.
+// the raw text never travels beyond context_observer.rs; only this struct does.
+pub fn summarize_content_observation(
+    text: &str,
+    prior: Option<&str>,
+    prior_word_count: usize,
+    stable_for_ticks: u32,
+) -> ContentObservation {
+    let word_count = text.split_whitespace().count();
+
+    let draft_state = if word_count < 200 {
+        DraftState::Early
+    } else if word_count > 1000 {
+        DraftState::Late
+    } else {
+        DraftState::Mid
+    };
+
+    let content_changed = if let Some(p) = prior {
+        let text_prefix: String = text.chars().take(80).collect();
+        let prior_prefix: String = p.chars().take(80).collect();
+        text_prefix != prior_prefix
+    } else {
+        false
+    };
+
+    let change_magnitude = if !content_changed {
+        ChangeMagnitude::None
+    } else {
+        let diff = (word_count as i64 - prior_word_count as i64).abs();
+        let threshold = (prior_word_count / 10) as i64;
+        if diff < threshold {
+            ChangeMagnitude::Minor
+        } else {
+            ChangeMagnitude::Major
+        }
+    };
+
+    let new_stable = if content_changed { 0 } else { stable_for_ticks + 1 };
+
+    ContentObservation {
+        word_count,
+        draft_state,
+        content_changed,
+        change_magnitude,
+        stable_for_ticks: new_stable,
+        captured_at: unix_now(),
+    }
 }
 
 // ---- unit tests -------------------------------------------------------------
@@ -362,5 +618,68 @@ mod tests {
     fn strip_title_suffix_does_not_strip_when_nothing_remains() {
         // separator at position 0 would leave an empty prefix — keep original.
         assert_eq!(strip_title_suffix(" - only suffix"), " - only suffix");
+    }
+
+    #[test]
+    fn summarize_empty_text_is_early_draft() {
+        let obs = summarize_content_observation("", None, 0, 0);
+        assert_eq!(obs.word_count, 0);
+        assert_eq!(obs.draft_state, DraftState::Early);
+        assert!(!obs.content_changed);
+        assert_eq!(obs.change_magnitude, ChangeMagnitude::None);
+    }
+
+    #[test]
+    fn summarize_detects_major_change() {
+        // prior has 100 words starting with "aaa "; current has 200 words starting
+        // with "bbb " so the first-80-char prefix differs → content_changed = true.
+        let prior = "aaa ".repeat(100);
+        let current = "bbb ".repeat(200);
+        let obs = summarize_content_observation(&current, Some(&prior), 100, 0);
+        assert!(obs.content_changed, "content should be marked changed");
+        assert_eq!(obs.change_magnitude, ChangeMagnitude::Major);
+        assert_eq!(obs.stable_for_ticks, 0);
+    }
+
+    #[test]
+    fn summarize_minor_change() {
+        // prior 100 words, new 105 words — diff 5 < 10% of 100 = 10 → Minor
+        let prior = "word ".repeat(100);
+        // new text has different prefix to trigger content_changed
+        let current = "changed ".repeat(1) + &"word ".repeat(104);
+        let obs = summarize_content_observation(&current, Some(&prior), 100, 0);
+        assert!(obs.content_changed);
+        assert_eq!(obs.change_magnitude, ChangeMagnitude::Minor);
+    }
+
+    #[test]
+    fn stable_for_ticks_resets_on_change() {
+        let prior = "aaa ".repeat(100);
+        let current = "bbb ".repeat(100);
+        let obs = summarize_content_observation(&current, Some(&prior), 100, 5);
+        assert!(obs.content_changed);
+        assert_eq!(obs.stable_for_ticks, 0);
+    }
+
+    #[test]
+    fn stable_for_ticks_increments_when_unchanged() {
+        let text = "word ".repeat(50);
+        let obs = summarize_content_observation(&text, Some(&text), 50, 3);
+        assert!(!obs.content_changed);
+        assert_eq!(obs.stable_for_ticks, 4);
+    }
+
+    #[test]
+    fn draft_state_mid_range() {
+        let text = "word ".repeat(500);
+        let obs = summarize_content_observation(&text, None, 0, 0);
+        assert_eq!(obs.draft_state, DraftState::Mid);
+    }
+
+    #[test]
+    fn draft_state_late_over_1000_words() {
+        let text = "word ".repeat(1001);
+        let obs = summarize_content_observation(&text, None, 0, 0);
+        assert_eq!(obs.draft_state, DraftState::Late);
     }
 }

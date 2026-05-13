@@ -124,6 +124,8 @@ import {
   dismissSelectionCapture,
   setTtsVoice,
   clearUserProfileMemory,
+  setContentObservationEnabled,
+  clearContentObservation,
   listProactiveTriggerAuditLog,
   getSynthesisLog,
   clearActiveTaskData,
@@ -3835,6 +3837,50 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                           </button>
                         ) : null}
                       </li>
+
+                      {activeTask ? (
+                        <li data-testid="privacy-surface-content-observation">
+                          <label className="toggle-row">
+                            <input
+                              type="checkbox"
+                              checked={privacyDashboard.content_observation_enabled}
+                              onChange={(event) =>
+                                void (async () => {
+                                  const updated = await setContentObservationEnabled(
+                                    activeTask.id,
+                                    event.target.checked
+                                  );
+                                  setPrivacyDashboard(updated);
+                                })()
+                              }
+                              data-testid="privacy-toggle-content-observation"
+                            />
+                            Active document reading
+                          </label>
+                          <p className="task-meta">
+                            Jeff will periodically read the text in your active document window to give
+                            you better feedback. This text never leaves your device.
+                          </p>
+                          {privacyDashboard.content_observation_enabled ? (
+                            <p className="task-meta" data-testid="content-observation-status">
+                              {privacyDashboard.content_observation_capture_failed
+                                ? `Could not read text — this app may restrict accessibility access.`
+                                : privacyDashboard.content_observation_last_captured_at
+                                ? `Last read: ${new Date(Number(privacyDashboard.content_observation_last_captured_at) * 1000).toLocaleTimeString()}`
+                                : "Not yet captured"}
+                            </p>
+                          ) : null}
+                          {privacyDashboard.content_observation_enabled ? (
+                            <button
+                              type="button"
+                              onClick={() => void clearContentObservation()}
+                              data-testid="content-observation-clear"
+                            >
+                              Clear
+                            </button>
+                          ) : null}
+                        </li>
+                      ) : null}
 
                       <li data-testid="privacy-surface-voice">
                         <label className="toggle-row">

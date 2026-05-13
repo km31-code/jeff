@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     ambient::AmbientState,
+    context_observer::{ChangeMagnitude, DraftState},
     models::CalendarEventDto,
     state::{CalendarState, ContextState, JeffState},
     store::TaskStore,
@@ -32,6 +33,9 @@ pub struct SituationalSnapshot {
     pub snapshot_confidence: f32,
     pub updated_at: i64,
     pub trigger: String,
+    // phase 31: content observation fields
+    pub active_document_excerpt: Option<String>,
+    pub content_idle_seconds: Option<u32>,
 }
 
 impl Default for SituationalSnapshot {
@@ -48,6 +52,8 @@ impl Default for SituationalSnapshot {
             snapshot_confidence: 0.0,
             updated_at: unix_now(),
             trigger: "initial".to_string(),
+            active_document_excerpt: None,
+            content_idle_seconds: None,
         }
     }
 }
@@ -83,6 +89,8 @@ pub enum SnapshotTrigger {
     SubtaskCompleted,
     CalendarEvent,
     TimeTick,
+    // phase 31: fired after each content observation poll cycle.
+    ContentObservation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -166,6 +174,7 @@ impl SnapshotTrigger {
             Self::SubtaskCompleted => "subtask_completed",
             Self::CalendarEvent => "calendar_event",
             Self::TimeTick => "time_tick",
+            Self::ContentObservation => "content_observation",
         }
     }
 }
@@ -301,6 +310,11 @@ pub fn snapshot_summary(snapshot: &SituationalSnapshot) -> String {
     if let Some(time_pressure) = snapshot.time_pressure.as_ref() {
         lines.push(format!("time pressure: {}", time_pressure.description));
     }
+    if let Some(excerpt) = snapshot.active_document_excerpt.as_deref() {
+        // truncate excerpt to 60 chars to stay within the 150-token budget.
+        let short: String = excerpt.chars().take(60).collect();
+        lines.push(format!("active document: {short}"));
+    }
 
     truncate_chars(&lines.join("\n"), 600)
 }
@@ -356,6 +370,24 @@ pub fn should_speak_proactively(
     if !snapshot.current_blockers.is_empty() && idle_seconds > 600 {
         return Some(ProactiveSpeechReason::BlockerDetected {
             blocker: snapshot.current_blockers[0].clone(),
+        });
+    }
+
+    // phase 31: work quality observation — content unchanged for >= 60s while
+    // the user is focused and has not sent a message for 5+ minutes.
+    if snapshot
+        .content_idle_seconds
+        .map(|s| s >= 60)
+        .unwrap_or(false)
+        && snapshot.attention_state == AttentionState::Focused
+        && snapshot
+            .last_meaningful_turn
+            .map(|t| now.saturating_sub(t) > 300)
+            .unwrap_or(false)
+        && snapshot.snapshot_confidence >= 0.3
+    {
+        return Some(ProactiveSpeechReason::WorkQualityObservation {
+            observation: "content unchanged for a while".to_string(),
         });
     }
 
@@ -491,6 +523,10 @@ fn assemble_snapshot(
     let time_pressure = calendar_time_pressure(calendar_event)
         .or_else(|| stated_deadline_pressure(&recent_messages));
 
+    // phase 31: content observation — always include latest captured data so
+    // subsequent triggers (NewTurn etc.) don't lose the content excerpt.
+    let (active_document_excerpt, content_idle_seconds) = content_observation_summary(state);
+
     let mut snapshot_confidence = 0.0_f32;
     if state.store.get_active_task().ok().flatten().is_some() {
         snapshot_confidence += 0.20;
@@ -514,6 +550,10 @@ fn assemble_snapshot(
     if recent_progress.is_some() || !pending_work.is_empty() {
         snapshot_confidence += 0.20;
     }
+    // +0.10 bonus when content observation has data (capped at 1.0).
+    if active_document_excerpt.is_some() {
+        snapshot_confidence += 0.10;
+    }
 
     SituationalSnapshot {
         current_goal: current_goal.map(|value| truncate_chars(value.trim(), 240)),
@@ -527,7 +567,35 @@ fn assemble_snapshot(
         snapshot_confidence: snapshot_confidence.min(1.0),
         updated_at: now,
         trigger: trigger.as_str().to_string(),
+        active_document_excerpt,
+        content_idle_seconds,
     }
+}
+
+fn content_observation_summary(state: &JeffState) -> (Option<String>, Option<u32>) {
+    let guard = match state.content_observation.lock() {
+        Ok(g) => g,
+        Err(_) => return (None, None),
+    };
+    let obs = match guard.observation.as_ref() {
+        Some(o) => o,
+        None => return (None, None),
+    };
+    let change_phrase = match (&obs.change_magnitude, obs.content_changed) {
+        (ChangeMagnitude::None, _) | (_, false) => "no recent changes",
+        (ChangeMagnitude::Minor, true) => "minor recent changes",
+        (ChangeMagnitude::Major, true) => "content changed recently",
+    };
+    let draft_str = match obs.draft_state {
+        DraftState::Early => "early draft",
+        DraftState::Mid => "mid-draft",
+        DraftState::Late => "late draft",
+    };
+    let excerpt = format!("~{} words, {}, {}", obs.word_count, draft_str, change_phrase);
+    let idle_secs = obs
+        .stable_for_ticks
+        .saturating_mul(crate::context_observer::CONTENT_OBSERVATION_POLL_INTERVAL_SECONDS as u32);
+    (Some(excerpt), Some(idle_secs))
 }
 
 fn current_active_window_string<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
@@ -813,6 +881,8 @@ mod tests {
             snapshot_confidence: 1.0,
             updated_at: 2,
             trigger: "test".to_string(),
+            active_document_excerpt: Some("~840 words, mid-draft, content changed recently".to_string()),
+            content_idle_seconds: Some(0),
         };
         assert!(snapshot_summary(&snapshot).chars().count() <= 600);
     }
@@ -854,6 +924,8 @@ mod tests {
             snapshot_confidence: 0.8,
             updated_at: now,
             trigger: "test".to_string(),
+            active_document_excerpt: None,
+            content_idle_seconds: None,
         }
     }
 
@@ -924,6 +996,52 @@ mod tests {
             should_speak_proactively(&snapshot, &profile, None, now),
             None
         );
+    }
+
+    #[test]
+    fn content_idle_seconds_from_ticks() {
+        let now = 10_000;
+        let mut snapshot = speech_test_snapshot(now);
+        snapshot.content_idle_seconds = Some(60);
+        snapshot.attention_state = AttentionState::Focused;
+        snapshot.last_meaningful_turn = Some(now - 400);
+        snapshot.snapshot_confidence = 0.8;
+
+        assert_eq!(
+            should_speak_proactively(&snapshot, &UserProfile::default(), None, now),
+            Some(ProactiveSpeechReason::WorkQualityObservation {
+                observation: "content unchanged for a while".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn work_quality_observation_suppressed_when_content_idle_under_60() {
+        let now = 10_000;
+        let mut snapshot = speech_test_snapshot(now);
+        snapshot.content_idle_seconds = Some(30);
+        snapshot.attention_state = AttentionState::Focused;
+        snapshot.last_meaningful_turn = Some(now - 400);
+        // force snapshot_confidence high enough
+        snapshot.snapshot_confidence = 0.8;
+        // no blockers, no time pressure, not Returning → no task return
+        snapshot.attention_state = AttentionState::Focused;
+        // result must be None because content_idle < 60
+        assert_eq!(
+            should_speak_proactively(&snapshot, &UserProfile::default(), None, now),
+            None
+        );
+    }
+
+    #[test]
+    fn snapshot_has_active_document_excerpt_and_content_idle_seconds_fields() {
+        let mut snapshot = SituationalSnapshot::default();
+        assert!(snapshot.active_document_excerpt.is_none());
+        assert!(snapshot.content_idle_seconds.is_none());
+        snapshot.active_document_excerpt = Some("~300 words, mid-draft, no recent changes".to_string());
+        snapshot.content_idle_seconds = Some(60);
+        assert_eq!(snapshot.active_document_excerpt.as_deref(), Some("~300 words, mid-draft, no recent changes"));
+        assert_eq!(snapshot.content_idle_seconds, Some(60));
     }
 
     #[test]
