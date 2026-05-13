@@ -1222,12 +1222,23 @@ fn build_subtask_system_prompt(
     } else {
         None
     };
+    let prefers_opinions = if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        crate::relational_model::get_collaboration_style(store)
+            .ok()
+            .map(|style| style.prefers_opinions)
+    } else {
+        None
+    };
 
     character::build_subtask_system_prompt(&SubtaskContext {
         task_summary: task_summary.to_string(),
         subtask_title: subtask_title.to_string(),
         execution_type: execution_type.to_string(),
         profile_injection,
+        prefers_opinions,
     })
 }
 

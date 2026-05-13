@@ -159,6 +159,13 @@ pub async fn start_streaming_turn(
 
     // 1. append user message synchronously (fast sqlite write).
     let user_kind = classify_user_message_kind(&clean);
+    if state
+        .store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        let _ = crate::relational_model::record_message_signals(&state.store, task_id, &clean);
+    }
     state
         .store
         .append_chat_message(task_id, "user", &message_source, user_kind, &clean)?;

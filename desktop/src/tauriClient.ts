@@ -1060,6 +1060,46 @@ export interface UserProfileSignalDto {
   updated_at: string;
 }
 
+export type GoalStatus = "active" | "completed" | "abandoned";
+
+export interface StatedGoalDto {
+  id: number;
+  task_id: number;
+  goal_text: string;
+  stated_at: string;
+  status: GoalStatus;
+  updated_at: string;
+}
+
+export interface StrugglePatternDto {
+  id: number;
+  pattern_text: string;
+  task_ids_json: string;
+  first_seen: string;
+  last_seen: string;
+  occurrence_count: number;
+}
+
+export interface CollaborationStyleDto {
+  prefers_opinions: number;
+  wants_explanations: number;
+  delegation_comfort: number;
+  interruption_tolerance: number;
+}
+
+export interface TrustMetricsDto {
+  times_accepted_opinion: number;
+  times_pushed_back: number;
+  times_asked_for_more: number;
+}
+
+export interface RelationalProfileDto {
+  stated_goals: StatedGoalDto[];
+  struggle_patterns: StrugglePatternDto[];
+  collaboration_style: CollaborationStyleDto;
+  trust_metrics: TrustMetricsDto;
+}
+
 export interface WorkloadTaskDto {
   id: number;
   title: string;
@@ -1104,6 +1144,22 @@ export interface PendingLiveEditDto {
 
 export async function getUserProfileSignals(): Promise<UserProfileSignalDto[]> {
   return invoke<UserProfileSignalDto[]>("get_user_profile_signals");
+}
+
+export async function getRelationalProfile(): Promise<RelationalProfileDto> {
+  return invoke<RelationalProfileDto>("get_relational_profile");
+}
+
+export async function deleteStatedGoal(id: number): Promise<RelationalProfileDto> {
+  return invoke<RelationalProfileDto>("delete_stated_goal", { id });
+}
+
+export async function deleteStrugglePattern(id: number): Promise<RelationalProfileDto> {
+  return invoke<RelationalProfileDto>("delete_struggle_pattern", { id });
+}
+
+export async function clearRelationalProfile(): Promise<RelationalProfileDto> {
+  return invoke<RelationalProfileDto>("clear_relational_profile");
 }
 
 export async function addQualityRubric(text: string): Promise<UserProfileSignalDto[]> {

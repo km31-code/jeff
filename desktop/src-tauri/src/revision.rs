@@ -13,6 +13,7 @@ use crate::{
         RevisionProposalResultDto, RevisionTargetDto,
     },
     reasoning::ReasoningProvider,
+    relational_model,
     retrieval::build_task_context_pack,
     store::{ChunkEmbeddingInput, NewArtifactVersionInput, NewRevisionProposalInput, TaskStore},
     user_model,
@@ -389,7 +390,7 @@ fn parse_generated_revision(
 ) -> GeneratedRevision {
     let parsed = serde_json::from_str::<GeneratedRevisionJson>(raw_candidate.trim());
 
-    let (mut proposed_text, rationale, json_confidence, grounding_notes) = match parsed {
+    let (mut proposed_text, mut rationale, json_confidence, grounding_notes) = match parsed {
         Ok(value) => (
             character::strip_filler_phrases(value.proposed_text.trim()),
             value
@@ -409,6 +410,20 @@ fn parse_generated_revision(
             None,
         ),
     };
+
+    if rationale.is_none() {
+        let extracted = extract_assessment_sentence(raw_candidate)
+            .or_else(|| extract_assessment_sentence(&proposed_text));
+        if let Some(assessment) = extracted {
+            if let Some(remainder) = proposed_text.strip_prefix(&assessment) {
+                let remainder = remainder.trim_start();
+                if !remainder.is_empty() {
+                    rationale = Some(assessment);
+                    proposed_text = remainder.to_string();
+                }
+            }
+        }
+    }
 
     if proposed_text.is_empty() {
         proposed_text = fallback_text.to_string();
@@ -477,12 +492,23 @@ fn build_revision_system_prompt(
     } else {
         None
     };
+    let prefers_opinions = if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        relational_model::get_collaboration_style(store)
+            .ok()
+            .map(|style| style.prefers_opinions)
+    } else {
+        None
+    };
 
     character::build_revision_system_prompt(&RevisionContext {
         task_summary: task_summary.to_string(),
         target_description: target_description.to_string(),
         instruction: instruction.to_string(),
         profile_injection,
+        prefers_opinions,
         snapshot_summary: snapshot_summary.map(|s| s.to_string()),
     })
 }
@@ -723,6 +749,16 @@ pub fn generate_revision_alternative(
     } else {
         None
     };
+    let prefers_opinions = if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        relational_model::get_collaboration_style(store)
+            .ok()
+            .map(|style| style.prefers_opinions)
+    } else {
+        None
+    };
 
     let system_prompt = character::build_revision_system_prompt(&character::RevisionContext {
         task_summary: artifact.file_name.clone(),
@@ -735,6 +771,7 @@ pub fn generate_revision_alternative(
             prior_rationale
         ),
         profile_injection,
+        prefers_opinions,
         snapshot_summary: snapshot_summary.map(|s| s.to_string()),
     });
 
@@ -1304,6 +1341,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_generated_revision_extracts_assessment_from_plain_text() {
+        let parsed = parse_generated_revision(
+            "I moved the claim forward. Revised paragraph text.",
+            "fallback original",
+            0.9,
+            false,
+        );
+
+        assert_eq!(
+            parsed.rationale.as_deref(),
+            Some("I moved the claim forward.")
+        );
+        assert_eq!(parsed.proposed_text, "Revised paragraph text.");
+    }
+
+    #[test]
     fn extract_assessment_sentence_extracts_first_person_sentence() {
         let input = "I moved the argument to the front. The conclusion now:\n\nYour new argument here.";
         let result = super::extract_assessment_sentence(input);
@@ -1325,6 +1378,7 @@ mod tests {
             target_description: "intro paragraph".to_string(),
             instruction: "tighten this".to_string(),
             profile_injection: None,
+            prefers_opinions: None,
             snapshot_summary: None,
         });
         let lower = prompt.to_ascii_lowercase();

@@ -110,6 +110,8 @@ pub fn build_profile_injection(store: &TaskStore) -> Option<String> {
 
 /// called after a revision is accepted; updates style signals from the text.
 pub fn record_revision_accepted(store: &TaskStore, accepted_text: &str) -> Result<()> {
+    let _ = crate::relational_model::record_opinion_accepted(store);
+
     let sentence_count = count_sentences(accepted_text).max(1);
     let word_count = accepted_text.split_whitespace().count();
     let avg_len = word_count as f64 / sentence_count as f64;
@@ -141,6 +143,8 @@ pub fn record_revision_accepted(store: &TaskStore, accepted_text: &str) -> Resul
 
 /// called when a revision is accepted after the user significantly rewrites it.
 pub fn record_revision_rewrite(store: &TaskStore, edited_text: &str) -> Result<()> {
+    let _ = crate::relational_model::record_opinion_pushback(store);
+
     // significant rewrite → nudge toward shorter sentences and lower formality
     let sentence_count = count_sentences(edited_text).max(1);
     let word_count = edited_text.split_whitespace().count();
@@ -164,6 +168,8 @@ pub fn record_revision_rewrite(store: &TaskStore, edited_text: &str) -> Result<(
 
 /// called when a subtask result is accepted.
 pub fn record_subtask_accepted(store: &TaskStore, execution_type: &str) -> Result<()> {
+    let _ = crate::relational_model::record_delegation_accepted(store);
+
     let key = format!("delegation_accepted_{}", execution_type);
     let count = store
         .get_profile_value(&key)?
@@ -175,6 +181,8 @@ pub fn record_subtask_accepted(store: &TaskStore, execution_type: &str) -> Resul
 
 /// called when a subtask result is rejected.
 pub fn record_subtask_rejected(store: &TaskStore, execution_type: &str) -> Result<()> {
+    let _ = crate::relational_model::record_delegation_rejected(store);
+
     let key = format!("delegation_rejected_{}", execution_type);
     let count = store
         .get_profile_value(&key)?
@@ -250,6 +258,8 @@ pub fn word_level_diff_ratio(original: &str, edited: &str) -> f64 {
 
 /// called when a proactive trigger is dismissed; down-weights the trigger type.
 pub fn record_trigger_dismissed(store: &TaskStore, trigger_type: &str) -> Result<()> {
+    let _ = crate::relational_model::record_proactive_dismissed(store);
+
     let key = format!("trigger_weight_{}", trigger_type);
     let current = store
         .get_profile_value(&key)?

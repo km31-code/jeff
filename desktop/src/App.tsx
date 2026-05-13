@@ -130,7 +130,11 @@ import {
   clearAllJeffData,
   // phase 23
   UserProfileSignalDto,
+  RelationalProfileDto,
   getUserProfileSignals,
+  getRelationalProfile,
+  deleteStatedGoal,
+  deleteStrugglePattern,
   addQualityRubric,
   deleteUserProfileSignal,
   WorkloadSummaryDto,
@@ -345,8 +349,19 @@ function App({ onCloseWorkspace }: AppProps = {}) {
 
   // phase 23: personalization signals ("Jeff remembers" panel)
   const [userProfileSignals, setUserProfileSignals] = useState<UserProfileSignalDto[]>([]);
+  const [relationalProfile, setRelationalProfile] = useState<RelationalProfileDto | null>(null);
   const [jeffRemembersOpen, setJeffRemembersOpen] = useState(false);
   const [rubricInput, setRubricInput] = useState("");
+  const activeStatedGoals = useMemo(
+    () => (relationalProfile?.stated_goals ?? []).filter((goal) => goal.status === "active"),
+    [relationalProfile]
+  );
+  const strugglePatterns = useMemo(
+    () => relationalProfile?.struggle_patterns ?? [],
+    [relationalProfile]
+  );
+  const rememberedSignalCount =
+    userProfileSignals.length + activeStatedGoals.length + strugglePatterns.length;
 
   // phase 23: workload section
   const [workloadSummary, setWorkloadSummary] = useState<WorkloadSummaryDto | null>(null);
@@ -909,6 +924,9 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     void getUserProfileSignals()
       .then(setUserProfileSignals)
       .catch(() => undefined);
+    void getRelationalProfile()
+      .then(setRelationalProfile)
+      .catch(() => undefined);
     void getWorkloadSummary()
       .then(setWorkloadSummary)
       .catch(() => undefined);
@@ -1039,17 +1057,20 @@ function App({ onCloseWorkspace }: AppProps = {}) {
 
   async function refreshPrivacyCenter() {
     try {
-      const [dashboard, bridgeStatus] = await Promise.all([
+      const [dashboard, bridgeStatus, profile] = await Promise.all([
         getPrivacyCenterDashboard(),
-        getSelectionBridgeStatus()
+        getSelectionBridgeStatus(),
+        getRelationalProfile()
       ]);
       setPrivacyDashboard(dashboard);
       setSelectionBridgeStatus(bridgeStatus);
+      setRelationalProfile(profile);
       setClipboardCaptureEnabled(dashboard.clipboard_capture_enabled);
       setAccessibilityPermissionGranted(dashboard.accessibility_permission_status === "granted");
       setQuietModeState(!dashboard.proactive_triggers_enabled);
       if (!dashboard.user_profile_memory_enabled) {
         setUserProfileSignals([]);
+        setRelationalProfile(null);
       }
       if (!dashboard.calendar_context_enabled) {
         setCalendarEvent(null);
@@ -1937,8 +1958,10 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       }
       if (!dashboard.user_profile_memory_enabled) {
         setUserProfileSignals([]);
+        setRelationalProfile(null);
       } else {
         void getUserProfileSignals().then(setUserProfileSignals).catch(() => undefined);
+        void getRelationalProfile().then(setRelationalProfile).catch(() => undefined);
       }
       if (!dashboard.calendar_context_enabled) {
         setCalendarEvent(null);
@@ -1986,6 +2009,8 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     try {
       const dashboard = await clearUserProfileMemory();
       setPrivacyDashboard(dashboard);
+      setUserProfileSignals([]);
+      setRelationalProfile(await getRelationalProfile());
       setPrivacyActionMessage("User profile memory cleared.");
     } catch (error) {
       setOperationError("Failed to clear user profile memory", error);
@@ -4012,53 +4037,105 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                 className="settings-panel jeff-remembers-panel"
                 data-testid="jeff-remembers-panel"
               >
-                {userProfileSignals.length > 0 ? (
-                  <>
-                    <div className="row-actions">
-                      <button
-                        type="button"
-                        onClick={() => setJeffRemembersOpen((o) => !o)}
-                        data-testid="jeff-remembers-toggle"
-                      >
-                        {jeffRemembersOpen ? "Hide" : "Show"} what Jeff remembers
-                        {` (${userProfileSignals.length})`}
-                      </button>
-                      {jeffRemembersOpen ? (
-                        <button
-                          type="button"
-                          data-testid="jeff-remembers-clear-all"
-                          onClick={() => {
-                            void clearUserProfileMemory()
-                              .then(() => getUserProfileSignals().then(setUserProfileSignals))
-                              .then(() => setJeffRemembersOpen(false))
-                              .catch(() => undefined);
-                          }}
-                        >
-                          Clear all
-                        </button>
-                      ) : null}
-                    </div>
-                    {jeffRemembersOpen ? (
-                      <ul data-testid="jeff-remembers-list">
-                        {userProfileSignals.slice(0, 3).map((signal) => (
-                          <li key={signal.key} data-testid="jeff-remembers-signal">
-                            <span>{signal.label}</span>
-                            <button
-                              type="button"
-                              data-testid="jeff-remembers-delete-signal"
-                              onClick={() => {
-                                void deleteUserProfileSignal(signal.key)
-                                  .then(setUserProfileSignals)
-                                  .catch(() => undefined);
-                              }}
-                            >
-                              Remove
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    onClick={() => setJeffRemembersOpen((o) => !o)}
+                    data-testid="jeff-remembers-toggle"
+                  >
+                    {jeffRemembersOpen ? "Hide" : "Show"} what Jeff remembers
+                    {` (${rememberedSignalCount})`}
+                  </button>
+                  {jeffRemembersOpen && rememberedSignalCount > 0 ? (
+                    <button
+                      type="button"
+                      data-testid="jeff-remembers-clear-all"
+                      onClick={() => {
+                        void clearUserProfileMemory()
+                          .then(() => Promise.all([
+                            getUserProfileSignals().then(setUserProfileSignals),
+                            getRelationalProfile().then(setRelationalProfile),
+                          ]))
+                          .then(() => setJeffRemembersOpen(false))
+                          .catch(() => undefined);
+                      }}
+                    >
+                      Clear all
+                    </button>
+                  ) : null}
+                </div>
+                {jeffRemembersOpen ? (
+                  <div data-testid="jeff-remembers-list">
+                    {activeStatedGoals.length > 0 ? (
+                      <section className="memory-section" data-testid="jeff-remembers-goals">
+                        <h4>Goals</h4>
+                        <ul>
+                          {activeStatedGoals.map((goal) => (
+                            <li key={goal.id} data-testid="jeff-remembers-goal">
+                              <span>{goal.goal_text}</span>
+                              <button
+                                type="button"
+                                data-testid="jeff-remembers-delete-goal"
+                                onClick={() => {
+                                  void deleteStatedGoal(goal.id)
+                                    .then(setRelationalProfile)
+                                    .catch(() => undefined);
+                                }}
+                              >
+                                Remove
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
                     ) : null}
-                  </>
+                    {strugglePatterns.length > 0 ? (
+                      <section className="memory-section" data-testid="jeff-remembers-patterns">
+                        <h4>Patterns</h4>
+                        <ul>
+                          {strugglePatterns.map((pattern) => (
+                            <li key={pattern.id} data-testid="jeff-remembers-pattern">
+                              <span>{pattern.pattern_text}</span>
+                              <button
+                                type="button"
+                                data-testid="jeff-remembers-delete-pattern"
+                                onClick={() => {
+                                  void deleteStrugglePattern(pattern.id)
+                                    .then(setRelationalProfile)
+                                    .catch(() => undefined);
+                                }}
+                              >
+                                Remove
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
+                    ) : null}
+                    {userProfileSignals.length > 0 ? (
+                      <section className="memory-section" data-testid="jeff-remembers-communication">
+                        <h4>Communication style</h4>
+                        <ul>
+                          {userProfileSignals.slice(0, 3).map((signal) => (
+                            <li key={signal.key} data-testid="jeff-remembers-signal">
+                              <span>{signal.label}</span>
+                              <button
+                                type="button"
+                                data-testid="jeff-remembers-delete-signal"
+                                onClick={() => {
+                                  void deleteUserProfileSignal(signal.key)
+                                    .then(setUserProfileSignals)
+                                    .catch(() => undefined);
+                                }}
+                              >
+                                Remove
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
+                    ) : null}
+                  </div>
                 ) : null}
                 {jeffRemembersOpen ? (
                   <div className="row-actions">

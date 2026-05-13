@@ -459,6 +459,9 @@ async fn run_monitor_cycle<R: Runtime>(handle: &AppHandle<R>) {
     };
 
     crate::synthesis::run_synthesis_check(handle).await;
+    if let Ok(Some(task)) = jeff.store.get_active_task() {
+        let _ = crate::relational_model::maybe_record_drift_struggle(&jeff.store, task.id);
+    }
 
     // stale-task workload notifications are not part of proactive speech synthesis.
     let _ = crate::workload::check_stale_task_notifications(&jeff.store, handle, quiet);

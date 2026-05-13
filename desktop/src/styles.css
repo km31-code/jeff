@@ -415,6 +415,38 @@ pre {
   border-bottom: 0;
 }
 
+.memory-section {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.35rem 0;
+}
+
+.memory-section h4 {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.memory-section ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.memory-section li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  padding: 0.35rem 0.45rem;
+  font-size: 0.8rem;
+}
+
 .toggle-row {
   display: flex;
   align-items: center;

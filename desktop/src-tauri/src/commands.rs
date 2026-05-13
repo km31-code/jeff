@@ -28,6 +28,7 @@ use crate::{
         UserProfileSignalDto, WatcherStatusDto, WorkloadSummaryDto, WorkspaceInfoDto,
         WriteAuditEntryDto,
     },
+    relational_model::{self, RelationalProfile},
     retrieval::{
         auto_ingest_file_for_task, build_task_context_pack, import_artifact_for_task,
         retrieve_relevant_chunks,
@@ -2139,7 +2140,44 @@ pub fn clear_user_profile_memory(
     ambient: State<'_, ambient::AmbientState>,
 ) -> Result<PrivacyCenterDashboardDto, String> {
     state.store.clear_user_profile().map_err(map_jeff_error)?;
+    relational_model::clear_relational_profile(&state.store).map_err(map_jeff_error)?;
     build_privacy_center_dashboard(state.inner(), &ambient)
+}
+
+// phase 30: relational profile commands ---------------------------------------
+
+#[tauri::command]
+pub fn get_relational_profile(state: State<'_, JeffState>) -> Result<RelationalProfile, String> {
+    if !user_profile_memory_enabled(state.inner()) {
+        return Ok(RelationalProfile::default());
+    }
+    relational_model::get_relational_profile(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn delete_stated_goal(
+    state: State<'_, JeffState>,
+    id: i64,
+) -> Result<RelationalProfile, String> {
+    relational_model::delete_stated_goal(&state.store, id).map_err(map_jeff_error)?;
+    get_relational_profile(state)
+}
+
+#[tauri::command]
+pub fn delete_struggle_pattern(
+    state: State<'_, JeffState>,
+    id: i64,
+) -> Result<RelationalProfile, String> {
+    relational_model::delete_struggle_pattern(&state.store, id).map_err(map_jeff_error)?;
+    get_relational_profile(state)
+}
+
+#[tauri::command]
+pub fn clear_relational_profile(
+    state: State<'_, JeffState>,
+) -> Result<RelationalProfile, String> {
+    relational_model::clear_relational_profile(&state.store).map_err(map_jeff_error)?;
+    get_relational_profile(state)
 }
 
 #[tauri::command]

@@ -100,6 +100,9 @@ grep_check "extract_assessment test: first person extracts" \
 grep_check "extract_assessment test: no first person returns none" \
     "extract_assessment_sentence_returns_none_for_no_first_person" "$SRC/revision.rs"
 
+grep_check "parse_generated_revision extracts missing rationale" \
+    "parse_generated_revision_extracts_assessment_from_plain_text" "$SRC/revision.rs"
+
 grep_check "revision system prompt test includes assessment instruction" \
     "revision_system_prompt_includes_assessment_instruction" "$SRC/revision.rs"
 

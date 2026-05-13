@@ -869,6 +869,9 @@ hear them.
 
 ### Implementation checklist
 
+Implementation status: completed in the Codex follow-up pass; verified by
+`scripts/phase30_check.sh`.
+
 - [ ] Create `desktop/src-tauri/src/relational_model.rs`
 - [ ] Define `StatedGoal` struct: `id: i64, task_id: i64, goal_text: String, stated_at: String, status: GoalStatus, updated_at: String`
 - [ ] Define `GoalStatus` enum: `Active`, `Completed`, `Abandoned`; derive Serialize/Deserialize with serde rename_all = "lowercase"

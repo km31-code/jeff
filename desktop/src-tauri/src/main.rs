@@ -21,6 +21,7 @@ mod onboarding;
 mod proactive;
 mod providers;
 mod reasoning;
+mod relational_model;
 mod retrieval;
 mod revision;
 mod secrets;
@@ -675,6 +676,11 @@ fn main() {
             commands::get_privacy_center_dashboard,
             commands::set_privacy_surface_enabled,
             commands::clear_user_profile_memory,
+            // phase 30
+            commands::get_relational_profile,
+            commands::delete_stated_goal,
+            commands::delete_struggle_pattern,
+            commands::clear_relational_profile,
             commands::list_proactive_trigger_audit_log,
             commands::get_synthesis_log,
             commands::clear_active_task_data,

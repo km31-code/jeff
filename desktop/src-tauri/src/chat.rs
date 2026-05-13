@@ -6,6 +6,7 @@ use crate::{
     message_kind::{classify_user_message_kind, MessageKind},
     models::{SendMessageResponseDto, TaskContextPackDto},
     reasoning::ReasoningProvider,
+    relational_model,
     retrieval::build_task_context_pack,
     store::TaskStore,
     user_model,
@@ -37,6 +38,12 @@ pub fn send_message_for_task(
         .unwrap_or(false);
 
     let user_message_kind = classify_user_message_kind(clean_message);
+    if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        let _ = relational_model::record_message_signals(store, task_id, clean_message);
+    }
     store.append_chat_message(
         task_id,
         "user",
@@ -110,11 +117,20 @@ pub fn build_system_prompt(
     } else {
         None
     };
+    let relational_context = if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        relational_model::build_relational_context(store).ok().flatten()
+    } else {
+        None
+    };
 
     character::build_chat_system_prompt(&ChatContext {
         task_summary: task_summary.to_string(),
         active_window: active_context.map(|value| value.to_string()),
         profile_injection,
+        relational_context,
         recent_transcript: recent_transcript.to_vec(),
         is_first_message,
         snapshot_summary: snapshot_summary.map(|value| value.to_string()),

@@ -128,6 +128,36 @@ type PrivacyCenterDashboardDto = {
   available_tts_voices: string[];
 };
 
+type RelationalProfileDto = {
+  stated_goals: Array<{
+    id: number;
+    task_id: number;
+    goal_text: string;
+    stated_at: string;
+    status: "active" | "completed" | "abandoned";
+    updated_at: string;
+  }>;
+  struggle_patterns: Array<{
+    id: number;
+    pattern_text: string;
+    task_ids_json: string;
+    first_seen: string;
+    last_seen: string;
+    occurrence_count: number;
+  }>;
+  collaboration_style: {
+    prefers_opinions: number;
+    wants_explanations: number;
+    delegation_comfort: number;
+    interruption_tolerance: number;
+  };
+  trust_metrics: {
+    times_accepted_opinion: number;
+    times_pushed_back: number;
+    times_asked_for_more: number;
+  };
+};
+
 type StreamTrackLike = {
   stop: ReturnType<typeof vi.fn>;
 };
@@ -282,6 +312,21 @@ function setupInvokeMock(options?: {
     typing_activity_enabled: true,
     tts_voice: "alloy",
     available_tts_voices: ["alloy", "nova", "shimmer"]
+  };
+  let relationalProfile: RelationalProfileDto = {
+    stated_goals: [],
+    struggle_patterns: [],
+    collaboration_style: {
+      prefers_opinions: 0.5,
+      wants_explanations: 0.5,
+      delegation_comfort: 0.5,
+      interruption_tolerance: 0.5
+    },
+    trust_metrics: {
+      times_accepted_opinion: 0,
+      times_pushed_back: 0,
+      times_asked_for_more: 0
+    }
   };
   const recentlyLearned: Array<{
     id: number;
@@ -508,6 +553,16 @@ function setupInvokeMock(options?: {
       return { ...privacyDashboard };
     }
 
+    if (command === "get_relational_profile") {
+      return {
+        ...relationalProfile,
+        stated_goals: [...relationalProfile.stated_goals],
+        struggle_patterns: [...relationalProfile.struggle_patterns],
+        collaboration_style: { ...relationalProfile.collaboration_style },
+        trust_metrics: { ...relationalProfile.trust_metrics }
+      };
+    }
+
     if (command === "get_selection_capture_indicator") {
       return null;
     }
@@ -590,11 +645,52 @@ function setupInvokeMock(options?: {
     }
 
     if (command === "clear_user_profile_memory") {
+      relationalProfile = {
+        ...relationalProfile,
+        stated_goals: [],
+        struggle_patterns: [],
+        collaboration_style: {
+          prefers_opinions: 0.5,
+          wants_explanations: 0.5,
+          delegation_comfort: 0.5,
+          interruption_tolerance: 0.5
+        },
+        trust_metrics: {
+          times_accepted_opinion: 0,
+          times_pushed_back: 0,
+          times_asked_for_more: 0
+        }
+      };
       privacyDashboard = {
         ...privacyDashboard,
         user_profile_signal_count: 0
       };
       return { ...privacyDashboard };
+    }
+
+    if (command === "delete_stated_goal") {
+      relationalProfile = {
+        ...relationalProfile,
+        stated_goals: relationalProfile.stated_goals.filter((goal) => goal.id !== args?.id)
+      };
+      return { ...relationalProfile };
+    }
+
+    if (command === "delete_struggle_pattern") {
+      relationalProfile = {
+        ...relationalProfile,
+        struggle_patterns: relationalProfile.struggle_patterns.filter((pattern) => pattern.id !== args?.id)
+      };
+      return { ...relationalProfile };
+    }
+
+    if (command === "clear_relational_profile") {
+      relationalProfile = {
+        ...relationalProfile,
+        stated_goals: [],
+        struggle_patterns: []
+      };
+      return { ...relationalProfile };
     }
 
     if (command === "list_proactive_trigger_audit_log") {

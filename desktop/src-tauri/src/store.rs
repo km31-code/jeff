@@ -170,7 +170,7 @@ impl TaskStore {
         Ok(store)
     }
 
-    fn connect(&self) -> Result<Connection> {
+    pub(crate) fn connect(&self) -> Result<Connection> {
         let conn = Connection::open(&self.paths.db_path).with_context(|| {
             format!("failed to open sqlite db {}", self.paths.db_path.display())
         })?;
@@ -531,6 +531,73 @@ impl TaskStore {
         let _ = conn.execute_batch(
             "ALTER TABLE artifact_revisions ADD COLUMN parent_revision_id INTEGER;",
         );
+
+        // phase 30: relational understanding.
+        conn.execute_batch(&format!(
+            "
+            CREATE TABLE IF NOT EXISTS stated_goals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                goal_text TEXT NOT NULL,
+                stated_at TEXT NOT NULL DEFAULT ({now}),
+                status TEXT NOT NULL DEFAULT 'active',
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_stated_goals_task_status
+                ON stated_goals(task_id, status, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS struggle_patterns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern_text TEXT NOT NULL,
+                task_ids_json TEXT NOT NULL DEFAULT '[]',
+                first_seen TEXT NOT NULL DEFAULT ({now}),
+                last_seen TEXT NOT NULL DEFAULT ({now}),
+                occurrence_count INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_struggle_patterns_last_seen
+                ON struggle_patterns(last_seen DESC);
+
+            CREATE TABLE IF NOT EXISTS collaboration_style_signals (
+                key TEXT PRIMARY KEY,
+                value REAL NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE TABLE IF NOT EXISTS trust_metrics (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                times_accepted_opinion INTEGER NOT NULL DEFAULT 0,
+                times_pushed_back INTEGER NOT NULL DEFAULT 0,
+                times_asked_for_more INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+            ",
+            now = SQLITE_NOW_EXPR,
+        ))
+        .context("failed to create phase 30 relational tables")?;
+
+        conn.execute(
+            "INSERT OR IGNORE INTO trust_metrics
+             (id, times_accepted_opinion, times_pushed_back, times_asked_for_more)
+             VALUES (1, 0, 0, 0)",
+            [],
+        )
+        .context("failed to initialize trust metrics")?;
+
+        for key in [
+            "prefers_opinions",
+            "wants_explanations",
+            "delegation_comfort",
+            "interruption_tolerance",
+        ] {
+            conn.execute(
+                "INSERT OR IGNORE INTO collaboration_style_signals (key, value)
+                 VALUES (?1, 0.5)",
+                params![key],
+            )
+            .with_context(|| format!("failed to initialize collaboration style signal {key}"))?;
+        }
 
         Ok(())
     }
@@ -3668,6 +3735,10 @@ impl TaskStore {
             params![task_id],
         )
         .context("failed to clear task focus log")?;
+        if Self::table_exists_tx(&tx, "stated_goals")? {
+            tx.execute("DELETE FROM stated_goals WHERE task_id = ?1", params![task_id])
+                .context("failed to clear stated goals")?;
+        }
         tx.execute(
             "DELETE FROM app_settings WHERE key = ?1",
             params![format!("active_artifact_task_{task_id}")],
@@ -3694,6 +3765,22 @@ impl TaskStore {
         if Self::table_exists_tx(&tx, "user_profile")? {
             tx.execute("DELETE FROM user_profile", [])
                 .context("failed to clear user profile")?;
+        }
+        if Self::table_exists_tx(&tx, "stated_goals")? {
+            tx.execute("DELETE FROM stated_goals", [])
+                .context("failed to clear stated goals")?;
+        }
+        if Self::table_exists_tx(&tx, "struggle_patterns")? {
+            tx.execute("DELETE FROM struggle_patterns", [])
+                .context("failed to clear struggle patterns")?;
+        }
+        if Self::table_exists_tx(&tx, "collaboration_style_signals")? {
+            tx.execute("DELETE FROM collaboration_style_signals", [])
+                .context("failed to clear collaboration style")?;
+        }
+        if Self::table_exists_tx(&tx, "trust_metrics")? {
+            tx.execute("DELETE FROM trust_metrics", [])
+                .context("failed to clear trust metrics")?;
         }
         let _ = tx.execute("DELETE FROM sqlite_sequence", []);
 
@@ -4310,7 +4397,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(count, 26, "expected 26 application tables after phase 27");
+        assert_eq!(count, 30, "expected 30 application tables after phase 30");
     }
 
     #[test]

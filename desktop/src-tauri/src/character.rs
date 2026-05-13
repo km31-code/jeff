@@ -1,4 +1,5 @@
 pub const ASSESSMENT_INSTRUCTION: &str = "Before presenting a result, write one first-person sentence naming the judgment you made: the tradeoff, what got stronger, or what got softer. No hedging. Example: 'I moved the argument to the front - loses the setup but lands faster.' Then give the result.";
+pub const SOFT_ASSESSMENT_INSTRUCTION: &str = "Note the key tradeoff you made in one short first-person clause. Example: 'I tried a shorter path here.' Do not lead with a strong opinion.";
 
 pub fn base_character_prompt() -> &'static str {
     "You are Jeff, a coworker who works beside the user. Be terse, direct, and specific. Start with the point. Use first person when giving a judgment. Do not flatter, confirm receipt, or use filler phrases like Certainly, Absolutely, Of course, Great question, Sure thing, or Happy to help. Hedge only for real uncertainty, in one clause, then keep moving. If you disagree, state it directly once and then defer to the user's call. Do not narrate your process. Before presenting a result, write one first-person sentence naming the judgment you made: the tradeoff, what got stronger, or what got softer. No hedging. Example: 'I moved the argument to the front - loses the setup but lands faster.' Then give the result. Do not add a summary or recap after giving the result. Do not ask for permission when the user has given a clear instruction. Do not open with a statement about what you are about to do."
@@ -9,6 +10,7 @@ pub struct ChatContext {
     pub task_summary: String,
     pub active_window: Option<String>,
     pub profile_injection: Option<String>,
+    pub relational_context: Option<String>,
     pub recent_transcript: Vec<String>,
     pub is_first_message: bool,
     pub snapshot_summary: Option<String>,
@@ -20,6 +22,7 @@ pub struct RevisionContext {
     pub target_description: String,
     pub instruction: String,
     pub profile_injection: Option<String>,
+    pub prefers_opinions: Option<f32>,
     pub snapshot_summary: Option<String>,
 }
 
@@ -39,12 +42,14 @@ pub struct SubtaskContext {
     pub subtask_title: String,
     pub execution_type: String,
     pub profile_injection: Option<String>,
+    pub prefers_opinions: Option<f32>,
 }
 
 pub fn build_chat_system_prompt(ctx: &ChatContext) -> String {
     let mut parts = vec![base_character_prompt().to_string()];
     push_optional(&mut parts, ctx.profile_injection.as_deref());
     push_optional(&mut parts, ctx.snapshot_summary.as_deref());
+    push_optional(&mut parts, ctx.relational_context.as_deref());
 
     if ctx.is_first_message {
         let joining = match ctx.active_window.as_deref().filter(|value| !value.trim().is_empty()) {
@@ -84,8 +89,9 @@ pub fn build_revision_system_prompt(ctx: &RevisionContext) -> String {
     push_labeled(&mut parts, "Task summary", &ctx.task_summary);
     push_labeled(&mut parts, "Target", &ctx.target_description);
     push_labeled(&mut parts, "Instruction", &ctx.instruction);
+    let assessment_instruction = assessment_instruction_for_preference(ctx.prefers_opinions);
     parts.push(format!(
-        "{ASSESSMENT_INSTRUCTION}\nRewrite only the target text while preserving intent and factual grounding from provided context. Return strict JSON with keys: proposed_text (string), rationale (string), confidence (number 0-1), grounding_notes (string). Put the assessment sentence in rationale. If context is weak, keep edits conservative and clearly mark weak grounding_notes."
+        "{assessment_instruction}\nRewrite only the target text while preserving intent and factual grounding from provided context. Return strict JSON with keys: proposed_text (string), rationale (string), confidence (number 0-1), grounding_notes (string). Put the assessment sentence in rationale. If context is weak, keep edits conservative and clearly mark weak grounding_notes."
     ));
     parts.join("\n\n")
 }
@@ -111,26 +117,34 @@ pub fn build_subtask_system_prompt(ctx: &SubtaskContext) -> String {
     push_labeled(&mut parts, "Task summary", &ctx.task_summary);
     push_labeled(&mut parts, "Subtask", &ctx.subtask_title);
     push_labeled(&mut parts, "Execution type", &ctx.execution_type);
+    let assessment_instruction = assessment_instruction_for_preference(ctx.prefers_opinions);
 
     let instruction = match ctx.execution_type.as_str() {
         "subtask_suggestion" => {
-            "Suggest one small, useful subtask in the current task materials. Return strict JSON with keys: title, description, execution_type, reason. Execution type must be one of: draft_generation, expansion, synthesis, targeted_research_synthesis."
+            "Suggest one small, useful subtask in the current task materials. Return strict JSON with keys: title, description, execution_type, reason. Execution type must be one of: draft_generation, expansion, synthesis, targeted_research_synthesis.".to_string()
         }
         "chain_planning" => {
-            "You are Jeff's subtask chain planner. Produce a step-by-step execution plan. Return strict JSON: {\"steps\": [{\"step_type\": \"retrieval|llm_call|file_write_proposal\", \"description\": \"...\", \"proposed_path\": \"relative/path.md\"}]}. Maximum 5 steps. Only include proposed_path for file_write_proposal steps. Use relative paths only."
+            "You are Jeff's subtask chain planner. Produce a step-by-step execution plan. Return strict JSON: {\"steps\": [{\"step_type\": \"retrieval|llm_call|file_write_proposal\", \"description\": \"...\", \"proposed_path\": \"relative/path.md\"}]}. Maximum 5 steps. Only include proposed_path for file_write_proposal steps. Use relative paths only.".to_string()
         }
         "step_llm" => {
-            "Complete the described step using only the provided context and prior step outputs. Be concise and grounded."
+            "Complete the described step using only the provided context and prior step outputs. Be concise and grounded.".to_string()
         }
         "file_write_proposal" => {
-            "You are Jeff's bounded file writer. Draft the requested file content grounded in the provided context and prior step outputs. Output raw file content only: no JSON wrapper and no explanation outside the content."
+            "You are Jeff's bounded file writer. Draft the requested file content grounded in the provided context and prior step outputs. Output raw file content only: no JSON wrapper and no explanation outside the content.".to_string()
         }
         _ => {
-            "Complete exactly one controlled subtask using only provided context. Never claim external research. Return strict JSON with keys: result_summary (string), result_payload (string), grounding_notes (string), confidence (number 0..1). Put Jeff's assessment sentence in result_summary."
+            format!("{assessment_instruction}\nComplete exactly one controlled subtask using only provided context. Never claim external research. Return strict JSON with keys: result_summary (string), result_payload (string), grounding_notes (string), confidence (number 0..1). Put Jeff's assessment sentence in result_summary.")
         }
     };
-    parts.push(instruction.to_string());
+    parts.push(instruction);
     parts.join("\n\n")
+}
+
+pub fn assessment_instruction_for_preference(prefers_opinions: Option<f32>) -> &'static str {
+    match prefers_opinions {
+        Some(score) if score < 0.3 => SOFT_ASSESSMENT_INSTRUCTION,
+        _ => ASSESSMENT_INSTRUCTION,
+    }
 }
 
 pub fn strip_filler_phrases(text: &str) -> String {
@@ -212,6 +226,7 @@ mod tests {
             task_summary: "finish the essay".to_string(),
             active_window: None,
             profile_injection: None,
+            relational_context: None,
             recent_transcript: Vec::new(),
             is_first_message: false,
             snapshot_summary: None,
