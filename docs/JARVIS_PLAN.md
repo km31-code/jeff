@@ -7,12 +7,32 @@ PHASES.md, PHASES_NEXT.md, and PHASES_TRANSFORMATION.md as the forward plan.
 VISION.md and CHARACTER.md remain authoritative for what Jeff is and who Jeff is.
 This document defines what Jeff becomes and exactly how we get there.
 
+Revision 2. Changes from revision 1: Part V is rewritten as a fully
+execution-ready roadmap — every milestone now carries goal, scope, files,
+dependencies, done-criteria, and a check script, so a new engineer or agent can
+pick up any milestone cold. Part VIII ("the initiative gap") is new: it
+specifies the eight capabilities that separate an excellent ambient coworker
+from genuinely Jarvis. Three of them are promoted into the Apex critical path
+as milestones C7 (override channel), D8 (speculation scheduler), and D9
+(self-extension); the remaining five form the post-Apex epochs F–H. Parts VI
+and VII are extended accordingly.
+
 The thesis has not changed and does not need to: a coworker, not a tool. Already
 present, already aware, interruptible in both directions, able to carry real work
 in parallel, speaking only when something is worth saying. That thesis is right.
 What has to change is the altitude of every capability underneath it. The current
 system is the correct skeleton wearing an underpowered nervous system. Apex
 replaces the nervous system.
+
+**How to use this document if you are new here:**
+1. Read VISION.md and CHARACTER.md in full. They define what Jeff is and who
+   Jeff is. Nothing in this plan overrides them.
+2. Read Parts I–IV of this document for the diagnosis, the bar, the pillars,
+   and the architecture.
+3. Go to Part V. Find the first milestone whose status is "not started" and
+   whose dependencies are complete. Read its spec, read the pillar it serves,
+   propose your implementation plan, get approval, execute, verify, commit.
+4. The execution rules at the top of Part V are binding.
 
 ---
 
@@ -113,6 +133,12 @@ None of these are indictments of the build. They are the natural state of a
 system built phase-by-phase under strict scope control. The scaffolding is
 correct. Apex is the capability pour.
 
+Beyond the eight ceilings there is a ninth gap of a different kind — not a
+capability that is underpowered, but a dimension that is absent: **initiative
+depth**. Work done before being asked, presence beyond the desk, capability that
+grows itself, interruption that can break through when it truly matters. That
+gap is the subject of Part VIII.
+
 ---
 
 ## Part II — The bar: what "Jarvis-class" concretely means
@@ -124,8 +150,8 @@ pillar and milestone in this plan traces to one or more of these.
 |---|---|---|
 | Already present | Tray + hotkey + login item | Wake word or hotkey, sub-second voice engagement, presence across every surface the user works in (native apps, browser, email) |
 | Already knows your task | Title + word count + goal-prefix match | Semantic understanding of the actual document, the diff since yesterday, the outline vs. the draft, the inbox thread that changes the plan, recalled across weeks |
-| Interruptible both directions | Barge-in via cancellation tokens | Native full-duplex conversation; Jeff can also interject with judgment-weighted timing, mid-task, at the right moment |
-| Parallel work | 5-step chain, result card | "Handle the citations and check my numbers against the source" → a real agent works for 20 minutes with web access, verifies itself, and places results into the document on approval |
+| Interruptible both directions | Barge-in via cancellation tokens | Native full-duplex conversation; Jeff can also interject with judgment-weighted timing, mid-task, at the right moment — and break through unconditionally when something is genuinely urgent |
+| Parallel work | 5-step chain, result card | "Handle the citations and check my numbers against the source" → a real agent works for 20 minutes with web access, verifies itself, and places results into the document on approval — plus work Jeff started on its own initiative before being asked |
 | Initiates from judgment | Threshold triggers + one synthesized message | An interruption-economics engine on a frontier model: daily briefing, mid-work observations that are actually smart, end-of-day debrief, silence when silence is right |
 
 ### A day with Apex Jeff (the target experience, written as fact)
@@ -147,6 +173,13 @@ the claim this transition is trying to introduce. Cut it and the section flows."
 You look. Jeff is right. You say "fix it," and the edit appears in the document
 as a tracked change.
 
+11:05am. You ask, "what did the reviewer say about my methods section last
+month?" The answer is instant — not because the lookup is fast, but because
+Jeff saw you rewriting the methods section twenty minutes ago and had already
+pulled the reviewer's comments and checked them against your current text.
+"Three concerns. You've addressed two. The sample-size one is still open —
+your current numbers are the same ones they flagged."
+
 1:25pm. "Review in five minutes. Since yesterday you added 900 words to chapter
 3 and restructured the methods section — want a one-paragraph summary of what
 changed to open with?" Yes. It's on your clipboard before you stand up.
@@ -154,16 +187,20 @@ changed to open with?" Yes. It's on your clipboard before you stand up.
 4:30pm. "Before you close up: the citation check found two sources cited in
 chapter 2 that aren't in the bibliography, and one page number that doesn't
 match the source. I fixed the bibliography entries — proposal is waiting. The
-page number I couldn't verify; the source PDF isn't in the workspace."
+page number I couldn't verify; the source PDF isn't in the workspace. Drop it
+in and I'll finish the job."
 
-That is the product. Every scene above maps to a specific pillar below.
+That is the product. Every scene above maps to a specific pillar below, and
+every scene is achievable within the Apex critical path (Epochs A–E). The
+post-Apex epochs in Part VIII extend the same day beyond the desk.
 
 ---
 
 ## Part III — The ten pillars
 
 Each pillar states current state, target state, design, and exit criteria.
-Milestone-level breakdown and sequencing live in Part V.
+Milestone-level breakdown and sequencing live in Part V. Pillars 11–18 (the
+initiative gap) are specified in Part VIII.
 
 ---
 
@@ -183,7 +220,7 @@ routed automatically, invisible to the user.
   - `Tier::Reflex` — intent classification, filler checks, cheap summaries.
     Local model first (see below), fast cloud model fallback.
   - `Tier::Conversation` — chat turns, reorientation, voice. Fast frontier
-    model (e.g. claude-haiku / gpt-4o-class realtime) with streaming.
+    model (claude-haiku / gpt-4o-class realtime) with streaming.
   - `Tier::Judgment` — synthesis decisions, work-quality observations,
     interruption decisions, assessments. Mid frontier (claude-sonnet class).
   - `Tier::Craft` — drafting, revision, agent planning, verification passes.
@@ -247,12 +284,12 @@ the user is doing right now, and how that relates to the stated goal.
 - **Churn detection replaces "stable_for_ticks"**: per-paragraph edit counts
   from the delta stream. "Rewrote the same paragraph 4+ times in 20 minutes"
   is a first-class signal, not an inference from idle time.
-- **Screen understanding (opt-in, explicit, later epoch)**: for apps where AX
+- **Screen understanding (opt-in, explicit, post-Apex)**: for apps where AX
   text is unavailable, an opt-in path captures a screenshot of the frontmost
   window on the same poll cadence and runs a VLM description (local VLM when
   feasible, cloud with explicit consent otherwise). Strictly gated: per-app
   allowlist, Privacy Center visibility of every capture, never persisted.
-  This closes the Notion/Figma/PDF gap that AX cannot.
+  This closes the Notion/Figma/PDF gap that AX cannot. Scheduled in Epoch H.
 - **Browser perception**: the extension grows from selection capture to an
   opt-in active-tab reader for allowlisted sites (Google Docs first): full
   document text via DOM, clean and reliable, replacing AX flakiness for the
@@ -353,6 +390,11 @@ to know — and it gets better at this from your reactions.
   a focus score. High focus raises the bar for interruption to "building on
   fire" level; natural boundaries (save, long pause, app switch, task switch)
   lower it. This is when the 10am scene interjection lands — at the pause.
+- **The override channel** (Pillar 12, milestone C7): a small enumerated class
+  of genuine emergencies bypasses the economics entirely. The economics engine
+  optimizes for not annoying you; the override channel exists because a
+  coworker who cannot break through when the building is on fire is not
+  Jarvis. Full spec in Part VIII.
 - **Rituals**: two scheduled judgment products with their own shapes:
   - *Briefing* (first engagement of the day): calendar + inbox flags (Pillar
     8) + workload + yesterday's consolidation → three sentences and one offer.
@@ -371,7 +413,8 @@ to know — and it gets better at this from your reactions.
 3. Briefing fires on first engagement with real calendar + workload content,
    as a reply-able message. Debrief only when opted in.
 4. Voice interjections occur only at detected natural boundaries in a
-   recorded test session; zero mid-sentence barge-ins by Jeff at high focus.
+   recorded test session; zero mid-sentence barge-ins by Jeff at high focus —
+   except through the override channel (tested separately, C7).
 5. Weekly self-audit renders with true numbers from the synthesis log.
 
 ---
@@ -452,9 +495,11 @@ autonomy that is earned per action class and always revocable.
      fallback. Phase 33's receipt/fallback spec is absorbed here.
   3. *File adapter*: the existing approval-gated write path, extended with
      multi-file proposals and automatic pre-write snapshots to a local
-     `.jeff/undo/` cache so every applied write is one-click revertible.
+     undo cache so every applied write is one-click revertible.
   4. *System adapter (later)*: open/arrange apps and documents, clipboard,
      reminders — small, enumerated verb set, never a general shell.
+  5. *Self-built tools* (Pillar 13, milestone D9): adapters Jeff authors for
+     itself, approval-gated at creation and permanently capped at L1.
 - **The trust ladder** (`trust.rs`): per action class (e.g. `doc.insert`,
   `doc.replace`, `file.write`, `email.draft`), four levels:
   - L0 observe — Jeff describes what it would do
@@ -511,8 +556,11 @@ own output, adapts when steps fail, and returns a deliverable with a view on it.
   contract and the character.
 - **Deliverable contract**: every job ends with (a) assessment-first summary
   per CHARACTER.md, (b) the artifact, (c) a placement proposal routed through
-  the Action Bus ("insert after paragraph 2 — approve?"), and (d) what was
-  not done and why. Jobs never end with a bare "done."
+  the Action Bus ("insert after paragraph 2 — approve?"), (d) what was not
+  done and why, and (e) when the job was blocked by a missing capability or
+  permission, a structured capability request ("to finish I need the source
+  PDF / Drive access to the shared folder") — the minimal version of Pillar
+  18, built into the contract from day one. Jobs never end with a bare "done."
 - **Concurrency and standing jobs**: up to 3 concurrent jobs with visible
   status; recurring standing jobs (e.g. "citation check every evening",
   "watch the inbox for the journal reply") built on the same model, opt-in,
@@ -534,7 +582,8 @@ own output, adapts when steps fail, and returns a deliverable with a view on it.
    its receipt to the audit log; disabling it stops it.
 5. A job that cannot meet its contract says so — seeded impossible task
    ("verify this claim against the PDF" with no PDF) returns "couldn't verify,
-   here's why" rather than a fabrication (eval-tested).
+   here's why" plus a capability request, rather than a fabrication
+   (eval-tested).
 
 ---
 
@@ -647,7 +696,7 @@ people.
     transcripts and agent deliverables. Gate: ≥ 90% on the full set per
     release.
   - *Judgment eval* — the speak/hold scenario suite (Pillar 4), plus
-    briefing-content precision.
+    briefing-content precision, plus override-channel precision (C7).
   - *Perception eval* — goal extraction, churn detection, comprehension
     accuracy on a corpus of real drafts.
   - *Agent eval* — 15 end-to-end job contracts with verifiable outputs
@@ -666,8 +715,8 @@ people.
   cached memory keep Jeff useful without network), DB migration tests across
   the last 3 released versions.
 - **Windows**: the ARCHITECTURE.md "Windows-ready when" list becomes a real
-  epic after Epoch D — the action bus/adapters design (Pillar 6) was shaped
-  so UIA replaces AX per adapter, not per feature.
+  epic in the post-Apex track — the action bus/adapters design (Pillar 6) was
+  shaped so UIA replaces AX per adapter, not per feature.
 - **The name for the whole**: v1 phases shipped "a complete, trustworthy,
   daily-usable coworker." Apex ships the sentence from VISION.md with no
   qualifiers: someone smart has been in the room the whole time.
@@ -689,19 +738,24 @@ people.
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │ EXPRESSION       overlay · realtime voice · notifications ·    │
-│                  approval cards · briefing/debrief             │
+│                  approval cards · briefing/debrief ·           │
+│                  crisis cards (override channel)               │
 ├────────────────────────────────────────────────────────────────┤
 │ JUDGMENT         candidate generation → interruption economics │
 │                  → speak/hold/channel/wording (Judgment tier)  │
+│                  · override channel (bypasses economics) ·     │
+│                  speculation predictor (what will be asked)    │
 ├────────────────────────────────────────────────────────────────┤
 │ AGENT RUNTIME    jobs: plan→act→observe→revise→verify ·        │
-│                  standing jobs · steerable · budgeted          │
+│                  standing jobs · speculative jobs (read-only) ·│
+│                  steerable · budgeted · capability requests    │
 ├──────────────────────────────┬─────────────────────────────────┤
 │ WORLD MODEL                  │ ACTION BUS                      │
 │ snapshot (live) ·            │ trust ladder (L0–L3) ·          │
 │ episodic memory ·            │ adapters: browser/docs, native  │
 │ semantic memory ·            │ docs, files, system ·           │
-│ consolidation · recall       │ unified receipts · verified undo│
+│ consolidation · recall       │ self-built tools (L1 cap) ·     │
+│                              │ unified receipts · verified undo│
 ├──────────────────────────────┴─────────────────────────────────┤
 │ PERCEPTION       document model & semantic deltas · churn ·    │
 │                  window/AX · browser DOM · screen (opt-in) ·   │
@@ -712,6 +766,7 @@ people.
 ├────────────────────────────────────────────────────────────────┤
 │ FOUNDATION       tauri shell · sqlite (+vec) · keychain ·      │
 │                  privacy center · audit spine · updater        │
+│                  (post-Apex: headless daemon + device relay)   │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -729,80 +784,1132 @@ Invariants carried forward unchanged:
 - CHARACTER.md governs every output surface, enforced by eval.
 - Every milestone ships with a behavioral check script.
 
+New invariants introduced by this revision:
+- Speculative work is read-only: nothing running under the speculation
+  scheduler may issue an Action Bus mutation, at any trust level. Enforced at
+  the scheduler boundary, not by convention.
+- Self-built tools are permanently L1 (propose-only) and individually
+  killable. Jeff can grow its own hands; it cannot grow its own autonomy.
+- The override channel is deterministic at the trigger: an LLM may word a
+  crisis message, but no LLM decides whether something is a crisis. The
+  crisis classes are enumerated in code and individually disableable.
+
 ---
 
 ## Part V — Execution roadmap
 
-Five epochs. Epochs replace phase numbering; milestone discipline (one
-milestone at a time, verification before completion, check script per
-milestone) is unchanged from CLAUDE.md. Order rationale: the brain first
-because every downstream feature inherits its quality; perception and memory
-before judgment because judgment consumes them; hands and agents before the
-connected world because external tools multiply what agents can do; ship-quality
-last-mile throughout, gated hard at the end.
+### Execution rules (binding, for any engineer or agent picking up work)
 
-### Epoch A — The Brain Transplant (foundation multiplier)
+1. **Read first**: VISION.md, CHARACTER.md, this document (at least Parts
+   I–IV and the milestone you are executing plus its pillar), and
+   ARCHITECTURE.md for the current code layering.
+2. **One milestone at a time.** Do not combine milestones. Do not start a
+   milestone whose dependencies are not complete.
+3. **Plan before code.** Propose the exact changes for the milestone and wait
+   for explicit approval before editing (per CLAUDE.md).
+4. **Definition of done** for every milestone, no exceptions:
+   - All scope items implemented.
+   - Unit tests for new logic pass (`cargo test`, `npm test`).
+   - The milestone check script exists at `scripts/apex_<id>_check.sh`
+     (e.g. `scripts/apex_a1_check.sh`), contains at least one behavioral
+     assertion (not only symbol greps), and passes.
+   - All "done when" criteria verified at runtime, not by inspection alone.
+   - Existing check scripts still pass (`scripts/phase*_check.sh` for
+     surfaces the milestone touched).
+   - Character eval passes if the milestone touched any prompt path (from A5
+     onward).
+   - Committed and pushed to origin. Update the status table below in the
+     same commit.
+5. **Preserve existing code paths.** Add seams and fallbacks rather than
+   deleting, unless the milestone explicitly retires a path (retirements are
+   named in scope as "retire X").
+6. **No emojis anywhere. Code comments lowercase.** (CLAUDE.md.)
+7. **Privacy parity**: any milestone that adds a sense, a connection, or an
+   action class must land its Privacy Center surface in the same milestone,
+   not later.
+
+### Status table
+
+Update this table in every milestone commit. Post-Apex milestones (F/G/H) are
+directional and may be re-scoped when their epoch begins.
+
+| ID | Milestone | Depends on | Status |
+|----|-----------|------------|--------|
+| A1 | Model router and capability tiers | — | not started |
+| A2 | Cache-stable prompt assembly | A1 | not started |
+| A3 | Local model runtime (Reflex + embeddings) | A1 | not started |
+| A4 | Cost governor and spend visibility | A1 | not started |
+| A5 | Character eval harness | A1 | not started |
+| B1 | Semantic document model | A3 | not started |
+| B2 | Goal understanding | A1, A3 | not started |
+| B3 | Episodic memory store | A3 | not started |
+| B4 | Consolidation and memory panel | B3 | not started |
+| B5 | Recall injection | B3, B4 | not started |
+| B6 | Browser perception (Google Docs reader) | B1 | not started |
+| B7 | Comprehension pass (WorkUnderstanding) | B1, B2, B3, A4 | not started |
+| C1 | Two-stage judgment | B5, B7 | not started |
+| C2 | Interruption ledger and focus depth | C1 | not started |
+| C3 | Briefing and debrief rituals | C1, B4 | not started |
+| C4 | Realtime voice sessions | A1 | not started |
+| C5 | Wake word | C4 | not started |
+| C6 | Judgment eval suite | C1, C2 | not started |
+| C7 | Override channel | C1 | not started |
+| D1 | Action bus, unified receipts, undo cache | A1 | not started |
+| D2 | Google Docs adapter (tracked changes) | D1, B6 | not started |
+| D3 | Native docs adapter (scripting-first) | D1 | not started |
+| D4 | Trust ladder | D1, D2 | not started |
+| D5 | Agent runtime core | D1, B5 | not started |
+| D6 | Steering, checkpoints, standing jobs | D5 | not started |
+| D7 | Agent eval suite | D5 | not started |
+| D8 | Speculation scheduler | D5, C1, A4 | not started |
+| D9 | Self-extension | D5, D4 | not started |
+| E1 | Tool bus (MCP client) | D5 | not started |
+| E2 | Web research tools | E1 | not started |
+| E3 | Gmail read and draft | E1, C3 | not started |
+| E4 | Calendar full-day and meeting awareness | E1, C1 | not started |
+| E5 | Drive and Docs remote read | E1 | not started |
+| E6 | Onboarding v2 and bundled inference | A4 | not started |
+| E7 | Ship gate | all A–E | not started |
+| F1 | Headless daemon separation | E7 | post-Apex |
+| F2 | Overnight work and morning readiness | F1 | post-Apex |
+| F3 | Voice companion (phone/earbuds) | F1, C4 | post-Apex |
+| F4 | Cloud continuation (opt-in) | F1 | post-Apex |
+| G1 | Code-execution sandbox | E7 | post-Apex |
+| G2 | Multimodal artifacts (charts, decks, transforms) | G1 | post-Apex |
+| G3 | Entity model (people) | B4 | post-Apex |
+| G4 | Research radar | E2, D6, G3 | post-Apex |
+| G5 | Negotiated capability (full loop) | D5, E1 | post-Apex |
+| H1 | Personhood: earned wit register | B4, C2 | post-Apex |
+| H2 | Screen understanding (opt-in VLM) | B1 | post-Apex |
+| H3 | Windows port | E7 | post-Apex |
+
+### Epoch ordering rationale
+
+Brain first because every downstream feature inherits its quality; perception
+and memory before judgment because judgment consumes them; hands and agents
+before the connected world because external tools multiply what agents can do;
+ship-quality throughout, gated hard at the end. The three promoted initiative
+milestones sit late in their epochs because each consumes the epoch's core:
+the override channel consumes two-stage judgment; speculation consumes the
+agent runtime and the cost governor; self-extension consumes the action bus,
+the trust ladder, and the runtime.
+
+---
+
+### Epoch A — The Brain Transplant
+
 The highest ROI-per-line work in the plan. Everything Jeff already does gets
-smarter without UI change.
+smarter without UI change. Serves Pillar 1; A5 serves Pillar 10.
 
-- A1. Model router + capability tiers + Anthropic adapter; migrate every call
-  site (judgment/craft to frontier models first: synthesis, revision,
-  assessments, chain planning)
-- A2. Prompt restructuring for cache-stable prefixes; measure cached ratio
-- A3. Local runtime (MLX/llama.cpp) for Reflex tier + local embeddings;
-  classifier and goal-extraction migrate first
-- A4. Cost governor + spend visibility + degradation rules
-- A5. Character eval harness (build Phase 32 spec) — needed now as the
-  regression net for A1's prompt migrations
-- Exit: Pillar 1 criteria + character eval ≥ 90% on migrated surfaces
+#### A1 — Model router and capability tiers
 
-### Epoch B — Eyes and Memory (perception + world model)
-- B1. Semantic document model: paragraph embedding, structural deltas, churn
-  map; replaces word-count observation
-- B2. Goal understanding (Reflex-tier extraction) replaces prefix matching
-- B3. Episodic memory store + session summarization
-- B4. Consolidation job + semantic facts + memory panel (Privacy Center)
-- B5. Recall injection into snapshot; retire flat struggle-pattern heuristic
-- B6. Browser perception: extension active-tab reader for Google Docs
-- B7. Periodic comprehension pass (WorkUnderstanding), budget-gated
-- Exit: Pillar 2 criteria 1–5, Pillar 3 criteria 1–5
+- **Goal:** Every LLM call in the codebase declares a capability tier and is
+  routed to a configured provider/model; frontier models take over judgment
+  and craft work.
+- **Scope:**
+  - Create `desktop/src-tauri/src/model_router.rs`:
+    - `Tier` enum: `Reflex`, `Conversation`, `Judgment`, `Craft`.
+    - `ModelRequest { tier, system_blocks: Vec<SystemBlock>, messages,
+      json_schema: Option<serde_json::Value>, stream: bool, max_tokens }`.
+      `SystemBlock { text, cache_hint: Stable | Session | Volatile }`
+      (cache hints consumed in A2; plumbed now).
+    - `route(request) -> Result<ModelResponse>` and
+      `route_streaming(request, sink) -> Result<...>`; both return unified
+      `LlmUsage { input_tokens, output_tokens, cached_tokens }` (consumed
+      by A4).
+    - Tier→model config: `tier_model_map` JSON in `app_settings`, defaults:
+      Reflex → `gpt-4o-mini` (until A3 lands local), Conversation →
+      `claude-haiku-4-5`, Judgment → `claude-sonnet-5`, Craft →
+      `claude-sonnet-5` (opus-class configurable). User-overridable via a
+      settings surface; unknown model strings rejected with a clear error.
+  - Create `desktop/src-tauri/src/providers/anthropic.rs`: Messages API
+    adapter with SSE streaming, system blocks, tool-use passthrough (used
+    from D5 onward), usage extraction. Key stored in Keychain under
+    `com.jeff.desktop.anthropic_api_key`; settings field + onboarding step
+    to add it; graceful "not configured" error routing that falls back to
+    the OpenAI adapter with a logged notice.
+  - Migrate call sites to the router in this order (each keeps its existing
+    prompt content in this milestone — prompt improvements ride on the
+    better model, restructuring happens in A2):
+    1. `synthesis.rs` / `awareness_core.rs` proactive message generation → Judgment
+    2. `revision.rs` → Craft
+    3. `chat.rs` / `chat_streaming.rs` → Conversation
+    4. `proactive.rs` reorientation → Judgment
+    5. `subtask.rs` chain planning and llm_call steps → Craft
+    6. `classifier.rs` → Reflex
+  - Keep the existing OpenAI adapter behind the same interface. Keyword
+    fallback for classification remains untouched.
+- **New/changed files:** `model_router.rs` (new), `providers/anthropic.rs`
+  (new), `providers.rs` (refactor into `providers/` module), `secrets.rs`,
+  `onboarding.rs`, all six call-site modules, `lib.rs`, settings UI.
+- **Done when:**
+  1. `grep -rn "gpt-4o\|claude-\|whisper-1" desktop/src-tauri/src --include="*.rs" | grep -v model_router | grep -v providers/` returns zero LLM-model
+     hits (TTS/STT model strings excluded until C4).
+  2. All six call sites verified routing through the router at runtime
+     (debug log assertion in check script).
+  3. Blind A/B on 20 revision requests: Apex assessments preferred ≥16/20.
+  4. Streaming chat still meets the Phase 17 first-token budget.
+- **Check:** `scripts/apex_a1_check.sh`
 
-### Epoch C — Judgment and Voice (the felt transformation)
-- C1. Two-stage judgment: candidate generation + Judgment-tier decision with
-  channel/wording ownership; retire fixed cooldowns
-- C2. Interruption ledger + focus depth model
-- C3. Briefing and debrief rituals
-- C4. VoiceSession abstraction + realtime speech-to-speech primary channel;
-  pipeline demoted to fallback
-- C5. Wake word (opt-in, local) + armed-state indicator
-- C6. Judgment eval suite + voice-transcript character eval
-- Exit: Pillar 4 criteria 1–5, Pillar 5 criteria 1–5
+#### A2 — Cache-stable prompt assembly
 
-### Epoch D — Hands and Agents (the capability transformation)
-- D1. Action bus + unified receipts + undo cache; migrate existing write paths
-- D2. Google Docs adapter (tracked changes) — flagship surface
-- D3. Native docs adapter (scripting-first, AX fallback, guided-apply floor;
-  absorbs Phase 33)
-- D4. Trust ladder + graduation flow + hard caps
-- D5. Agent runtime: job model, executor loop, self-verification, deliverable
-  contract; subtask chains retired
-- D6. Steerable jobs, checkpointing, concurrency; standing jobs
-- D7. Agent eval suite
-- Exit: Pillar 6 criteria 1–5, Pillar 7 criteria 1–5
+- **Goal:** Prompt structure exploits provider prompt caching so conversation
+  cost and latency drop.
+- **Scope:**
+  - Restructure `character.rs` builders to emit ordered `SystemBlock` lists:
+    block 1 = static character prompt (byte-identical across all turns);
+    block 2 = session-stable context (relational context, memory recall —
+    refreshed only when underlying data changes); block 3 = volatile
+    (snapshot summary, active window). No more single concatenated string.
+  - Anthropic adapter marks cache breakpoints per block `cache_hint`;
+    OpenAI adapter benefits from prefix stability automatically.
+  - Add `cached_ratio` metric to `latency.rs` accumulated from `LlmUsage`;
+    expose via a debug command and log line.
+  - Unit test asserting block-1 byte stability across two consecutive
+    builds with unchanged inputs.
+- **New/changed files:** `character.rs`, `model_router.rs`,
+  `providers/anthropic.rs`, `latency.rs`.
+- **Done when:**
+  1. Cached-token ratio > 70% measured over a 20-turn scripted conversation.
+  2. Byte-stability unit test passes.
+  3. No behavioral regression: character eval cases (once A5 lands, re-run)
+     and existing phase checks pass.
+- **Check:** `scripts/apex_a2_check.sh`
 
-### Epoch E — The Connected Coworker (the world transformation)
-- E1. Tool bus (MCP client) + Privacy Center integration surface
-- E2. Web research tools in the agent runtime (absorbs and upgrades Phase 34)
-- E3. Gmail read/draft + briefing triage
-- E4. Calendar full-day awareness + meeting-aware judgment + event proposals
-- E5. Drive/Docs remote read
-- E6. Onboarding v2 + bundled inference option
-- E7. Reliability hardening, latency matrix in CI, release gate on full eval
-  suite; day-in-the-life acceptance test
-- Exit: Pillar 8 criteria 1–5, Pillar 9 criteria 1–4, Pillar 10 criteria 1–5
+#### A3 — Local model runtime (Reflex + embeddings)
 
-Screen understanding (Pillar 2, opt-in VLM) and Windows are the first two
-post-Apex epics, deliberately excluded from the critical path.
+- **Goal:** The most frequent calls (classification, goal extraction,
+  embeddings) run fully on-device with no API key.
+- **Scope:**
+  - Create `desktop/src-tauri/src/local_runtime.rs`: manages a llama.cpp
+    server sidecar process (or MLX equivalent on Apple Silicon; pick one,
+    document the choice). Lifecycle: start on demand, health check, restart
+    on crash, kill on quit.
+  - Model manager: download UI (settings) for one small instruct model
+    (3B–8B class, GGUF) and one embedding model (bge-small/nomic-embed
+    class) into `~/Library/Application Support/com.jeff.desktop/models/`;
+    checksum verification; disk-space check; delete button.
+  - `LocalReasoningProvider` and `LocalEmbeddingProvider` implementing the
+    existing provider traits; router prefers local for Reflex when healthy,
+    falls back to cloud with a logged notice.
+  - Embedding migration: embeddings are versioned by model id. New chunks
+    embed locally; existing chunks re-embed lazily on first retrieval touch
+    (dual-read during transition). Retrieval smoke test guards parity.
+- **New/changed files:** `local_runtime.rs` (new), `providers/local.rs`
+  (new), `embedding.rs`, `retrieval.rs`, `model_router.rs`, settings UI.
+- **Done when:**
+  1. With no API keys configured, intent classification works end to end.
+  2. Classification p50 < 100ms on reference Apple Silicon hardware.
+  3. Kill the sidecar mid-session: next Reflex call falls back to cloud and
+     the fallback is logged; no user-visible error.
+  4. Retrieval quality smoke suite (10 queries against a seeded workspace)
+     returns the same top-1 file before and after local embeddings.
+- **Check:** `scripts/apex_a3_check.sh`
+
+#### A4 — Cost governor and spend visibility
+
+- **Goal:** Spend is metered, budgeted per tier, degraded gracefully, and
+  visible to the user.
+- **Scope:**
+  - Create `desktop/src-tauri/src/cost_governor.rs`. New table
+    `llm_usage_log`: `id, tier, model, purpose, input_tokens, output_tokens,
+    cached_tokens, est_cost_usd, created_at`. Router records every call.
+  - Per-tier daily budgets in `app_settings` with defaults (generous;
+    budgets exist to prevent runaway loops, not to nickel-and-dime).
+    Pre-call check: over budget → degrade per map (Craft → Judgment →
+    Conversation; Judgment → Conversation; Conversation and Reflex never
+    blocked), log the degradation, surface a one-time companion notice per
+    day.
+  - Speculation (D8) and consolidation (B4) will draw from dedicated
+    sub-budgets; define the sub-budget mechanism now (named budget keys).
+  - Privacy Center "Spend" section: today's total, per-tier bars, 7-day
+    history, budget edit fields.
+- **New/changed files:** `cost_governor.rs` (new), `store.rs` (migration),
+  `model_router.rs`, Privacy Center UI.
+- **Done when:**
+  1. Forced low budget degrades a Craft call to Judgment with a log entry
+     and a visible notice; nothing fails silently.
+  2. Spend view total equals the sum over `llm_usage_log` (test).
+  3. A runaway-loop simulation (50 Craft calls in a minute) trips the
+     budget and degrades rather than spending unbounded.
+- **Check:** `scripts/apex_a4_check.sh`
+
+#### A5 — Character eval harness
+
+- **Goal:** Character consistency becomes measurable and gates every
+  subsequent prompt change. Builds the Phase 32 spec with two amendments.
+- **Scope:**
+  - Implement Phase 32 exactly as specified in PHASES_TRANSFORMATION.md
+    (eval/character_eval.json ≥ 30 cases, 8-type violation taxonomy,
+    eval/character_eval_guide.md, scripts/character_eval.sh) with these
+    amendments:
+    1. The grader runs through the model router at Judgment tier, not a
+       hardcoded gpt-4o-mini call.
+    2. Sample size raised from 10 to 15 per run; pass bar ≥ 13/15.
+  - Wire into `.github/workflows/release.yml` before the sign job.
+  - From this milestone forward, the execution rules require a green
+    character eval for any milestone touching prompt paths.
+- **New/changed files:** `eval/character_eval.json` (new),
+  `eval/character_eval_guide.md` (new), `scripts/character_eval.sh` (new),
+  release workflow.
+- **Done when:** Phase 32 exit criteria 1–4 pass with the amended sample
+  size, on the post-A1 (frontier-model) prompt paths.
+- **Check:** `scripts/apex_a5_check.sh`
+
+---
+
+### Epoch B — Eyes and Memory
+
+Serves Pillars 2 and 3. After this epoch Jeff genuinely understands the work
+and remembers across weeks.
+
+#### B1 — Semantic document model
+
+- **Goal:** Content observation produces structural, semantic deltas instead
+  of word counts and first-80-char comparisons.
+- **Scope:**
+  - Create `desktop/src-tauri/src/document_model.rs`:
+    - Paragraph segmentation (blank-line + heading heuristics; keep it
+      deterministic and fast).
+    - Per-paragraph local embeddings (A3), computed incrementally — only
+      changed paragraphs re-embed.
+    - `DocumentDelta { added: Vec<ParaRef>, removed: Vec<ParaRef>,
+      rewritten: Vec<ParaChange>, churn_map: HashMap<ParaId, u32>,
+      word_count, structure_changed: bool, captured_at }`. Paragraph
+      identity tracked across polls by embedding similarity + position.
+    - Ring buffer of the last 100 deltas per task, memory only.
+    - `DocumentState` summary export for the snapshot: outline (first line
+      per paragraph), word count, draft state, churn hotspots. Replaces the
+      word-count-only `active_document_excerpt` content (field name and
+      compat behavior preserved).
+  - Wire the existing content-observation poll (`context_observer.rs`) to
+    feed `document_model` instead of `summarize_content_observation`;
+    retire the first-80-chars comparison (retain word_count/draft_state
+    outputs for downstream compatibility).
+  - Privacy contract unchanged: raw text stays inside perception modules;
+    only deltas/summaries exit. Extend the Phase 31 raw-text audit check to
+    cover the new module.
+- **New/changed files:** `document_model.rs` (new), `context_observer.rs`,
+  `awareness_core.rs`, `state.rs`.
+- **Done when:**
+  1. Rewriting one paragraph five times localizes churn to that paragraph
+     in the churn map (integration test against a scripted TextEdit
+     session or fixture-driven unit test).
+  2. Adding a section flips `structure_changed` and lists it in `added`.
+  3. Raw-text audit passes (no captured text in SQLite, logs, or non-
+     comprehension API payloads).
+  4. Delta computation adds < 50ms per poll at 5,000 words.
+- **Check:** `scripts/apex_b1_check.sh`
+
+#### B2 — Goal understanding
+
+- **Goal:** Jeff understands what the user is trying to accomplish from
+  natural conversation, not prefix matching.
+- **Scope:**
+  - Reflex-tier structured extraction: input = last 10 turns; output JSON
+    `{ goal: string|null, confidence: f32, evidence_quote: string|null }`.
+    Triggered on conversation lull (30s after a user turn) and on task
+    switch; never blocks a response path.
+  - Replace the prefix-scan logic in `awareness_core.rs` (`current_goal`)
+    and the `record_goal_stated` trigger path in `chat.rs` with the
+    extractor (relational model keeps its dedup/update semantics).
+  - Build `eval/goal_extraction_eval.json`: 30 labeled transcripts covering
+    explicit statements, paraphrases ("this chapter needs to exist by
+    Friday"), implicit goals, and no-goal controls. Harness:
+    `scripts/goal_eval.sh`.
+- **New/changed files:** `awareness_core.rs`, `chat.rs`,
+  `relational_model.rs`, eval files.
+- **Done when:**
+  1. ≥ 85% on the eval set; the retired prefix matcher's score on the same
+     set is recorded in the eval output for the contrast.
+  2. Snapshot `current_goal` populated from the extractor in a live session
+     (behavioral check).
+- **Check:** `scripts/apex_b2_check.sh`
+
+#### B3 — Episodic memory store
+
+- **Goal:** Meaningful moments are recorded as typed, embedded episodes.
+- **Scope:**
+  - Create `desktop/src-tauri/src/memory.rs`. New table `episodes`:
+    `id, task_id, kind, text, embedding BLOB, salience REAL, source,
+    created_at`. Kinds: `session_summary`, `decision`, `proposal_outcome`,
+    `work_understanding`, `deadline_mention`, `user_fact`.
+  - Writers:
+    - Session summary: on session end (app quit or 30min idle), Craft-tier
+      call over the session transcript → ≤ 120-word summary episode.
+    - Decision: revision accepted/rejected and explicit user decisions
+      detected in chat (Reflex-tier tagger on user turns, piggybacking the
+      B2 lull call).
+    - Proposal outcomes: from existing accept/reject signal points.
+    - Deadline/date mentions: from the existing snapshot deadline scan.
+    - `user_fact`: explicit durable statements ("my advisor hates passive
+      voice") detected by the same Reflex tagger.
+  - Embeddings via local model. Search via existing `similarity.rs` cosine
+    over candidate rows (fine at this scale; sqlite-vec optional later).
+  - Debug command `list_episodes(task_id, limit)`.
+- **New/changed files:** `memory.rs` (new), `store.rs` (migration),
+  `chat.rs`, `revision.rs`, `main.rs` (session-end detection), `lib.rs`.
+- **Done when:**
+  1. A scripted working session (5 turns, 1 accepted revision, 1 stated
+     deadline) produces ≥ 3 typed episodes verifiable via the debug command.
+  2. Episode writes never block a response path (spawned, < 50ms impact,
+     same standard as Phase 26).
+- **Check:** `scripts/apex_b3_check.sh`
+
+#### B4 — Consolidation and the memory panel
+
+- **Goal:** Episodes distill into durable facts; memory becomes visible and
+  controllable.
+- **Scope:**
+  - Create `desktop/src-tauri/src/consolidation.rs`. Trigger: app idle ≥ 10
+    minutes with unconsolidated episodes, or 02:00 if running. Draws from a
+    named cost sub-budget (A4).
+  - Craft-tier pass over unconsolidated episodes → upserts into new `facts`
+    table: `id, text, kind, confidence, evidence_ids_json, salience,
+    last_reinforced, created_at`. Kinds: `preference`, `constraint`,
+    `deadline`, `person`, `pattern`, `context`.
+  - Merge: embedding similarity > 0.85 between a new fact and an existing
+    one → LLM merge into one fact, evidence lists concatenated.
+  - Decay: salience halves every 30 days without reinforcement; facts below
+    0.1 salience are dropped at consolidation time. Hard cap 500 facts
+    (lowest-salience dropped first).
+  - Struggle patterns: recurring stuck/churn episodes promote to `pattern`
+    facts. Retire the drift-count struggle heuristic in `main.rs`
+    (`record_struggle` becomes consolidation-driven).
+  - Memory panel (Privacy Center): facts list and episodes list, plain
+    language, per-item delete, clear-all (extends existing relational
+    clear). Deleting a fact deletes it from prompt influence immediately.
+- **New/changed files:** `consolidation.rs` (new), `store.rs` (migration),
+  `memory.rs`, `main.rs`, `relational_model.rs`, Privacy Center UI.
+- **Done when:**
+  1. Seed 5 near-duplicate episodes → run consolidation → exactly 1 fact
+     with 5 evidence links.
+  2. A decayed fact (seeded old timestamp) is dropped by the job.
+  3. Panel delete removes the fact and a prompt-assembly inspection command
+     confirms it no longer appears.
+  4. Consolidation spend appears under its named sub-budget.
+- **Check:** `scripts/apex_b4_check.sh`
+
+#### B5 — Recall injection
+
+- **Goal:** The right memories surface in the right moments, automatically.
+- **Scope:**
+  - `memory::recall(store, query_embedding, k) -> Vec<RecalledItem>`:
+    facts + high-salience episodes ranked by cosine similarity weighted by
+    recency and salience.
+  - Query embedding = current goal + document topic (from B1 outline).
+  - Compact block builder (≤ 120 tokens), injected in
+    `build_chat_system_prompt` and `build_reorientation_system_prompt`
+    after relational context (cache hint: Session), and available to
+    judgment stage 2 (C1).
+  - Latency budget < 30ms; measured.
+- **New/changed files:** `memory.rs`, `character.rs`.
+- **Done when:**
+  1. Scenario test: a `user_fact` seeded 10 sessions back shapes a revision
+     and its assessment (Pillar 3 exit criterion 1, compressed timeline).
+  2. Recall latency < 30ms at 500 facts (bench test).
+  3. New-user path: empty memory injects nothing (parity with existing
+     gating conventions).
+- **Check:** `scripts/apex_b5_check.sh`
+
+#### B6 — Browser perception (Google Docs reader)
+
+- **Goal:** Google Docs gets the same perception fidelity as native AX apps,
+  via the extension.
+- **Scope:**
+  - Extension: opt-in active-tab reader for allowlisted origins
+    (`docs.google.com` first). Full text extraction on the 10s cadence,
+    pushed to the app via a new bridge route `POST /content-observation`
+    with provenance `{ origin, title, captured_at }` and the bridge token.
+  - App side: routed into the `document_model` pipeline identically to AX
+    text. Same raw-text boundary rules.
+  - Controls: per-site toggle in the extension popup and mirrored state in
+    the Privacy Center; disabled by default; disabling stops the flow
+    within one poll interval.
+- **New/changed files:** `browser-extension/content.js`,
+  `browser-extension/background.js`, `selection_capture.rs` (bridge route),
+  `context_observer.rs` or `document_model.rs` intake, Privacy Center UI.
+- **Done when:**
+  1. Editing in Google Docs produces deltas and churn maps with the same
+     fidelity as the TextEdit AX path (side-by-side check).
+  2. Toggle off stops intake within one interval (log-verified).
+  3. Raw-text audit extended to the bridge path passes.
+- **Check:** `scripts/apex_b6_check.sh`
+
+#### B7 — Comprehension pass (WorkUnderstanding)
+
+- **Goal:** Jeff periodically actually reads the work and forms a view.
+- **Scope:**
+  - Create `desktop/src-tauri/src/work_understanding.rs`. Trigger: every 5
+    minutes of active work (focused + content changing), budget-gated (A4
+    named sub-budget), skipped when quiet mode is on.
+  - Judgment-tier call. Inputs: document outline (B1), recent deltas, churn
+    hotspots, current goal (B2), prior WorkUnderstanding. Output JSON:
+    `WorkUnderstanding { argument_summary, weak_points: Vec<String>,
+    stuck_signal: Option<String>, candidate_observation: Option<String> }`.
+  - Stored as a `work_understanding` episode (B3); latest instance held on
+    the snapshot (new field, confidence bonus per Phase 31 convention).
+  - This call is the one place raw document text may be sent to the model,
+    and only under the existing content-observation opt-in. Extend the
+    Privacy Center explanation text accordingly and log each pass in the
+    audit view.
+- **New/changed files:** `work_understanding.rs` (new),
+  `awareness_core.rs`, `memory.rs`, Privacy Center copy.
+- **Done when:**
+  1. "Where is my argument weakest?" answered with a specific section and
+     defensible reason (Pillar 2 exit criterion 1).
+  2. A seeded circular-argument document produces a weak_points entry
+     naming it.
+  3. Passes are visible in the audit view and their spend in the sub-budget.
+  4. With content observation off, no comprehension calls occur.
+- **Check:** `scripts/apex_b7_check.sh`
+
+---
+
+### Epoch C — Judgment and Voice
+
+Serves Pillars 4, 5, and 12. After this epoch Jeff feels different in the
+room: it speaks well, at the right times, in a real voice, and can break
+through when it truly must.
+
+#### C1 — Two-stage judgment
+
+- **Goal:** One Judgment-tier decision owns whether, when, how, and with what
+  words Jeff speaks proactively.
+- **Scope:**
+  - Refactor `synthesis.rs`:
+    - Stage 1 (deterministic, every ambient tick): candidate generation.
+      Existing reasons (TaskReturn, DeadlinePressure, BlockerDetected,
+      WorkQualityObservation) plus: churn observation (B1 hotspot above
+      threshold), WorkUnderstanding.candidate_observation (B7), pending-
+      approval aging, deadline arithmetic (deadline minus estimated
+      remaining work).
+    - Stage 2 (Judgment tier, only when a candidate exists): prompt with
+      snapshot, candidate, recall block (B5), ledger summary (stub until
+      C2). Output JSON: `{ decision: "speak"|"hold"|"drop", channel:
+      "voice"|"bubble"|"notification"|"silent_card", message, reason }`.
+      "Hold" re-queues the candidate for the next natural boundary; "drop"
+      discards.
+    - Delivery honors channel: bubbles via
+      `deliver_proactive_as_chat_message`, notifications via ambient
+      dispatch, voice deferred to C4 (falls back to bubble until then),
+      silent_card renders as a dismissible non-notifying card.
+  - Retire the fixed 600s cooldown constant. Interim guard until C2: soft
+    minimum 300s between deliveries, enforced in stage 1.
+  - `synthesis_log` gains columns: `stage2_decision, stage2_channel,
+    stage2_reason`. Suppressed/held/dropped decisions all logged (Privacy
+    Center audit view already renders this log).
+- **New/changed files:** `synthesis.rs`, `awareness_core.rs`, `store.rs`
+  (migration), `proactive.rs`.
+- **Done when:**
+  1. A multi-signal situation (away + deadline + pending approval) produces
+     exactly one integrated message (Phase 27 exit criterion 1 preserved).
+  2. Stage 2 hold/drop decisions appear in the log with reasons.
+  3. Judgment-tier latency for stage 2 < 4s; stage 1 remains sub-millisecond.
+- **Check:** `scripts/apex_c1_check.sh`
+
+#### C2 — Interruption ledger and focus depth
+
+- **Goal:** Jeff learns when its interruptions land and stops making the ones
+  that don't.
+- **Scope:**
+  - New table `interruption_ledger`: `id, delivered_at, reason_type,
+    channel, focus_score, reaction, reaction_at`. Reactions: `engaged`
+    (reply within 5 min), `dismissed` (explicit), `ignored` (no
+    interaction), `explicit_negative` ("not now"-class reply, Reflex-tier
+    tagged).
+  - Focus score (0–1) in `awareness_core.rs`: typing cadence
+    (typing_activity.rs) + churn rate (B1) + attention state. Recorded at
+    every delivery.
+  - Natural-boundary detector: save events (watcher), ≥ 90s pause after
+    sustained typing, app switch, task switch. Exposed to stage 2 and used
+    to release held candidates.
+  - Ledger summary (~60 tokens: engagement rates bucketed by focus band and
+    reason type) injected into the stage 2 prompt; retire the interim 300s
+    guard — spacing is now the model's job, informed by the ledger.
+  - Retire `trigger_weight_<type>` down-weighting in favor of the ledger
+    (user_model keys kept for the "Jeff remembers" panel until its Epoch B
+    memory-panel successor fully replaces it).
+- **New/changed files:** `store.rs` (migration), `synthesis.rs`,
+  `awareness_core.rs`, `chat.rs` (reaction capture).
+- **Done when:**
+  1. Pillar 4 exit criterion 2: three ignored interjections at high focus →
+     fourth comparable candidate held (log-verified, scripted).
+  2. Focus score visible in the debug snapshot and plausible across a
+     scripted session (typing burst → high; idle → low).
+  3. Weekly self-audit numbers (delivered/engaged) computable from the
+     ledger (surface lands with the Privacy Center update in this
+     milestone).
+- **Check:** `scripts/apex_c2_check.sh`
+
+#### C3 — Briefing and debrief rituals
+
+- **Goal:** The day opens and closes with Jeff's judgment products.
+- **Scope:**
+  - Create `desktop/src-tauri/src/briefing.rs`.
+  - Briefing: trigger on first engagement after ≥ 6h away (focus event or
+    summon). Craft-tier composition from: today's calendar, workload
+    summary, yesterday's consolidation facts, pending approvals. (Inbox
+    flags join at E3.) Budget: ≤ 4 sentences, at most one offer. Delivered
+    as a reply-able bubble, `message_kind = "proactive_briefing"`. Max once
+    per day; suppressed by quiet mode.
+  - Debrief: opt-in (settings, default off). Trigger: last focus of the
+    evening (idle ≥ 45 min after 5pm) or explicit "wrapping up" (Reflex
+    tag). Content: done today (from episodes), pending approvals, tomorrow's
+    first constraint. `message_kind = "proactive_debrief"`.
+  - Register kinds in `message_kind.rs`; both ride the existing
+    conversation-shaped delivery path (Phase 28 contract).
+- **New/changed files:** `briefing.rs` (new), `main.rs` (triggers),
+  `message_kind.rs`, settings UI.
+- **Done when:**
+  1. Briefing fires once with real calendar + workload + memory content and
+     is reply-able; second engagement the same day does not re-fire.
+  2. Debrief never fires unless opted in; fires correctly when opted in.
+  3. Character eval extended with 2 briefing cases (conversation-opener,
+     not report) and passes.
+- **Check:** `scripts/apex_c3_check.sh`
+
+#### C4 — Realtime voice sessions
+
+- **Goal:** Conversation with Jeff is full-duplex and instant.
+- **Scope:**
+  - Create `desktop/src-tauri/src/voice_session.rs`: `VoiceSession` trait
+    (open, send_context, on_transcript, on_tool_call, close) + an OpenAI
+    Realtime adapter (WebSocket; audio capture/playback handled in the
+    frontend, negotiated via the session). Voice model/key configured
+    through the router config surface.
+  - Session boot injects: character block, snapshot summary, relational
+    context, recall block. Context refresh pushed on snapshot change during
+    the session.
+  - Tool bridge: session tool-calls map onto the same command surface as
+    text (intent routing, job kickoff; Action Bus proposals from D1
+    onward). "Fix it" spoken = "fix it" typed.
+  - Transcripts persist as normal chat turns (both sides), so memory,
+    episodes, and evals see voice sessions.
+  - Fallback: on connect failure, budget stop, or unsupported config, the
+    existing STT/TTS pipeline handles the turn with a logged notice; the
+    pipeline remains the path for notification speech.
+  - Frontend: session state UI in overlay (live indicator, mute, end);
+    push-to-talk hotkey opens a session.
+- **New/changed files:** `voice_session.rs` (new), `providers/` (realtime
+  adapter), `Overlay.tsx`, `streamClient.ts` or successor, `voice.rs`.
+- **Done when:**
+  1. Pillar 5 exit criterion 1 (3-minute zero-typing session, recorded).
+  2. p50 round-trip < 800ms, p95 < 1.5s on reference hardware.
+  3. Network pull mid-session → pipeline fallback within 3s, no crash.
+  4. Voice transcripts appear in chat history and episodes.
+- **Check:** `scripts/apex_c4_check.sh`
+
+#### C5 — Wake word
+
+- **Goal:** Hands-busy summoning without touching the keyboard, with
+  airtight mic privacy.
+- **Scope:**
+  - Sidecar wake-word detector (openWakeWord/porcupine-class ONNX model,
+    "hey jeff"), managed like the A3 sidecar. Opt-in via settings +
+    Privacy Center; default off.
+  - Detection → open a VoiceSession (C4) with an audible acknowledgment
+    cue.
+  - Privacy: pre-wake audio never leaves the detector process — no disk, no
+    network, no IPC of raw audio. Armed-state indicator in overlay and tray.
+    Disabling kills the process (check script verifies via process table).
+- **New/changed files:** detector sidecar integration in
+  `local_runtime.rs` or a new `wake_word.rs`, `ambient.rs` (indicator),
+  Privacy Center UI.
+- **Done when:**
+  1. Wake word opens a session with the app backgrounded.
+  2. Armed indicator is truthful in both states.
+  3. Disable → detector process gone (verified); re-enable → returns.
+- **Check:** `scripts/apex_c5_check.sh`
+
+#### C6 — Judgment eval suite
+
+- **Goal:** Speak/hold quality is measured, not vibes.
+- **Scope:**
+  - `eval/judgment_eval.json`: ≥ 20 scenarios, each a snapshot fixture +
+    candidate + ledger state, labeled speak/hold/drop with acceptable
+    channels. Cover: deep-focus hold, natural-boundary speak, deadline
+    escalation, repeated-ignore suppression, multi-signal integration,
+    quiet-mode suppression, low-confidence drop.
+  - `scripts/judgment_eval.sh`: runs stage 2 against fixtures, reports
+    agreement, exits 0 at ≥ 85%.
+  - Character eval: add 10 voice-transcript cases (from C4 recordings) to
+    the character set.
+  - Wire both into the release workflow.
+- **New/changed files:** eval files, scripts, release workflow.
+- **Done when:** ≥ 85% agreement; CI-wired; voice cases pass.
+- **Check:** `scripts/apex_c6_check.sh`
+
+#### C7 — Override channel (promoted from Pillar 12)
+
+- **Goal:** Genuine emergencies break through everything, precisely and
+  rarely.
+- **Scope:**
+  - Create `desktop/src-tauri/src/crisis.rs`. Enumerated `CrisisClass`:
+    - `DeadlineCollision` — a known deadline < 2h away while
+      WorkUnderstanding/state indicates the work is far from done.
+    - `MeetingImminent` — calendar event ≤ 10 min, no movement toward it
+      (no relevant app/doc focus), not already acknowledged.
+    - `DataLossRisk` — watcher detects mass deletion in the workspace, or
+      disk critically full.
+    - `AwaitedReplyLanded` — (activates at E3) a thread the user explicitly
+      told Jeff to watch received its reply.
+    - `StandingJobCritical` — (activates at D6) a standing job configured
+      as a guard found what it was told to guard against.
+  - Detection is deterministic — no LLM decides crisis-or-not. The LLM
+    (Judgment tier) only words the message. Triggers bypass the ledger,
+    cooldowns, focus gating, and stage 2 entirely.
+  - Delivery: distinct audio cue + red-tinted persistent card (and voice if
+    a session is open). Explicit quiet mode downgrades voice/notification
+    to the persistent card but never fully suppresses `DataLossRisk` or
+    `MeetingImminent`.
+  - Controls: per-class toggle in Privacy Center; every firing logged with
+    class and evidence payload; "this wasn't urgent" button on the card
+    feeding a precision log. Target: false-positive rate low enough that
+    the button is pressed less than once a month in normal use.
+  - Eval: crisis scenarios added to the judgment eval (fire cases and
+    near-miss no-fire cases, ≥ 4 each).
+- **New/changed files:** `crisis.rs` (new), `main.rs` (monitor wiring),
+  `watcher.rs` (mass-deletion signal), Overlay crisis card, Privacy Center
+  UI, eval files.
+- **Done when:**
+  1. Seeded MeetingImminent fires through a high-focus simulated session;
+     seeded meeting-in-40-min does not.
+  2. Quiet-mode downgrade behavior verified per class.
+  3. Per-class disable works; firings and feedback appear in the log.
+  4. Crisis eval cases pass (all fire cases fire, all no-fire cases stay
+     silent).
+- **Check:** `scripts/apex_c7_check.sh`
+
+---
+
+### Epoch D — Hands and Agents
+
+Serves Pillars 6, 7, 11, and 13. After this epoch Jeff can act and can
+genuinely be delegated to — including work it starts before being asked and
+tools it builds for itself.
+
+#### D1 — Action bus, unified receipts, undo cache
+
+- **Goal:** Every mutation Jeff performs flows through one audited, undoable
+  spine.
+- **Scope:**
+  - Create `desktop/src-tauri/src/action_bus.rs`:
+    - `ActionClass` taxonomy: `doc.insert`, `doc.replace`, `doc.suggest`,
+      `file.write`, `file.delete`, `email.draft`, `email.send`,
+      `calendar.propose`, `system.open`, `tool.custom.<name>`.
+    - `ActionRequest { class, surface, description, payload,
+      reversibility: Reversible | Guided | Irreversible }`.
+    - Adapter registry (`ActionAdapter` trait: `execute`, `revert`,
+      `supports`).
+    - Unified `action_receipts` table: `id, task_id, class, surface, level,
+      description, payload_excerpt, status, failure_reason, undo_ref,
+      created_at, resolved_at`. Migrate rows from `live_edit_receipts` and
+      `subtask_write_audit_log`; those tables become read-only legacy.
+  - Undo cache: pre-mutation snapshots to
+    `~/Library/Application Support/com.jeff.desktop/undo/<receipt_id>/`;
+    `revert(receipt_id)` restores; retention 30 days.
+  - Migrate the existing approval-gated file write path
+    (`approve_subtask_file_write`) onto the bus as the `file.write` adapter.
+  - CI gate: check script greps for direct mutation APIs (fs writes, AX set
+    calls, bridge apply routes) outside adapter modules.
+  - Audit view: unified receipts table replaces/wraps the existing write
+    audit sections in the Privacy Center.
+- **New/changed files:** `action_bus.rs` (new), `store.rs` (migration),
+  `subtask.rs`, `commands.rs`, Privacy Center UI.
+- **Done when:**
+  1. Existing file-write approval flow works unchanged through the bus.
+  2. Revert restores a written file byte-identical (test).
+  3. Mutation-outside-bus grep gate passes.
+  4. Unified audit view shows legacy and new receipts.
+- **Check:** `scripts/apex_d1_check.sh`
+
+#### D2 — Google Docs adapter (tracked changes)
+
+- **Goal:** Jeff's flagship hands: visible, attributable, natively
+  revertible edits in Google Docs.
+- **Scope:**
+  - Extension: implement insert/replace against Google Docs. Prefer
+    suggesting-mode edits (tracked changes) where the DOM permits; fall
+    back to direct edit with the receipt noting the mode. Anchoring by
+    50-char surrounding context (Phase 33 approach); anchor miss → guided
+    fallback, never a wrong-position write.
+  - Bridge: ActionRequest → `document_write://apply_requested`-style event →
+    extension executes → result posted back → receipt resolved. (Reuse and
+    extend the existing live-edit bridge plumbing.)
+  - Reject of a suggestion = native discard, receipt `rejected`.
+- **New/changed files:** `browser-extension/content.js`, `background.js`,
+  `action_bus.rs` (adapter), `selection_capture.rs` (bridge routes),
+  Overlay approval card updates.
+- **Done when:**
+  1. Pillar 6 exit criterion 1 (voice "fix that transition" → tracked
+     change at the right location; reject reverts natively). Voice
+     dependency via C4; typed path must also pass standalone.
+  2. Anchor-drift test routes to guided fallback with reason, document
+     untouched.
+- **Check:** `scripts/apex_d2_check.sh`
+
+#### D3 — Native docs adapter (scripting-first)
+
+- **Goal:** Pages and Word write-back through real APIs, with graceful
+  degradation everywhere else.
+- **Scope:**
+  - AppleScript/ScriptingBridge adapters for Pages and Word: ranged
+    insertion and replacement via the apps' scripting dictionaries (not AX
+    buffer swaps). Apple Events automation permission flow with
+    plain-language explainer (mirrors the Phase 20 permission pattern).
+  - AX buffer path retained only behind a feature flag as last resort;
+    default off.
+  - Guided-apply floor for all unsupported apps: content + copy button +
+    placement instructions, receipt status `guided` (absorbs Phase 33
+    semantics; that spec's checklist is superseded by this milestone).
+- **New/changed files:** `action_bus.rs` adapters (or
+  `adapters/native_docs.rs`), permission flow, Overlay guided card.
+- **Done when:**
+  1. Pages insertion lands via scripting at the right location; revert
+     works.
+  2. Unsupported app (e.g. Notion desktop) → guided card, no error state.
+  3. Anchor drift → guided fallback with receipt reason (Phase 33 exit
+     criterion 4 preserved).
+- **Check:** `scripts/apex_d3_check.sh`
+
+#### D4 — Trust ladder
+
+- **Goal:** Autonomy is earned per action class, offered never taken, and
+  always revocable.
+- **Scope:**
+  - Create `desktop/src-tauri/src/trust.rs`: per-class level store
+    (`trust_levels` table), approval-streak tracking from receipts,
+    graduation offer (one-time, conversational, after 10 consecutive
+    approvals with zero reverts), demotion (any revert or one tap → L1,
+    sticky until user re-graduates).
+  - L2 execution path in the bus: act immediately, post revert-able receipt
+    card. L3 reachable only via explicit Privacy Center action, never
+    offered proactively.
+  - Hard caps enforced in code: `email.send`, `file.delete`, and all
+    `tool.custom.*` ≤ L1. Compile-time cap list + runtime assertion + tamper
+    test (editing settings/db cannot raise them).
+  - Privacy Center: ladder view per class with level, streak, history, and
+    demote buttons.
+- **New/changed files:** `trust.rs` (new), `action_bus.rs`, `store.rs`
+  (migration), Privacy Center UI.
+- **Done when:** Pillar 6 exit criteria 3 and 5 pass as written.
+- **Check:** `scripts/apex_d4_check.sh`
+
+#### D5 — Agent runtime core
+
+- **Goal:** Delegation becomes real: plan, act, observe, revise, verify,
+  deliver with a view.
+- **Scope:**
+  - Create `desktop/src-tauri/src/agent_runtime.rs`. Tables: `jobs`
+    (`id, task_id, goal_contract, plan_json, budget_json, status,
+    speculative INT DEFAULT 0, created_at, updated_at`), `job_steps`,
+    `job_artifacts`, `job_events` (status stream).
+  - Executor: Craft-tier loop plan → act → observe → revise. Tool registry
+    v1: local retrieval, document model read, snapshot read, file proposal
+    (bus), action proposal (bus). Tool-use via the router's tool-call
+    passthrough (A1). Budget enforcement per job (tokens via A4 accounting,
+    wall time, tool calls).
+  - Mandatory verification phase: fresh-context Craft call reviewing the
+    deliverable against the goal contract; findings either fixed (bounded
+    retries) or reported honestly.
+  - Deliverable contract (Pillar 7 design item, including the structured
+    capability request when blocked). Delivery through the existing
+    conversation surface: assessment-first card + placement proposal via
+    the bus.
+  - Frontend: job detail view (live plan, steps, events, verification
+    transcript); jobs list in workload view.
+  - Intent routing: subtask-type intents create jobs. Retire the chain
+    creation path (`start_subtask_chain`); chain history remains readable.
+- **New/changed files:** `agent_runtime.rs` (new), `store.rs` (migrations),
+  `subtask.rs` (retirement seams), `commands.rs`, App/Overlay job UI.
+- **Done when:**
+  1. Pillar 7 exit criterion 1 end-to-end unattended.
+  2. Impossible-task honesty case returns "couldn't verify, here's why" +
+     capability request (Pillar 7 exit criterion 5).
+  3. Budget exhaustion mid-job → graceful stop with partial deliverable and
+     honest status, never silent death.
+- **Check:** `scripts/apex_d5_check.sh`
+
+#### D6 — Steering, checkpoints, standing jobs
+
+- **Goal:** Jobs are durable, steerable, and can recur.
+- **Scope:**
+  - Steering: user messages addressed to a running job (job-scoped input in
+    the job detail view, or intent-routed "make it two paragraphs" while a
+    job runs) injected at the next step boundary.
+  - Checkpoints: state persisted after each step; resume on app restart or
+    network return; cancel preserves checkpoints and offers partial work.
+  - Concurrency: 3 running jobs max, FIFO queue beyond.
+  - Standing jobs: schedule spec (`daily HH:MM` or on-event triggers),
+    same Job model, opt-in creation ("every evening, check my citations"),
+    listed in workload view with next-run time; each run posts receipts.
+    `StandingJobCritical` crisis class (C7) activates for guard-configured
+    standing jobs.
+- **New/changed files:** `agent_runtime.rs`, `main.rs` (scheduler), job UI.
+- **Done when:** Pillar 7 exit criteria 2, 3, 4 pass as written.
+- **Check:** `scripts/apex_d6_check.sh`
+
+#### D7 — Agent eval suite
+
+- **Goal:** Delegation quality is measured against contracts.
+- **Scope:**
+  - `eval/agent_eval/`: 15 job contracts with fixture workspaces and
+    verifiable assertions — drafting against notes, revision against
+    rubric, citation-consistency checks, impossible tasks (honesty), a
+    steering case, a budget-exhaustion case. 5 web-research contracts
+    marked E2-gated (skipped until E2).
+  - `scripts/agent_eval.sh`: runs contracts, asserts deliverable structure
+    (assessment present, honesty on impossible, capability requests when
+    blocked), reports pass count.
+- **Done when:** ≥ 12/15 non-gated contracts pass; CI-wired.
+- **Check:** `scripts/apex_d7_check.sh`
+
+#### D8 — Speculation scheduler (promoted from Pillar 11)
+
+- **Goal:** Jeff has already done it before you ask.
+- **Scope:**
+  - Create `desktop/src-tauri/src/speculation.rs`.
+  - Predictor: on idle ticks (user active but Jeff unengaged ≥ 5 min),
+    Judgment-tier call over snapshot + recall + last 10 user requests →
+    top-3 likely upcoming requests with probabilities. Runs at most every
+    10 minutes; drawn from a dedicated named sub-budget (A4) with a hard
+    daily cap.
+  - Execution: top prediction with p ≥ 0.5 runs as a speculative job
+    (`speculative = 1`) with a strict per-job budget and the read-only tool
+    set. Enforced at the scheduler and runtime level: speculative jobs
+    cannot issue Action Bus mutations of any class at any trust level (the
+    new Part IV invariant; runtime rejects, test proves it).
+  - Cache: results keyed by a normalized request signature; invalidated on
+    relevant document deltas, calendar changes, or 24h age.
+  - Serving: incoming intents check the cache — a hit answers instantly,
+    visibly marked "already ran this while you were working"; stage 2
+    judgment (C1) may offer an unclaimed hit when its value clears the
+    normal bar. Misses are discarded silently and logged for the hit-rate
+    metric.
+  - Privacy Center: speculation toggle (default on once shipped, since it
+    is read-only and budget-capped — revisit at beta), spend line item,
+    hit-rate stat, list of cached speculative results with inspect/discard.
+- **New/changed files:** `speculation.rs` (new), `agent_runtime.rs`
+  (speculative mode), `cost_governor.rs` (sub-budget), intent routing,
+  Privacy Center UI.
+- **Done when:**
+  1. Scripted flow: work toward a predictable ask (editing methods section
+     with reviewer comments in memory), then ask — answered < 1s from the
+     precomputed artifact, marked as such.
+  2. Document delta invalidates the relevant cache entry (test).
+  3. A speculative job attempting a mutation is rejected by the runtime
+     (test).
+  4. Daily spend stays within the sub-budget under a 24h simulated load.
+- **Check:** `scripts/apex_d8_check.sh`
+
+#### D9 — Self-extension (promoted from Pillar 13)
+
+- **Goal:** When Jeff hits a capability wall, it builds the tool — under
+  approval, permanently propose-only, individually killable.
+- **Scope:**
+  - Create `desktop/src-tauri/src/self_extend.rs`.
+  - Gap detection: job failures and action-bus rejections with reason
+    `no_adapter` / `unsupported_surface` recorded to a `capability_gaps`
+    table (surface, description, occurrence count).
+  - Proposal: for a recurring gap (≥ 2 occurrences), Jeff drafts a
+    `ToolSpec { name, kind, purpose, target_allowlist, inputs, outputs,
+    test_plan }`. Kinds v1: `applescript` (single-app automations),
+    `site_adapter` (extension-side, allowlisted origin), `text_script`
+    (pure text transforms).
+  - Build: Craft-tier generation into a staging directory
+    (`.../tools/staging/<id>/`); automated test against the spec's fixture
+    (dry-run mode; site adapters tested against a saved DOM snapshot).
+  - Approval: card with spec, full code, and test transcript. Approve →
+    installed to `.../tools/installed/<id>/`, registered in the agent tool
+    registry and action bus as `tool.custom.<name>`.
+  - Safety rails (all enforced, all tested): `tool.custom.*` hard-capped at
+    L1 forever (D4); applescript tools may only target apps in their
+    declared allowlist; text scripts run in a subprocess with no network
+    and workspace-only filesystem; site adapters inherit the extension
+    origin allowlist; every run produces a receipt; per-tool kill switch in
+    the Privacy Center removes it from the registry immediately.
+- **New/changed files:** `self_extend.rs` (new), `store.rs` (migration),
+  `agent_runtime.rs`, `action_bus.rs`, extension adapter loader, Privacy
+  Center UI.
+- **Done when:**
+  1. Seeded unsupported-app flow: gap recorded → proposal → approve → the
+     previously failing action succeeds via the new tool, with receipts.
+  2. Kill switch removes the tool and subsequent attempts degrade to
+     guided fallback.
+  3. L1 cap and sandbox rails tamper-tested (settings/db edits cannot
+     raise; script network attempt fails).
+- **Check:** `scripts/apex_d9_check.sh`
+
+---
+
+### Epoch E — The Connected Coworker
+
+Serves Pillars 8, 9, and 10. After this epoch Jeff works where the user's
+work lives, and the whole system ships.
+
+#### E1 — Tool bus (MCP client)
+
+- **Goal:** External capability arrives through one governed integration
+  layer.
+- **Scope:**
+  - Create `desktop/src-tauri/src/tool_bus.rs`: MCP client (stdio + HTTP
+    transports), connection manager (add/remove/configure, OAuth flows
+    where servers require them), tool discovery exposing connected tools
+    into the agent runtime registry with per-connection scoping.
+  - Data boundary enforced by types: tool invocations accept explicit
+    argument structs only; snapshot/memory/profile structs are not
+    serializable into tool arguments (lint + test).
+  - Privacy Center: connections list with scopes, per-tool call log
+    (tool, argument summary, timestamp), disconnect (stops calls
+    immediately, purges connection-scoped cache).
+- **Done when:** Pillar 8 exit criteria 4 and 5 pass against a test MCP
+  server.
+- **Check:** `scripts/apex_e1_check.sh`
+
+#### E2 — Web research tools
+
+- **Goal:** Agents can find, read, verify, and cite the open web.
+- **Scope:**
+  - `web.search` and `web.fetch` tools (search API key via Keychain or
+    bundled path from E6; fetch with readability extraction for full
+    article text).
+  - Per-job source ledger; verification pass (D5) enforces claim→source
+    mapping — uncited external claims are stripped or flagged.
+  - Interactive jobs surface a source-selection approval card; standing
+    jobs may auto-select with receipts.
+  - Rate limits, query log, and the user-name query guard absorbed from the
+    Phase 34 spec (10/hr default, last-50 log, Privacy Center section).
+  - Unlock the 5 E2-gated agent eval contracts.
+- **Done when:** Pillar 8 exit criterion 2; agent eval web contracts pass
+  with zero fabricated citations.
+- **Check:** `scripts/apex_e2_check.sh`
+
+#### E3 — Gmail read and draft
+
+- **Goal:** The inbox becomes context and a surface Jeff can prepare — never
+  send on.
+- **Scope:**
+  - Gmail connection (read, draft, label) via MCP/OAuth.
+  - Triage: Judgment-tier pass over messages since the last briefing, with
+    world-model context (active goals, known deadlines, entities) → flags
+    `{ message, matters_because }` feeding the C3 briefing and available on
+    demand ("anything in email?").
+  - Thread summarization on demand. Reply drafting through the bus as
+    `email.draft` (creates a real Gmail draft in-thread). `email.send`
+    remains hard-L1: approval opens the draft for the user to send.
+  - `AwaitedReplyLanded` crisis class (C7) activates: "tell me when Sarah
+    replies" registers a watch.
+  - Triage eval: 50-message seeded inbox with labeled ground truth,
+    > 80% precision on "matters".
+- **Done when:** Pillar 8 exit criteria 1 and 3; watch-and-notify flow
+  works; triage eval passes.
+- **Check:** `scripts/apex_e3_check.sh`
+
+#### E4 — Calendar full-day and meeting awareness
+
+- **Goal:** Jeff plans around your day, not just your next event.
+- **Scope:**
+  - Full-day + next-day calendar awareness (EventKit expansion or Calendar
+    MCP; keep the transient in-memory contract from Phase 23).
+  - Meeting-aware judgment candidates: pre-meeting prep offer composed from
+    the document delta since the last meeting with overlapping attendees
+    (minimal attendee-name extraction; full entity model is G3).
+  - Event creation through the bus as `calendar.propose` (L1).
+  - `MeetingImminent` crisis class now has full-day data behind it.
+- **Done when:** The 1:25pm Part II scene is reproducible on a seeded
+  calendar; event proposal round-trips.
+- **Check:** `scripts/apex_e4_check.sh`
+
+#### E5 — Drive and Docs remote read
+
+- **Goal:** Documents that never touch the local folder are still Jeff's
+  context.
+- **Scope:** Drive search/read + Docs export via MCP; on-demand ingestion
+  into retrieval with provenance tags; "pull in the shared doc" flow from
+  conversation; Privacy Center listing of remotely ingested items with
+  per-item removal.
+- **Done when:** A job cites content from a remote Doc with correct
+  provenance; removal purges its chunks.
+- **Check:** `scripts/apex_e5_check.sh`
+
+#### E6 — Onboarding v2 and bundled inference
+
+- **Goal:** Five minutes from install to the first moment of "oh."
+- **Scope:**
+  - Wizard restructure: identity (three sentences) → permissions with
+    live demonstration (once accessibility is granted, Jeff reads the
+    frontmost document and says one true, useful thing) → inference choice
+    (bundled metered vs BYOK) → hotkey/voice intro.
+  - Bundled inference: minimal metered relay service (the one non-local
+    component, opt-in, documented as such) issuing scoped tokens; router
+    treats it as a provider. Usage feeds the same cost governor surface.
+  - Empty/error states re-audited across the Apex surfaces.
+- **Done when:** Pillar 10 exit criteria 2 and 4.
+- **Check:** `scripts/apex_e6_check.sh`
+
+#### E7 — Ship gate
+
+- **Goal:** Everything proves out, and the day-in-the-life is real.
+- **Scope:**
+  - `scripts/apex_eval.sh` entry point running all suites (character,
+    judgment, perception, agent, latency matrix). Release workflow order:
+    eval → build → sign → notarize → release.
+  - Reliability pass: opt-in aggregate crash telemetry, offline degradation
+    checks per pillar, DB migration tests across the last 3 released
+    versions.
+  - The acceptance run: the full Part II day-in-the-life script performed
+    live on a release build, plus all Part VII gates 1–13.
+- **Done when:** Pillar 10 exit criteria 1, 3, 5; all Part VII Apex gates
+  pass.
+- **Check:** `scripts/apex_e7_check.sh`
+
+---
+
+### Post-Apex epochs (directional; re-scope at epoch start)
+
+#### Epoch F — Everywhere (Pillar 14)
+
+- **F1 Headless daemon separation**: split the core (world model, judgment,
+  runtime, scheduler) into a launchd-managed headless process; the Tauri app
+  becomes a UI client over local IPC. Standing jobs, consolidation, and
+  speculation run lid-closed-permitting without the UI.
+- **F2 Overnight work and morning readiness**: standing/queued jobs and
+  consolidation complete before first engagement; the briefing is computed,
+  not composed on demand.
+- **F3 Voice companion**: a minimal phone/earbud client (audio-only) that
+  connects to the home daemon over an end-to-end encrypted relay — the same
+  Jeff, same memory, walking to class. Not a mobile app with a chat screen;
+  a presence channel.
+- **F4 Cloud continuation (opt-in)**: jobs that must outlive the sleeping
+  machine can run in an encrypted cloud enclave, off by default, boundary
+  changes documented in the Privacy Center before enablement.
+
+#### Epoch G — The Workshop (Pillars 15, 16, 18)
+
+- **G1 Code-execution sandbox**: a sandboxed interpreter (no network by
+  default, resource-capped) as an agent tool — "check my stats" runs the
+  statistics.
+- **G2 Multimodal artifacts**: charts, data transforms, and deck outlines as
+  first-class job artifacts with placement proposals.
+- **G3 Entity model**: people as first-class memory objects (roles,
+  interaction history, preferences), distilled by consolidation from
+  episodes, email, and calendar.
+- **G4 Research radar**: standing awareness jobs watching the outside world
+  for things that matter to stated goals, surfaced through normal judgment.
+- **G5 Negotiated capability (full loop)**: the capability-request ledger
+  becomes a product surface — "what Jeff needs" panel, one-tap grants,
+  one-ask-per-gap throttling.
+
+#### Epoch H — Personhood and platform (Pillar 17 + deferred perception)
+
+- **H1 Earned wit register**: humor unlocked gradually by relational tenure,
+  grounded in actual shared history, suppressed under pressure. Requires a
+  CHARACTER.md addendum and eval cases before any prompt change.
+- **H2 Screen understanding**: the opt-in VLM path for AX-dark apps
+  (Pillar 2 deferred item).
+- **H3 Windows port**: UIA adapters per the action-bus adapter seam;
+  ARCHITECTURE.md "Windows-ready when" list executed.
 
 ---
 
@@ -812,11 +1919,12 @@ Explicitly out of scope for Apex (unchanged from prior plans unless noted):
 - Autonomous email sending, autonomous file deletion (hard-capped forever)
 - Emotion/affect detection from voice or typing
 - Team/multi-user backend; Jeff stays personal
-- Mobile companion
 - A general shell / unrestricted computer use; the action bus verb set is
-  enumerated and audited
-- Agent-initiated goals: Jeff proposes, only the user commissions (speculative
-  jobs remain offers)
+  enumerated and audited, and self-built tools live inside the same fence
+- Agent-initiated goals: Jeff proposes, only the user commissions.
+  Speculation (D8) does not breach this — speculative work is read-only
+  preparation for predicted requests, never autonomous action
+- Mobile chat app (the F3 voice companion is a presence channel, not an app)
 
 Kill criteria — signals that a bet is wrong, checked at each epoch boundary:
 - If realtime voice cost/latency makes daily use impractical, voice stays
@@ -825,11 +1933,22 @@ Kill criteria — signals that a bet is wrong, checked at each epoch boundary:
 - If Judgment-tier interruptions score below the eval bar after C2 tuning,
   proactive voice is disabled by default and chat-bubble-only ships (bad
   interruptions are worse than none — VISION.md's own standard).
-- If AX native-doc write-back proves too brittle in the wild (revert failures,
-  corruption reports > 0), D3 falls back permanently to guided-apply and the
-  browser adapter carries write-back alone.
+- If AX/scripting native-doc write-back proves too brittle in the wild
+  (revert failures, any corruption report), D3 falls back permanently to
+  guided-apply and the browser adapter carries write-back alone.
 - If local models can't hold Reflex quality, Reflex routes to cloud and the
   local runtime becomes embeddings-only.
+- If the speculation predictor's hit rate stays below 25% after two tuning
+  cycles, D8 narrows to deterministic precomputation only (pre-meeting
+  summaries, deadline arithmetic) and the predictor is shelved.
+- If any self-built tool ever performs an unreceipted mutation, D9 freezes
+  (no new tools, existing tools disabled) pending a full audit — this is a
+  zero-tolerance invariant, not a quality bar.
+- If the override channel generates more than one user-reported false alarm
+  per month in beta, the offending class ships default-off.
+- If earned wit (H1) draws negative feedback in its pilot cohort's monthly
+  reviews, it ships default-off with per-user opt-in. Bad wit is worse than
+  no wit.
 
 ---
 
@@ -839,7 +1958,7 @@ VISION.md's test stands: you should feel like someone smart has been in the
 room the whole time, and when they say something, it's because something is
 worth saying.
 
-Apex adds the ten scenario gates. All ten must pass on a release build, live,
+Apex adds thirteen scenario gates. All must pass on a release build, live,
 unrehearsed, before Apex is declared:
 
 1. Cold morning open → briefing with real calendar, real inbox flag, real
@@ -857,11 +1976,323 @@ unrehearsed, before Apex is declared:
    (Pillar 6)
 8. A 20-minute delegated job with web research returns a self-verified,
    cited, honest deliverable and a placement proposal. (Pillars 7, 8)
-9. An impossible task returns "I couldn't, here's why" — no fabrication.
-   (Pillars 7, 10)
+9. An impossible task returns "I couldn't, here's why" plus what Jeff needs
+   to finish — no fabrication. (Pillars 7, 18)
 10. Every sense, connection, action, and memory visible and killable in the
     Privacy Center, and the day's entire activity reconstructable from the
     audit spine. (All pillars)
+11. Ask something Jeff should have seen coming — the answer arrives in under
+    a second because the work was already done, and Jeff says so. (Pillar 11)
+12. A seeded genuine emergency breaks through deep focus with the distinct
+    crisis surface; a seeded near-miss stays silent. (Pillar 12)
+13. An unsupported surface becomes supported because Jeff proposed, built,
+    and tested the tool itself — and the tool remains propose-only and
+    killable. (Pillar 13)
 
-The structure was always close. This is the distance between close and Jarvis,
-measured in milestones.
+Post-Apex gates (declared per epoch, not part of the Apex ship decision):
+
+14. Close the laptop at night; open it in the morning — the overnight
+    standing job ran and the briefing was ready before the lid opened.
+    Ask Jeff a question from your earbuds on the walk to class; it is the
+    same Jeff. (Pillar 14)
+15. "Check my numbers" runs the actual analysis in the sandbox and returns
+    the chart. (Pillar 15)
+16. Jeff makes a callback to something you did together last month, it
+    lands, and you laugh. (Pillar 17)
+
+---
+
+## Part VIII — Beyond Apex: the initiative gap
+
+Parts I–VII perfect *response quality*: smarter perception, better judgment,
+real hands, real delegation. What still separates that product from genuinely
+Jarvis is **initiative depth** — work done before being asked, presence beyond
+the desk, capability that grows itself, interruption that can break through,
+and a relationship with texture. This part specifies those eight capabilities
+as Pillars 11–18.
+
+Three are promoted into the Apex critical path because they are consumers of
+architecture Apex already builds: Pillar 11 (anticipation → milestone D8),
+Pillar 12 (override channel → milestone C7), Pillar 13 (self-extension →
+milestone D9). Their execution detail lives in those milestone specs; their
+design rationale lives here. The remaining five form the post-Apex epochs F–H.
+
+---
+
+### Pillar 11 — Anticipation: already done before you ask
+
+**Status: promoted into Apex as milestone D8.**
+
+**Current (post-Epoch D baseline):** Jeff is aware continuously but computes
+on demand. Speculative subtasks (Phase 15 lineage) are offers Jeff makes, not
+work Jeff has already finished.
+
+**Target:** For the requests Jeff can see coming, the answer already exists.
+The felt difference between "I'll look into that" and "already done — here"
+is the single biggest behavioral difference between an assistant and Jarvis.
+
+**Design rationale:**
+- Prediction is cheap; execution is bounded. A Judgment-tier predictor reads
+  the situation (you are editing the methods section; the reviewer's comments
+  about methods are in memory; you asked about them twice before) and names
+  the likely next asks. Only high-probability predictions execute, inside a
+  hard budget.
+- Speculation must be invisible when wrong. Misses are discarded silently.
+  The user never sees "I guessed you might want X" clutter; they only ever
+  see the hit: an instant answer marked "already ran this while you were
+  working."
+- Speculation must be safe by construction. Speculative jobs are read-only —
+  the runtime rejects any Action Bus mutation from a speculative context, at
+  any trust level. Jeff prepares; it does not act on guesses. This is a Part
+  IV invariant, tested, not a convention.
+- Staleness is the failure mode. Every cached result carries invalidation
+  hooks (document deltas, calendar changes, age). A stale precomputed answer
+  served confidently would burn more trust than slow answers ever could.
+
+**Exit criteria:** milestone D8 done-criteria, plus product gate 11.
+
+---
+
+### Pillar 12 — The override channel: the building is on fire
+
+**Status: promoted into Apex as milestone C7.**
+
+**Current (post-C2 baseline):** The interruption-economics engine correctly
+learns to stay silent during deep focus. That is right for observations and
+wrong for emergencies — an engine optimized for politeness will eventually
+suppress the one message that mattered.
+
+**Target:** A small, enumerated class of genuine emergencies bypasses the
+economics entirely and is delivered unmistakably: deadline collision, meeting
+you are about to miss, data-loss risk, the reply you explicitly asked Jeff to
+watch for, a standing guard tripping.
+
+**Design rationale:**
+- Deterministic triggers, model-written words. No LLM decides whether
+  something is a crisis — the classes are enumerated in code, individually
+  disableable, and their evidence is logged. The model only words the
+  message. This keeps the channel auditable and its precision measurable.
+- Rarity is the feature. The channel's entire value is that it fires almost
+  never, so when it fires, it means something. One false alarm costs more
+  trust than fifty good suggestions earn; the false-positive budget (under
+  one user-reported false alarm per month) is a kill criterion, not a
+  stretch goal.
+- Distinct delivery. A crisis must not look like a suggestion: dedicated
+  audio cue, persistent red-tinted card, voice if a session is open. Quiet
+  mode downgrades the channel's loudness, never fully suppresses data-loss
+  or imminent-meeting classes.
+
+**Exit criteria:** milestone C7 done-criteria, plus product gate 12.
+
+---
+
+### Pillar 13 — Self-extension: Jeff builds its own tools
+
+**Status: promoted into Apex as milestone D9.**
+
+**Current (post-D5 baseline):** Jeff's action surface is whatever adapters we
+shipped. Every unsupported app is a permanent "I can't."
+
+**Target:** Jarvis's defining trait as an engineer's AI: when it lacks a
+capability, it constructs one. Every "I can't" becomes a one-time event: Jeff
+detects the recurring gap, proposes a tool, builds it, tests it, and asks for
+approval to install it. The action surface compounds with use.
+
+**Design rationale:**
+- This is buildable today — it is what coding agents already do — and almost
+  nobody ships it in a consumer product. The differentiation is enormous and
+  the architecture cost is low because the agent runtime (D5), the action bus
+  (D1), and the trust ladder (D4) already exist; self-extension is a
+  disciplined consumer of all three.
+- Capability can grow; autonomy cannot. Self-built tools are permanently L1
+  (propose-only), sandboxed to their declared target allowlist, receipted on
+  every run, and individually killable. Jeff can grow its own hands; it
+  cannot grow its own permissions. An unreceipted mutation by a self-built
+  tool freezes the entire feature — zero tolerance, spelled out in Part VI.
+- Approval reviews the tool, not just the action. The approval card carries
+  the full spec, the code, and the test transcript. The user (or their
+  technical friend) can actually read what they are installing.
+
+**Exit criteria:** milestone D9 done-criteria, plus product gate 13.
+
+---
+
+### Pillar 14 — Ubiquity: the same entity everywhere you are
+
+**Status: post-Apex, Epoch F.**
+
+**Current:** Jeff exists while the Tauri app runs on one Mac. Close the lid
+and Jeff stops existing. Walk away from the desk and the relationship pauses.
+
+**Target:** Jarvis is in the workshop, the suit, and the car. Jeff's
+equivalent: a persistent presence that survives the lid closing, works
+overnight, and follows you to your earbuds — the same entity with the same
+memory, not a companion app.
+
+**Design:**
+- **Daemon separation (F1)** is the architectural key. The core — world
+  model, judgment, agent runtime, schedulers — moves into a headless
+  launchd-managed process. The desktop app becomes a UI client over local
+  IPC. This is a large refactor and the reason ubiquity is post-Apex: it
+  should happen once the core is proven, not while it is being built. Every
+  Apex module boundary (Part IV) is drawn so this split is a re-homing, not
+  a rewrite.
+- **Overnight readiness (F2)**: consolidation, standing jobs, and queued
+  work complete on the daemon's schedule. The morning briefing is a
+  retrieval, not a composition — it was finished before the lid opened.
+- **Voice companion (F3)**: a deliberately minimal phone/earbud client:
+  audio in, audio out, nothing else. It connects to the home daemon over an
+  end-to-end encrypted relay (the relay carries opaque ciphertext; the world
+  model never leaves the Mac). Same VoiceSession abstraction as C4, remoted.
+  "Jeff, remind me what Sarah said about the timeline" on the walk to class
+  is the scene this exists for.
+- **Cloud continuation (F4, opt-in, default off)**: the one place the
+  local-first boundary can be consciously relaxed — jobs that must outlive
+  the sleeping machine run in an encrypted enclave. The boundary change is
+  documented in the Privacy Center before the toggle exists, per the
+  standing invariant that controls precede capability.
+
+**Exit criteria:** product gate 14; daemon survives UI crash and OS restart;
+relay compromise test shows ciphertext only; F4 off by default with explicit
+boundary disclosure.
+
+---
+
+### Pillar 15 — The Workshop: creation beyond prose
+
+**Status: post-Apex, Epoch G.**
+
+**Current:** Jeff drafts and revises text. "Check my stats" means Jeff reads
+the numbers skeptically.
+
+**Target:** Jarvis renders simulations. Jeff's equivalent: delegated jobs can
+compute — run the actual statistics on your data, produce the chart, build
+the deck outline, transform the files. The difference between helping with a
+thesis and helping with any knowledge work.
+
+**Design:**
+- **Sandboxed execution (G1)**: an embedded interpreter (Python or
+  JS/deno; pick one and commit) run as a resource-capped subprocess with no
+  network by default and filesystem scoped to the task workspace. Exposed to
+  the agent runtime as an `execute_code` tool; every run receipted with the
+  code attached.
+- **Artifacts (G2)**: charts (headless render to image), tabular transforms,
+  and document-structure outputs as first-class `job_artifacts` with
+  placement proposals through the action bus. The dataviz output must meet
+  the same craft bar as prose output — an ugly chart is a character
+  violation in spirit.
+- **Verification applies doubly**: computed results get a verification pass
+  that re-derives key numbers independently before Jeff asserts them.
+  "I ran it twice two ways" is the standard, because a confidently wrong
+  number is the most expensive mistake this pillar can make.
+
+**Exit criteria:** product gate 15; a seeded CSV analysis returns correct
+statistics (known-answer test) with the chart; sandbox network and filesystem
+escapes fail (tested); every execution receipted.
+
+---
+
+### Pillar 16 — A world model beyond your documents
+
+**Status: post-Apex, Epoch G.**
+
+**Current:** Jeff knows your drafts, and (post-E3/E4) your inbox and
+calendar. It does not know your *situation*: the people, or the outside
+events that touch your goals.
+
+**Target:** Jarvis knows Tony's world. Jeff's equivalent: the recurring
+people in your work are first-class, and the outside world is watched for
+the specific things that matter to your stated goals.
+
+**Design:**
+- **Entity model (G3)**: people as memory objects — role, interaction
+  history, preferences, open threads — distilled by consolidation from
+  episodes, email metadata, and calendar attendees. Never scraped from
+  content beyond what Jeff already legitimately sees; fully visible and
+  deletable in the memory panel. This is what upgrades "meeting at 2" to
+  "review with Sarah, who pushed back on your methods last time."
+- **Research radar (G4)**: standing jobs (D6) with web tools (E2) watching
+  narrow, goal-derived queries — "new publications on [thesis topic]", "the
+  journal's response window". Findings enter through normal judgment (C1),
+  not a feed: the radar surfaces one thing when one thing matters. No
+  general news, no ambient doomscroll — the radar watches your goals, not
+  the world.
+
+**Exit criteria:** entity panel shows accurate person facts with evidence;
+a seeded relevant publication surfaces through judgment within a day while
+seeded irrelevant items never surface; every radar query visible in the
+tool log.
+
+---
+
+### Pillar 17 — Personhood: wit, callbacks, the texture of a relationship
+
+**Status: post-Apex, Epoch H. Character decision first, engineering second.**
+
+**Current:** CHARACTER.md makes Jeff terse, direct, honest — a respected
+senior colleague. It is deliberately austere.
+
+**Target:** Jarvis is *dry*. The humor, the light needling, the callbacks to
+shared history are a large part of why Jarvis feels alive rather than
+installed. Done badly this destroys the product; done well it is the
+difference between software you respect and a presence you'd miss.
+
+**Design:**
+- **Earned, not default.** A wit register score unlocks gradually with
+  relational tenure and engagement signals (C2 ledger, Pillar 9 trust
+  metrics). Weeks of flat-zero humor for a new user; a settled collaboration
+  earns occasional dryness. One negative signal drops the register faster
+  than ten positive ones raise it.
+- **Grounded callbacks only.** The one hard rule: wit must reference actual
+  shared history from memory (Pillar 3), never generic quips. "Shall I add
+  it to the pile of introductions you've deleted?" is allowed because the
+  pile is real and Jeff was there. Canned humor is a character violation.
+- **Suppression conditions**: time pressure, crisis, a losing streak in the
+  track record, and any register-sensitive content — the wit gate checks
+  before the words are chosen, not after.
+- **Process**: a CHARACTER.md addendum defining the register (with contrast
+  pairs, per that document's convention) must be written and approved before
+  any prompt change; eval cases for wit quality and for correct suppression
+  ship with the milestone; monthly-review feedback (Pillar 9) is the kill
+  signal per Part VI.
+
+**Exit criteria:** product gate 16; suppression eval passes (zero wit in
+crisis/pressure fixtures); register provably starts at zero for new users.
+
+---
+
+### Pillar 18 — Negotiated capability: Jeff asks for what it needs
+
+**Status: minimal version in Apex (D5 deliverable contract); full loop
+post-Apex, Epoch G.**
+
+**Current:** When Jeff lacks access, the sentence ends: "the source PDF isn't
+in the workspace." Dead end.
+
+**Target:** Jarvis never dead-ends. Every blocked job ends with the specific,
+minimal request that would unblock it: "drop the PDF in, or give me read
+access to the shared folder and I'll get it myself." The system converges
+toward full capability one granted permission at a time — the trust ladder
+pointed in the other direction.
+
+**Design:**
+- **In Apex (D5)**: the deliverable contract requires a structured
+  capability request whenever a job is blocked by missing access, a missing
+  connection, or a missing tool. The 4:30pm scene ends with one.
+- **Full loop (G5)**: requests accumulate in a ledger; a "what Jeff needs"
+  panel shows open requests each with a one-tap grant (workspace addition,
+  MCP connection, permission flow, or a D9 tool-build kickoff); granting
+  re-queues the blocked job automatically.
+- **Never nags.** One ask per gap, ever. The panel remembers so Jeff doesn't
+  have to repeat itself — repetition would violate the disagreement rule in
+  CHARACTER.md by analogy: state it once, then defer.
+
+**Exit criteria:** blocked job → request in panel → one-tap grant → job
+resumes and completes without re-prompting; the same gap never asked twice
+(test); requests are specific and minimal (eval-checked wording).
+
+---
+
+The structure was always close. This is the distance between close and
+Jarvis, measured in milestones — and past the Apex line, the distance between
+a coworker at your desk and a presence in your life, measured the same way.
