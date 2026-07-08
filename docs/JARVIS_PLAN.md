@@ -835,8 +835,8 @@ directional and may be re-scoped when their epoch begins.
 
 | ID | Milestone | Depends on | Status |
 |----|-----------|------------|--------|
-| A1 | Model router and capability tiers | — | live OpenAI eval passed; v1 A/B failed 9/20; v5 packet pending user A/B |
-| A2 | Cache-stable prompt assembly | A1 | not started |
+| A1 | Model router and capability tiers | — | implementation + live OpenAI eval passed; OpenAI-only A/B failed 9/20 then 8/20; user accepted model-confounded waiver |
+| A2 | Cache-stable prompt assembly | A1 | starting after A1 waiver |
 | A3 | Local model runtime (Reflex + embeddings) | A1 | not started |
 | A4 | Cost governor and spend visibility | A1 | not started |
 | A5 | Character eval harness | A1 | not started |
