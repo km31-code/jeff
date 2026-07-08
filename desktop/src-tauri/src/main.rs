@@ -14,6 +14,7 @@ mod embedding;
 mod errors;
 mod flow;
 mod latency;
+mod local_runtime;
 mod login_item;
 mod message_kind;
 mod model_router;
@@ -126,10 +127,14 @@ fn main() {
                 let _ = store.mark_session_restored();
             }
 
-            let embeddings = Arc::new(default_embeddings_provider());
+            let local_runtime = Arc::new(local_runtime::LocalRuntime::new(&app_local_data_dir));
+            let embeddings = Arc::new(default_embeddings_provider(local_runtime.clone()));
             // apex a1: all reasoning paths route through the model router.
             // tier config is loaded from app_settings with spec defaults.
-            let model_router = Arc::new(model_router::ModelRouter::from_store(&store));
+            let model_router = Arc::new(model_router::ModelRouter::from_store_with_local_runtime(
+                &store,
+                Some(local_runtime.clone()),
+            ));
             let voice: Arc<dyn VoiceProvider> = Arc::new(OpenAiVoiceProvider::from_env());
 
             // build AmbientState with restored quiet_mode and overlay_mode
@@ -145,7 +150,7 @@ fn main() {
                 s
             };
 
-            let jeff_state = JeffState::new(store, embeddings, model_router, voice);
+            let jeff_state = JeffState::new(store, embeddings, local_runtime, model_router, voice);
             // register the file-indexed emit callback on the watcher so it can
             // fire workspace://file-indexed without holding an AppHandle directly.
             {
@@ -608,6 +613,11 @@ fn main() {
             commands::get_tier_model_map,
             commands::set_tier_model_map,
             commands::debug_llm_cache_metrics,
+            commands::get_local_runtime_status,
+            commands::start_local_runtime,
+            commands::stop_local_runtime,
+            commands::download_local_model,
+            commands::delete_local_model,
             commands::get_workspace_prompt_dismissed,
             commands::set_workspace_prompt_dismissed,
             commands::get_task_workspace,

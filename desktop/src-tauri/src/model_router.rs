@@ -16,15 +16,17 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::local_runtime::LocalRuntime;
 use crate::providers::anthropic::{self, AnthropicRequest};
+use crate::providers::local::{classify_intent_locally, LocalReasoningProvider};
 use crate::store::TaskStore;
 
 pub const TIER_MODEL_MAP_SETTING: &str = "tier_model_map";
 
-// default models per tier. reflex stays on the openai fast model until the
-// local runtime lands in a3. judgment and craft default to anthropic because
-// the character spec is written for a model that can hold a voice.
-pub const DEFAULT_REFLEX_MODEL: &str = "gpt-4o-mini";
+// default models per tier. apex a3 moves reflex to an on-device local provider;
+// judgment and craft default to anthropic because the character spec is written
+// for a model that can hold a voice.
+pub const DEFAULT_REFLEX_MODEL: &str = crate::local_runtime::LOCAL_REASONING_MODEL_ID;
 pub const DEFAULT_CONVERSATION_MODEL: &str = "claude-haiku-4-5";
 pub const DEFAULT_JUDGMENT_MODEL: &str = "claude-sonnet-5";
 pub const DEFAULT_CRAFT_MODEL: &str = "claude-sonnet-5";
@@ -217,6 +219,7 @@ pub struct ModelResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
+    Local,
     OpenAi,
     Anthropic,
 }
@@ -224,6 +227,7 @@ pub enum ProviderKind {
 impl ProviderKind {
     pub fn as_str(&self) -> &'static str {
         match self {
+            ProviderKind::Local => "local",
             ProviderKind::OpenAi => "openai",
             ProviderKind::Anthropic => "anthropic",
         }
@@ -248,7 +252,7 @@ impl Default for RouterConfig {
     fn default() -> Self {
         Self {
             reflex: TierConfig {
-                provider: ProviderKind::OpenAi,
+                provider: ProviderKind::Local,
                 model: DEFAULT_REFLEX_MODEL.to_string(),
             },
             conversation: TierConfig {
@@ -311,18 +315,35 @@ pub struct GenerateOptions {
 
 pub struct ModelRouter {
     config: RwLock<RouterConfig>,
+    local_runtime: Option<Arc<LocalRuntime>>,
 }
 
 impl ModelRouter {
     pub fn new(config: RouterConfig) -> Self {
         Self {
             config: RwLock::new(config),
+            local_runtime: None,
+        }
+    }
+
+    pub fn with_local_runtime(config: RouterConfig, local_runtime: Arc<LocalRuntime>) -> Self {
+        Self {
+            config: RwLock::new(config),
+            local_runtime: Some(local_runtime),
         }
     }
 
     // loads persisted config from app_settings, falling back to defaults on
     // absence or parse failure. a bad stored config never blocks startup.
+    #[allow(dead_code)]
     pub fn from_store(store: &TaskStore) -> Self {
+        Self::from_store_with_local_runtime(store, None)
+    }
+
+    pub fn from_store_with_local_runtime(
+        store: &TaskStore,
+        local_runtime: Option<Arc<LocalRuntime>>,
+    ) -> Self {
         let config = match store.get_app_setting(TIER_MODEL_MAP_SETTING) {
             Ok(Some(raw)) => match RouterConfig::parse(&raw) {
                 Ok(parsed) => parsed,
@@ -333,7 +354,10 @@ impl ModelRouter {
             },
             _ => RouterConfig::default(),
         };
-        Self::new(config)
+        match local_runtime {
+            Some(local_runtime) => Self::with_local_runtime(config, local_runtime),
+            None => Self::new(config),
+        }
     }
 
     pub fn config(&self) -> RouterConfig {
@@ -354,7 +378,8 @@ impl ModelRouter {
     }
 
     pub fn any_key_available(&self) -> bool {
-        crate::secrets::resolve_openai_api_key().api_key.is_some()
+        self.local_runtime.is_some()
+            || crate::secrets::resolve_openai_api_key().api_key.is_some()
             || crate::secrets::resolve_anthropic_api_key().is_some()
     }
 
@@ -379,6 +404,7 @@ impl ModelRouter {
                     }
                 }
             }
+            ProviderKind::Local => configured,
             ProviderKind::OpenAi => configured,
         }
     }
@@ -423,6 +449,62 @@ impl ModelRouter {
             .join("\n\n"))
     }
 
+    fn generate_blocking_with_config(
+        cfg: &TierConfig,
+        request: &ModelRequest,
+        system: &str,
+        user: &str,
+        json_object: bool,
+    ) -> Result<(String, LlmUsage)> {
+        match cfg.provider {
+            ProviderKind::OpenAi => crate::providers::openai_generate_blocking(
+                &cfg.model,
+                system,
+                user,
+                request.temperature,
+                request.max_tokens,
+                json_object,
+                request.timeout_ms,
+            ),
+            ProviderKind::Anthropic => anthropic::generate_blocking(&AnthropicRequest {
+                model: &cfg.model,
+                system_blocks: &request.system_blocks,
+                user,
+                temperature: request.temperature,
+                max_tokens: request.max_tokens,
+                json_only: json_object,
+                timeout_ms: request.timeout_ms,
+            }),
+            ProviderKind::Local => {
+                Err(anyhow!("local provider cannot be used as a cloud fallback"))
+            }
+        }
+    }
+
+    fn local_reasoning_provider(&self, model: &str) -> Result<LocalReasoningProvider> {
+        let runtime = self
+            .local_runtime
+            .clone()
+            .ok_or_else(|| anyhow!("local runtime is not configured"))?;
+        Ok(LocalReasoningProvider::new(runtime, model.to_string()))
+    }
+
+    fn local_cloud_fallback(&self) -> Option<TierConfig> {
+        if crate::secrets::resolve_openai_api_key().api_key.is_some() {
+            Some(TierConfig {
+                provider: ProviderKind::OpenAi,
+                model: OPENAI_FALLBACK_MODEL.to_string(),
+            })
+        } else if crate::secrets::resolve_anthropic_api_key().is_some() {
+            Some(TierConfig {
+                provider: ProviderKind::Anthropic,
+                model: DEFAULT_JUDGMENT_MODEL.to_string(),
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn route(&self, request: ModelRequest) -> Result<ModelResponse> {
         if request.stream {
             return Err(anyhow!("streaming model requests must use route_streaming"));
@@ -432,32 +514,60 @@ impl ModelRouter {
         let user = Self::request_user_text(&request)?;
         let cfg = self.resolve(request.tier);
         let json_object = request.json_schema.is_some();
-        let (text, usage) = match cfg.provider {
-            ProviderKind::OpenAi => crate::providers::openai_generate_blocking(
-                &cfg.model,
-                &system,
-                &user,
-                request.temperature,
-                request.max_tokens,
-                json_object,
-                request.timeout_ms,
-            )?,
-            ProviderKind::Anthropic => anthropic::generate_blocking(&AnthropicRequest {
-                model: &cfg.model,
-                system_blocks: &request.system_blocks,
-                user: &user,
-                temperature: request.temperature,
-                max_tokens: request.max_tokens,
-                json_only: json_object,
-                timeout_ms: request.timeout_ms,
-            })?,
+        let (effective_cfg, text, usage) = match cfg.provider {
+            ProviderKind::OpenAi | ProviderKind::Anthropic => {
+                let (text, usage) = Self::generate_blocking_with_config(
+                    &cfg,
+                    &request,
+                    &system,
+                    &user,
+                    json_object,
+                )?;
+                (cfg.clone(), text, usage)
+            }
+            ProviderKind::Local => {
+                let provider = self.local_reasoning_provider(&cfg.model);
+                match provider.and_then(|provider| {
+                    provider.generate_with_usage(
+                        &system,
+                        &user,
+                        request.temperature,
+                        request.max_tokens,
+                        json_object,
+                    )
+                }) {
+                    Ok((text, usage)) => (cfg.clone(), text, usage),
+                    Err(err) => {
+                        let fallback = self.local_cloud_fallback().ok_or_else(|| {
+                            anyhow!(
+                                "local provider failed and no cloud fallback key is configured: {err}"
+                            )
+                        })?;
+                        eprintln!(
+                            "[jeff] model_router_fallback tier={} reason=local_unavailable provider={} model={} error={}",
+                            request.tier.as_str(),
+                            fallback.provider.as_str(),
+                            fallback.model,
+                            err
+                        );
+                        let (text, usage) = Self::generate_blocking_with_config(
+                            &fallback,
+                            &request,
+                            &system,
+                            &user,
+                            json_object,
+                        )?;
+                        (fallback, text, usage)
+                    }
+                }
+            }
         };
-        self.log_usage(request.tier, &cfg, &usage);
+        self.log_usage(request.tier, &effective_cfg, &usage);
         Ok(ModelResponse {
             text,
             usage,
-            provider: cfg.provider,
-            model: cfg.model,
+            provider: effective_cfg.provider,
+            model: effective_cfg.model,
             tier: request.tier,
         })
     }
@@ -531,6 +641,17 @@ impl ModelRouter {
     ) -> Result<String> {
         let cfg = self.resolve(tier);
         let (text, usage) = match cfg.provider {
+            ProviderKind::Local => {
+                let system = join_system_blocks(&system_blocks);
+                self.local_reasoning_provider(&cfg.model)?
+                    .generate_with_usage(
+                        &system,
+                        user,
+                        options.temperature,
+                        options.max_tokens,
+                        options.json_object,
+                    )?
+            }
             ProviderKind::OpenAi => {
                 let system = join_system_blocks(&system_blocks);
                 crate::providers::openai_generate_async(
@@ -598,6 +719,7 @@ impl ModelRouter {
         );
         let system = join_system_blocks(&system_blocks);
         match cfg.provider {
+            ProviderKind::Local => Err(anyhow!("local provider does not support streaming")),
             ProviderKind::OpenAi => {
                 crate::reasoning::OpenAiStreamingReasoningProvider::with_model(cfg.model.clone())
                     .stream_response(&system, user, cancel)
@@ -620,25 +742,79 @@ impl ModelRouter {
             });
         }
         let cfg = self.resolve(Tier::Reflex);
+        if cfg.provider == ProviderKind::Local {
+            let started = std::time::Instant::now();
+            if let Ok(provider) = self.local_reasoning_provider(&cfg.model) {
+                match provider.generate_with_usage(
+                    crate::classifier::SYSTEM_PROMPT,
+                    trimmed,
+                    0.0,
+                    Some(300),
+                    true,
+                ) {
+                    Ok((raw, usage)) => {
+                        self.log_usage(Tier::Reflex, &cfg, &usage);
+                        let parsed = crate::classifier::parse_classification(&raw)?;
+                        eprintln!(
+                            "[jeff] local_reflex_classify mode=local elapsed_ms={} intent={:?}",
+                            started.elapsed().as_millis(),
+                            parsed.intent
+                        );
+                        return Ok(parsed);
+                    }
+                    Err(err) => {
+                        if let Some(fallback) = self.local_cloud_fallback() {
+                            eprintln!(
+                                "[jeff] model_router_fallback tier=reflex reason=local_unavailable provider={} model={} error={}",
+                                fallback.provider.as_str(),
+                                fallback.model,
+                                err
+                            );
+                            let raw = self.classify_with_cloud_config(trimmed, &fallback)?;
+                            return crate::classifier::parse_classification(&raw);
+                        }
+                        eprintln!(
+                            "[jeff] local_reflex_fallback mode=deterministic reason={} elapsed_ms={}",
+                            err,
+                            started.elapsed().as_millis()
+                        );
+                    }
+                }
+            }
+            let parsed = classify_intent_locally(trimmed);
+            eprintln!(
+                "[jeff] local_reflex_classify mode=deterministic elapsed_ms={} intent={:?}",
+                started.elapsed().as_millis(),
+                parsed.intent
+            );
+            return Ok(parsed);
+        }
+        let raw = self.classify_with_cloud_config(trimmed, &cfg)?;
+        crate::classifier::parse_classification(&raw)
+    }
+
+    fn classify_with_cloud_config(&self, trimmed: &str, cfg: &TierConfig) -> Result<String> {
         let timeout_ms = match cfg.provider {
             ProviderKind::OpenAi => timeout_override_ms(
                 std::env::var(CLASSIFY_TIMEOUT_OPENAI_ENV).ok().as_deref(),
                 CLASSIFY_TIMEOUT_OPENAI_MS,
             ),
             ProviderKind::Anthropic => CLASSIFY_TIMEOUT_ANTHROPIC_MS,
+            ProviderKind::Local => CLASSIFY_TIMEOUT_OPENAI_MS,
         };
-        let raw = self.generate_with(
-            Tier::Reflex,
-            crate::classifier::SYSTEM_PROMPT,
-            trimmed,
-            GenerateOptions {
+        let request = ModelRequest::new(Tier::Reflex, crate::classifier::SYSTEM_PROMPT, trimmed)
+            .with_options(GenerateOptions {
                 temperature: 0.0,
                 max_tokens: Some(300),
                 json_object: true,
                 timeout_ms: Some(timeout_ms),
-            },
-        )?;
-        crate::classifier::parse_classification(&raw)
+            });
+        let system = join_system_blocks(&request.system_blocks);
+        let user = Self::request_user_text(&request)?;
+        let (raw, usage) =
+            Self::generate_blocking_with_config(cfg, &request, &system, &user, true)?;
+        self.log_usage(Tier::Reflex, cfg, &usage);
+        Ok(raw)
     }
 
     // returns a tier-bound handle implementing the legacy reasoning trait so
@@ -691,7 +867,7 @@ mod tests {
     #[test]
     fn default_config_matches_spec() {
         let config = RouterConfig::default();
-        assert_eq!(config.reflex.provider, ProviderKind::OpenAi);
+        assert_eq!(config.reflex.provider, ProviderKind::Local);
         assert_eq!(config.reflex.model, DEFAULT_REFLEX_MODEL);
         assert_eq!(config.conversation.provider, ProviderKind::Anthropic);
         assert_eq!(config.conversation.model, DEFAULT_CONVERSATION_MODEL);
@@ -736,6 +912,35 @@ mod tests {
         let config = RouterConfig::default();
         assert_eq!(config.for_tier(Tier::Reflex).model, DEFAULT_REFLEX_MODEL);
         assert_eq!(config.for_tier(Tier::Craft).model, DEFAULT_CRAFT_MODEL);
+    }
+
+    #[test]
+    fn a3_default_reflex_prefers_local_provider() {
+        let config = RouterConfig::default();
+        assert_eq!(config.reflex.provider.as_str(), "local");
+        assert_eq!(
+            config.reflex.model,
+            crate::local_runtime::LOCAL_REASONING_MODEL_ID
+        );
+    }
+
+    #[test]
+    fn a3_classify_without_api_keys_uses_local_reflex() {
+        let router = ModelRouter::new(RouterConfig::default());
+        let result = router
+            .classify("rewrite this introduction so it is shorter")
+            .unwrap();
+        assert_eq!(result.intent, crate::models::IntentLabel::Revision);
+        assert!(result.confidence > 0.75);
+    }
+
+    #[test]
+    fn a3_router_can_share_local_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(crate::local_runtime::LocalRuntime::new(dir.path()));
+        let router = ModelRouter::with_local_runtime(RouterConfig::default(), runtime.clone());
+        assert!(router.any_key_available());
+        assert!(runtime.status().deterministic_fallback_enabled);
     }
 
     #[test]

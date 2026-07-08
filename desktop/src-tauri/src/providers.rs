@@ -8,6 +8,7 @@ use crate::models::{IntentClassificationDto, SpeechSynthesisDto, TranscriptionRe
 
 // apex a1: anthropic messages api adapter, dispatched to by the model router.
 pub mod anthropic;
+pub mod local;
 
 // tts model constant lives here so no call site outside providers/ names a
 // model string (apex a1 grep gate). replaced by the voice session work in c4.
@@ -35,6 +36,10 @@ pub trait ReasoningModelProvider: Send + Sync {
 
 pub trait EmbeddingsProvider: Send + Sync {
     fn embed_text(&self, text: &str) -> Result<Vec<f32>>;
+
+    fn model_id(&self) -> &'static str {
+        "unknown"
+    }
 }
 
 #[allow(dead_code)]
@@ -246,11 +251,13 @@ impl TextToSpeechProvider for OpenAiTtsProvider {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct OpenAiEmbeddingsProvider {
     client: Client,
     model: String,
 }
 
+#[allow(dead_code)]
 impl OpenAiEmbeddingsProvider {
     pub fn from_env() -> Self {
         Self {
@@ -309,6 +316,10 @@ impl EmbeddingsProvider for OpenAiEmbeddingsProvider {
         }
 
         Ok(first.embedding)
+    }
+
+    fn model_id(&self) -> &'static str {
+        "openai:text-embedding-3-small"
     }
 }
 
@@ -522,11 +533,13 @@ struct TranscriptionResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAiEmbeddingsResponse {
     data: Vec<OpenAiEmbeddingData>,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAiEmbeddingData {
     embedding: Vec<f32>,
 }

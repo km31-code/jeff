@@ -492,6 +492,7 @@ fn ingest_clipboard_snippet(
             chunk_text: chunk.to_string(),
             position_index: index as i64,
             embedding,
+            embedding_model: embeddings.model_id().to_string(),
         });
     }
 

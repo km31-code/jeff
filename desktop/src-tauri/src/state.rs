@@ -12,6 +12,7 @@ use crate::{
     awareness_core::AwarenessCore,
     coworking::CoworkingRuntime,
     embedding::EmbeddingProvider,
+    local_runtime::LocalRuntime,
     model_router::{ModelRouter, Tier},
     providers::VoiceProvider,
     reasoning::ReasoningProvider,
@@ -25,6 +26,7 @@ use crate::{
 pub struct JeffState {
     pub store: TaskStore,
     pub embeddings: Arc<dyn EmbeddingProvider>,
+    pub local_runtime: Arc<LocalRuntime>,
     // apex a1: the model router owns tier→model resolution for every llm call.
     pub model_router: Arc<ModelRouter>,
     // conversation-tier handle kept under the legacy field name so existing
@@ -48,6 +50,7 @@ impl JeffState {
     pub fn new(
         store: TaskStore,
         embeddings: Arc<dyn EmbeddingProvider>,
+        local_runtime: Arc<LocalRuntime>,
         model_router: Arc<ModelRouter>,
         voice: Arc<dyn VoiceProvider>,
     ) -> Self {
@@ -60,6 +63,7 @@ impl JeffState {
         Self {
             store,
             embeddings,
+            local_runtime,
             model_router,
             reasoning,
             voice,

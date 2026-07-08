@@ -64,6 +64,7 @@ pub struct ChunkEmbeddingInput {
     pub chunk_text: String,
     pub position_index: i64,
     pub embedding: Vec<f32>,
+    pub embedding_model: String,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +77,7 @@ pub struct StoredChunkEmbedding {
     pub chunk_text: String,
     pub position_index: i64,
     pub embedding: Vec<f32>,
+    pub embedding_model: String,
 }
 
 #[derive(Debug, Clone)]
@@ -241,7 +243,8 @@ impl TaskStore {
                 artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
                 chunk_text TEXT NOT NULL,
                 position_index INTEGER NOT NULL,
-                embedding_json TEXT NOT NULL
+                embedding_json TEXT NOT NULL,
+                embedding_model TEXT NOT NULL DEFAULT 'openai:text-embedding-3-small'
             );
 
             CREATE INDEX IF NOT EXISTS idx_artifact_chunks_task ON artifact_chunks(task_id);
@@ -528,8 +531,15 @@ impl TaskStore {
         );
 
         // phase 29: opinionated output — alternative revision linking
+        let _ = conn
+            .execute_batch("ALTER TABLE artifact_revisions ADD COLUMN parent_revision_id INTEGER;");
+
+        // apex a3: embedding model versioning. Existing chunks were created
+        // before local embeddings and are treated as OpenAI small embeddings so
+        // retrieval can dual-read and lazily re-embed when the active model id
+        // changes.
         let _ = conn.execute_batch(
-            "ALTER TABLE artifact_revisions ADD COLUMN parent_revision_id INTEGER;",
+            "ALTER TABLE artifact_chunks ADD COLUMN embedding_model TEXT NOT NULL DEFAULT 'openai:text-embedding-3-small';",
         );
 
         // phase 30: relational understanding.
@@ -919,14 +929,15 @@ impl TaskStore {
             let embedding_json = serde_json::to_string(&chunk.embedding)
                 .context("failed to serialize chunk embedding")?;
             tx.execute(
-                "INSERT INTO artifact_chunks (task_id, artifact_id, chunk_text, position_index, embedding_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO artifact_chunks (task_id, artifact_id, chunk_text, position_index, embedding_json, embedding_model)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     task_id,
                     artifact_id,
                     chunk.chunk_text,
                     chunk.position_index,
                     embedding_json,
+                    chunk.embedding_model,
                 ],
             )
             .context("failed to insert artifact chunk")?;
@@ -997,7 +1008,8 @@ impl TaskStore {
                         a.stored_path,
                         c.chunk_text,
                         c.position_index,
-                        c.embedding_json
+                        c.embedding_json,
+                        c.embedding_model
                  FROM artifact_chunks c
                  JOIN artifacts a ON a.id = c.artifact_id
                  WHERE c.task_id = ?1
@@ -1016,6 +1028,7 @@ impl TaskStore {
                     row.get::<_, String>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             })
             .context("failed to query chunk embeddings")?;
@@ -1031,6 +1044,7 @@ impl TaskStore {
                 chunk_text,
                 position_index,
                 embedding_json,
+                embedding_model,
             ) = row.context("failed to decode stored chunk row")?;
 
             let embedding: Vec<f32> = serde_json::from_str(&embedding_json)
@@ -1045,10 +1059,34 @@ impl TaskStore {
                 chunk_text,
                 position_index,
                 embedding,
+                embedding_model,
             });
         }
 
         Ok(chunks)
+    }
+
+    pub fn update_chunk_embedding(
+        &self,
+        chunk_id: i64,
+        embedding: &[f32],
+        embedding_model: &str,
+    ) -> Result<()> {
+        let conn = self.connect()?;
+        let embedding_json = serde_json::to_string(embedding)
+            .context("failed to serialize updated chunk embedding")?;
+        let changed = conn
+            .execute(
+                "UPDATE artifact_chunks
+                 SET embedding_json = ?1, embedding_model = ?2
+                 WHERE id = ?3",
+                params![embedding_json, embedding_model.trim(), chunk_id],
+            )
+            .context("failed to update chunk embedding")?;
+        if changed == 0 {
+            return Err(anyhow!("chunk id={} not found", chunk_id));
+        }
+        Ok(())
     }
 
     pub fn replace_artifact_chunks(
@@ -1094,14 +1132,15 @@ impl TaskStore {
             let embedding_json = serde_json::to_string(&chunk.embedding)
                 .context("failed to serialize replacement embedding")?;
             tx.execute(
-                "INSERT INTO artifact_chunks (task_id, artifact_id, chunk_text, position_index, embedding_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO artifact_chunks (task_id, artifact_id, chunk_text, position_index, embedding_json, embedding_model)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     task_id,
                     artifact_id,
                     chunk.chunk_text,
                     chunk.position_index,
                     embedding_json,
+                    chunk.embedding_model,
                 ],
             )
             .context("failed to insert replacement artifact chunk")?;
@@ -3748,8 +3787,11 @@ impl TaskStore {
         )
         .context("failed to clear task focus log")?;
         if Self::table_exists_tx(&tx, "stated_goals")? {
-            tx.execute("DELETE FROM stated_goals WHERE task_id = ?1", params![task_id])
-                .context("failed to clear stated goals")?;
+            tx.execute(
+                "DELETE FROM stated_goals WHERE task_id = ?1",
+                params![task_id],
+            )
+            .context("failed to clear stated goals")?;
         }
         tx.execute(
             "DELETE FROM app_settings WHERE key = ?1",

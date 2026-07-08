@@ -494,6 +494,30 @@ pub struct PrivacyCenterDashboardDto {
     pub content_observation_last_captured_at: Option<String>,
     pub content_observation_capture_failed: bool,
     pub content_observation_failed_app: Option<String>,
+    // apex a3: local model runtime status.
+    pub local_runtime: LocalRuntimeStatusDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalRuntimeStatusDto {
+    pub enabled: bool,
+    pub healthy: bool,
+    pub running: bool,
+    pub mode: String,
+    pub sidecar_configured: bool,
+    pub sidecar_pid: Option<u32>,
+    pub endpoint: String,
+    pub model_dir: String,
+    pub reasoning_model_id: String,
+    pub reasoning_model_path: String,
+    pub reasoning_model_present: bool,
+    pub embedding_model_id: String,
+    pub embedding_model_path: String,
+    pub embedding_model_present: bool,
+    pub deterministic_fallback_enabled: bool,
+    pub last_error: Option<String>,
+    pub disk_available_bytes: Option<u64>,
+    pub installed_model_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

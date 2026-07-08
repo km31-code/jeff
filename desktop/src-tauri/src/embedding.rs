@@ -5,10 +5,12 @@ use anyhow::Result;
 pub use crate::providers::EmbeddingsProvider as EmbeddingProvider;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct OpenAiEmbeddingProvider {
     inner: crate::providers::OpenAiEmbeddingsProvider,
 }
 
+#[allow(dead_code)]
 impl OpenAiEmbeddingProvider {
     pub fn from_env() -> Self {
         Self {
@@ -20,5 +22,9 @@ impl OpenAiEmbeddingProvider {
 impl crate::providers::EmbeddingsProvider for OpenAiEmbeddingProvider {
     fn embed_text(&self, input: &str) -> Result<Vec<f32>> {
         self.inner.embed_text(input)
+    }
+
+    fn model_id(&self) -> &'static str {
+        self.inner.model_id()
     }
 }

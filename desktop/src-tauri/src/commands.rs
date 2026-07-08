@@ -11,16 +11,17 @@ use crate::{
         accept_suggestion_for_task, dismiss_suggestion_for_task,
         evaluate_next_suggestions_for_task, explain_suggestion_for_task,
     },
+    local_runtime::LocalModelKind,
     message_kind::classify_user_message_kind,
     models::{
         ActiveWindowContextDto, ApiKeyValidationDto, ArtifactContentDto, ArtifactDto,
         ArtifactVersionDto, BrowserSelectionCaptureRequestDto, CalendarEventDto, ChatMessageDto,
         CoworkingStatusDto, DataClearResultDto, DriftFlagDto, EventLogEntryDto,
         FileWriteProposalDto, IntentClassificationDto, IntentLabel, IntentSlotsDto,
-        LiveEditReceiptDto, OnboardingStatusDto, OpenResourceDto, PendingLiveEditDto,
-        PrivacyCenterDashboardDto, ProactiveAuditEntryDto, ProactiveEvaluationDto,
-        RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto, RevisionApplyResultDto,
-        RevisionProposalDto, RevisionProposalResultDto, RevisionTargetDto,
+        LiveEditReceiptDto, LocalRuntimeStatusDto, OnboardingStatusDto, OpenResourceDto,
+        PendingLiveEditDto, PrivacyCenterDashboardDto, ProactiveAuditEntryDto,
+        ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto,
+        RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto, RevisionTargetDto,
         SelectionBridgeStatusDto, SelectionCaptureIndicatorDto, SendMessageResponseDto,
         SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto, SubTaskDto, SubTaskStepDto,
         SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto, SuggestionEvaluationDto,
@@ -326,6 +327,48 @@ pub fn set_tier_model_map(
 #[tauri::command]
 pub fn debug_llm_cache_metrics() -> crate::latency::LlmCacheMetrics {
     crate::latency::llm_cache_metrics()
+}
+
+#[tauri::command]
+pub fn get_local_runtime_status(state: State<'_, JeffState>) -> LocalRuntimeStatusDto {
+    state.local_runtime.status()
+}
+
+#[tauri::command]
+pub fn start_local_runtime(state: State<'_, JeffState>) -> Result<LocalRuntimeStatusDto, String> {
+    state.local_runtime.start().map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn stop_local_runtime(state: State<'_, JeffState>) -> Result<LocalRuntimeStatusDto, String> {
+    state.local_runtime.stop().map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn delete_local_model(
+    state: State<'_, JeffState>,
+    kind: String,
+) -> Result<LocalRuntimeStatusDto, String> {
+    let kind = LocalModelKind::parse(&kind).map_err(map_jeff_error)?;
+    state
+        .local_runtime
+        .delete_model(kind)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn download_local_model(
+    state: State<'_, JeffState>,
+    kind: String,
+    url: String,
+    sha256: String,
+    expected_bytes: Option<u64>,
+) -> Result<LocalRuntimeStatusDto, String> {
+    let kind = LocalModelKind::parse(&kind).map_err(map_jeff_error)?;
+    state
+        .local_runtime
+        .download_model(kind, &url, &sha256, expected_bytes)
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -2080,6 +2123,7 @@ fn build_privacy_center_dashboard(
             .map(|g| g.capture_failed_count >= 3)
             .unwrap_or(false),
         content_observation_failed_app: None,
+        local_runtime: state.local_runtime.status(),
     })
 }
 

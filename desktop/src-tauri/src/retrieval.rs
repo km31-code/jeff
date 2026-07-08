@@ -3,6 +3,7 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    sync::Arc,
     time::UNIX_EPOCH,
 };
 
@@ -11,8 +12,10 @@ use anyhow::{anyhow, Context, Result};
 use crate::{
     artifact_parser::{parse_text_from_artifact, supported_artifact_type, SupportedArtifactType},
     chunking::{chunk_text, DEFAULT_CHUNK_OVERLAP_CHARS, DEFAULT_CHUNK_SIZE_CHARS},
-    embedding::{EmbeddingProvider, OpenAiEmbeddingProvider},
+    embedding::EmbeddingProvider,
+    local_runtime::LocalRuntime,
     models::{ArtifactDto, ContextArtifactDto, RetrievedChunkDto, TaskContextPackDto},
+    providers::local::LocalEmbeddingProvider,
     similarity::cosine_similarity,
     store::{ChunkEmbeddingInput, StoredChunkEmbedding, TaskStore},
 };
@@ -76,6 +79,7 @@ pub fn import_artifact_for_task(
             chunk_text: chunk.to_string(),
             position_index: index as i64,
             embedding,
+            embedding_model: embeddings.model_id().to_string(),
         });
     }
 
@@ -148,11 +152,27 @@ pub fn retrieve_relevant_chunks_with_top_k(
         return Ok(Vec::new());
     }
 
+    let active_embedding_model = embeddings.model_id();
+    let mut normalized_chunks = Vec::with_capacity(stored_chunks.len());
+    for mut chunk in stored_chunks {
+        if chunk.embedding_model != active_embedding_model {
+            let refreshed = embeddings
+                .embed_text(&chunk.chunk_text)
+                .with_context(|| format!("failed to re-embed stale chunk id={}", chunk.chunk_id))?;
+            if !refreshed.is_empty() {
+                store.update_chunk_embedding(chunk.chunk_id, &refreshed, active_embedding_model)?;
+                chunk.embedding = refreshed;
+                chunk.embedding_model = active_embedding_model.to_string();
+            }
+        }
+        normalized_chunks.push(chunk);
+    }
+
     let query_embedding = embeddings
         .embed_text(clean_query)
         .context("failed to generate query embedding")?;
 
-    let mut scored: Vec<(f32, StoredChunkEmbedding)> = stored_chunks
+    let mut scored: Vec<(f32, StoredChunkEmbedding)> = normalized_chunks
         .into_iter()
         .map(|chunk| (cosine_similarity(&query_embedding, &chunk.embedding), chunk))
         .collect();
@@ -199,8 +219,8 @@ pub fn build_task_context_pack(
     })
 }
 
-pub fn default_embeddings_provider() -> OpenAiEmbeddingProvider {
-    OpenAiEmbeddingProvider::from_env()
+pub fn default_embeddings_provider(local_runtime: Arc<LocalRuntime>) -> LocalEmbeddingProvider {
+    LocalEmbeddingProvider::new(local_runtime)
 }
 
 // phase 13: idempotent auto-ingest for the filesystem watcher.
@@ -272,6 +292,7 @@ pub fn auto_ingest_file_for_task(
             chunk_text: chunk.to_string(),
             position_index: index as i64,
             embedding,
+            embedding_model: embeddings.model_id().to_string(),
         });
     }
 
@@ -368,11 +389,17 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        sync::Arc,
     };
 
     use anyhow::Result;
 
-    use crate::{embedding::EmbeddingProvider, store::TaskStore};
+    use crate::{
+        embedding::EmbeddingProvider,
+        local_runtime::{LocalRuntime, LOCAL_EMBEDDING_MODEL_ID},
+        providers::local::LocalEmbeddingProvider,
+        store::TaskStore,
+    };
 
     use super::{
         auto_ingest_file_for_task, build_task_context_pack, import_artifact_for_task,
@@ -555,6 +582,91 @@ mod tests {
         .expect("empty task retrieval should succeed");
 
         assert!(retrieved.is_empty());
+    }
+
+    #[test]
+    fn a3_retrieval_reembeds_stale_embedding_model_on_touch() {
+        let temp = tempfile::tempdir().expect("failed to create temp directory");
+        let base_path = temp.path().join("app_local_data");
+        let store = TaskStore::initialize(&base_path).expect("failed to initialize store");
+        let provider = LocalEmbeddingProvider::new(Arc::new(LocalRuntime::new(&base_path)));
+        let task = store
+            .create_task("Local Embedding")
+            .expect("failed to create task");
+        let source_path = temp.path().join("fixtures").join("local.md");
+        write_file(
+            &source_path,
+            "Alpha bridge notes with concrete local retrieval terms.",
+        );
+
+        import_artifact_for_task(
+            &store,
+            &KeywordEmbeddingProvider,
+            task.id,
+            &source_path.to_string_lossy(),
+        )
+        .expect("failed to import with legacy provider");
+        let before = store
+            .fetch_chunk_embeddings_for_task(task.id)
+            .expect("failed to fetch chunks before retrieval");
+        assert!(before
+            .iter()
+            .all(|chunk| chunk.embedding_model == "unknown"));
+
+        let retrieved = retrieve_relevant_chunks_with_top_k(
+            &store,
+            &provider,
+            task.id,
+            "alpha bridge retrieval",
+            1,
+        )
+        .expect("local retrieval failed");
+        assert_eq!(retrieved.len(), 1);
+
+        let after = store
+            .fetch_chunk_embeddings_for_task(task.id)
+            .expect("failed to fetch chunks after retrieval");
+        assert!(after
+            .iter()
+            .all(|chunk| chunk.embedding_model == LOCAL_EMBEDDING_MODEL_ID));
+    }
+
+    #[test]
+    fn a3_local_embedding_smoke_returns_same_seed_top1() {
+        let temp = tempfile::tempdir().expect("failed to create temp directory");
+        let base_path = temp.path().join("app_local_data");
+        let store = TaskStore::initialize(&base_path).expect("failed to initialize store");
+        let provider = LocalEmbeddingProvider::new(Arc::new(LocalRuntime::new(&base_path)));
+        let task = store
+            .create_task("Seeded Retrieval")
+            .expect("failed to create task");
+
+        let alpha_path = temp.path().join("fixtures").join("alpha.md");
+        let beta_path = temp.path().join("fixtures").join("beta.md");
+        write_file(
+            &alpha_path,
+            "Alpha bridge planning notes. The bridge milestone needs pylons, deck sequencing, and permits.",
+        );
+        write_file(
+            &beta_path,
+            "Kitchen garden notes. The garden milestone needs basil, mint, soil, and watering.",
+        );
+
+        import_artifact_for_task(&store, &provider, task.id, &alpha_path.to_string_lossy())
+            .expect("failed to import alpha");
+        import_artifact_for_task(&store, &provider, task.id, &beta_path.to_string_lossy())
+            .expect("failed to import beta");
+
+        let retrieved = retrieve_relevant_chunks_with_top_k(
+            &store,
+            &provider,
+            task.id,
+            "bridge pylons permits sequencing",
+            2,
+        )
+        .expect("local retrieval failed");
+        assert!(!retrieved.is_empty());
+        assert_eq!(retrieved[0].artifact_file_name, "alpha.md");
     }
 
     #[test]

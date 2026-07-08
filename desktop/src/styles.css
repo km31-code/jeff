@@ -459,6 +459,11 @@ pre {
   flex: 0 0 auto;
 }
 
+.inline-input {
+  width: 100%;
+  margin: 0.25rem 0;
+}
+
 /* b3: workspace chat bubbles */
 .chat-bubble {
   border: 1px solid var(--border-subtle);

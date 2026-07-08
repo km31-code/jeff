@@ -126,6 +126,10 @@ import {
   clearUserProfileMemory,
   setContentObservationEnabled,
   clearContentObservation,
+  deleteLocalModel,
+  downloadLocalModel,
+  startLocalRuntime,
+  stopLocalRuntime,
   listProactiveTriggerAuditLog,
   getSynthesisLog,
   clearActiveTaskData,
@@ -343,6 +347,10 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [synthesisLog, setSynthesisLog] = useState<SynthesisLogEntryDto[]>([]);
   const [privacyActionMessage, setPrivacyActionMessage] = useState<string | null>(null);
   const [clearAllConfirmation, setClearAllConfirmation] = useState("");
+  const [localModelUrl, setLocalModelUrl] = useState("");
+  const [localModelSha256, setLocalModelSha256] = useState("");
+  const [localModelExpectedBytes, setLocalModelExpectedBytes] = useState("");
+  const [localModelBusy, setLocalModelBusy] = useState(false);
 
   // phase 22: explicit selected-text capture indicator.
   const [selectionCaptureIndicator, setSelectionCaptureIndicator] =
@@ -1995,6 +2003,77 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setPrivacyDashboard(dashboard);
     } catch (error) {
       setOperationError("Failed to update Jeff's voice", error);
+    }
+  }
+
+  async function handleStartLocalRuntime() {
+    setLocalModelBusy(true);
+    try {
+      const status = await startLocalRuntime();
+      setPrivacyDashboard((current) => current ? { ...current, local_runtime: status } : current);
+      setPrivacyActionMessage("Local runtime started.");
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to start local runtime", error);
+    } finally {
+      setLocalModelBusy(false);
+    }
+  }
+
+  async function handleStopLocalRuntime() {
+    setLocalModelBusy(true);
+    try {
+      const status = await stopLocalRuntime();
+      setPrivacyDashboard((current) => current ? { ...current, local_runtime: status } : current);
+      setPrivacyActionMessage("Local runtime stopped.");
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to stop local runtime", error);
+    } finally {
+      setLocalModelBusy(false);
+    }
+  }
+
+  async function handleDeleteLocalModel(kind: "reasoning" | "embedding") {
+    setLocalModelBusy(true);
+    try {
+      const status = await deleteLocalModel(kind);
+      setPrivacyDashboard((current) => current ? { ...current, local_runtime: status } : current);
+      setPrivacyActionMessage(`Deleted local ${kind} model.`);
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to delete local model", error);
+    } finally {
+      setLocalModelBusy(false);
+    }
+  }
+
+  async function handleDownloadLocalModel(kind: "reasoning" | "embedding") {
+    const parsedExpectedBytes = localModelExpectedBytes.trim()
+      ? Number(localModelExpectedBytes.trim())
+      : null;
+    const expectedBytes =
+      parsedExpectedBytes !== null && Number.isFinite(parsedExpectedBytes)
+        ? parsedExpectedBytes
+        : null;
+    setLocalModelBusy(true);
+    try {
+      const status = await downloadLocalModel(
+        kind,
+        localModelUrl.trim(),
+        localModelSha256.trim(),
+        expectedBytes
+      );
+      setPrivacyDashboard((current) => current ? { ...current, local_runtime: status } : current);
+      setLocalModelUrl("");
+      setLocalModelSha256("");
+      setLocalModelExpectedBytes("");
+      setPrivacyActionMessage(`Installed local ${kind} model.`);
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to install local model", error);
+    } finally {
+      setLocalModelBusy(false);
     }
   }
 
@@ -3811,6 +3890,109 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                         >
                           Clear memory
                         </button>
+                      </li>
+
+                      <li data-testid="privacy-surface-local-runtime">
+                        <label className="toggle-row">
+                          <span>Local model runtime</span>
+                        </label>
+                        <p className="task-meta" data-testid="local-runtime-status">
+                          {privacyDashboard.local_runtime.mode};{" "}
+                          {privacyDashboard.local_runtime.healthy ? "healthy" : "not healthy"};{" "}
+                          {privacyDashboard.local_runtime.running ? "running" : "stopped"};{" "}
+                          {privacyDashboard.local_runtime.endpoint}
+                        </p>
+                        <p className="task-meta" data-testid="local-runtime-models">
+                          Reflex:{" "}
+                          {privacyDashboard.local_runtime.reasoning_model_present ? "installed" : "missing"};{" "}
+                          embeddings:{" "}
+                          {privacyDashboard.local_runtime.embedding_model_present ? "installed" : "hash fallback"};{" "}
+                          {privacyDashboard.local_runtime.installed_model_bytes} bytes installed
+                        </p>
+                        <p className="task-meta" data-testid="local-runtime-model-dir">
+                          <code>{privacyDashboard.local_runtime.model_dir}</code>
+                        </p>
+                        {privacyDashboard.local_runtime.last_error ? (
+                          <p className="task-meta" data-testid="local-runtime-last-error">
+                            {privacyDashboard.local_runtime.last_error}
+                          </p>
+                        ) : null}
+                        <div className="row-actions">
+                          <button
+                            type="button"
+                            onClick={() => void handleStartLocalRuntime()}
+                            disabled={localModelBusy}
+                            data-testid="local-runtime-start"
+                          >
+                            Start
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleStopLocalRuntime()}
+                            disabled={localModelBusy}
+                            data-testid="local-runtime-stop"
+                          >
+                            Stop
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteLocalModel("reasoning")}
+                            disabled={localModelBusy || !privacyDashboard.local_runtime.reasoning_model_present}
+                            data-testid="local-runtime-delete-reasoning"
+                          >
+                            Delete Reflex
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteLocalModel("embedding")}
+                            disabled={localModelBusy || !privacyDashboard.local_runtime.embedding_model_present}
+                            data-testid="local-runtime-delete-embedding"
+                          >
+                            Delete embeddings
+                          </button>
+                        </div>
+                        <input
+                          className="inline-input"
+                          value={localModelUrl}
+                          onChange={(event) => setLocalModelUrl(event.target.value)}
+                          placeholder="https://...gguf"
+                          disabled={localModelBusy}
+                          data-testid="local-model-url"
+                        />
+                        <input
+                          className="inline-input"
+                          value={localModelSha256}
+                          onChange={(event) => setLocalModelSha256(event.target.value)}
+                          placeholder="sha256"
+                          disabled={localModelBusy}
+                          data-testid="local-model-sha256"
+                        />
+                        <input
+                          className="inline-input"
+                          value={localModelExpectedBytes}
+                          onChange={(event) => setLocalModelExpectedBytes(event.target.value)}
+                          placeholder="expected bytes"
+                          disabled={localModelBusy}
+                          data-testid="local-model-expected-bytes"
+                        />
+                        <div className="row-actions">
+                          <button
+                            type="button"
+                            onClick={() => void handleDownloadLocalModel("reasoning")}
+                            disabled={localModelBusy || !localModelUrl.trim() || !localModelSha256.trim()}
+                            data-testid="local-model-download-reasoning"
+                          >
+                            Install Reflex
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDownloadLocalModel("embedding")}
+                            disabled={localModelBusy || !localModelUrl.trim() || !localModelSha256.trim()}
+                            data-testid="local-model-download-embedding"
+                          >
+                            Install embeddings
+                          </button>
+                        </div>
                       </li>
 
                       <li data-testid="privacy-surface-calendar">

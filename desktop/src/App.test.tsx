@@ -126,6 +126,28 @@ type PrivacyCenterDashboardDto = {
   typing_activity_enabled: boolean;
   tts_voice: string;
   available_tts_voices: string[];
+  local_runtime: LocalRuntimeStatusDto;
+};
+
+type LocalRuntimeStatusDto = {
+  enabled: boolean;
+  healthy: boolean;
+  running: boolean;
+  mode: string;
+  sidecar_configured: boolean;
+  sidecar_pid: number | null;
+  endpoint: string;
+  model_dir: string;
+  reasoning_model_id: string;
+  reasoning_model_path: string;
+  reasoning_model_present: boolean;
+  embedding_model_id: string;
+  embedding_model_path: string;
+  embedding_model_present: boolean;
+  deterministic_fallback_enabled: boolean;
+  last_error: string | null;
+  disk_available_bytes: number | null;
+  installed_model_bytes: number;
 };
 
 type RelationalProfileDto = {
@@ -292,6 +314,26 @@ function setupInvokeMock(options?: {
   };
   let workspacePromptDismissed = false;
   let clipboardCaptureEnabled = false;
+  const localRuntimeStatus: LocalRuntimeStatusDto = {
+    enabled: true,
+    healthy: false,
+    running: false,
+    mode: "deterministic_local",
+    sidecar_configured: false,
+    sidecar_pid: null,
+    endpoint: "http://127.0.0.1:17631",
+    model_dir: "/tmp/jeff_data/models",
+    reasoning_model_id: "local-reflex-llamacpp",
+    reasoning_model_path: "/tmp/jeff_data/models/reflex-instruct.gguf",
+    reasoning_model_present: false,
+    embedding_model_id: "local-hash-embedding-v1",
+    embedding_model_path: "/tmp/jeff_data/models/embedding.gguf",
+    embedding_model_present: false,
+    deterministic_fallback_enabled: true,
+    last_error: null,
+    disk_available_bytes: 1_000_000_000,
+    installed_model_bytes: 0
+  };
   let privacyDashboard: PrivacyCenterDashboardDto = {
     active_task_id: 1,
     active_task_title: "history storymap",
@@ -311,7 +353,8 @@ function setupInvokeMock(options?: {
     selection_capture_enabled: true,
     typing_activity_enabled: true,
     tts_voice: "alloy",
-    available_tts_voices: ["alloy", "nova", "shimmer"]
+    available_tts_voices: ["alloy", "nova", "shimmer"],
+    local_runtime: localRuntimeStatus
   };
   let relationalProfile: RelationalProfileDto = {
     stated_goals: [],
@@ -551,6 +594,61 @@ function setupInvokeMock(options?: {
 
     if (command === "get_privacy_center_dashboard") {
       return { ...privacyDashboard };
+    }
+
+    if (command === "get_local_runtime_status") {
+      return { ...privacyDashboard.local_runtime };
+    }
+
+    if (command === "start_local_runtime") {
+      privacyDashboard = {
+        ...privacyDashboard,
+        local_runtime: {
+          ...privacyDashboard.local_runtime,
+          running: true,
+          healthy: true,
+          mode: "sidecar"
+        }
+      };
+      return { ...privacyDashboard.local_runtime };
+    }
+
+    if (command === "stop_local_runtime") {
+      privacyDashboard = {
+        ...privacyDashboard,
+        local_runtime: {
+          ...privacyDashboard.local_runtime,
+          running: false,
+          healthy: false,
+          mode: "deterministic_local"
+        }
+      };
+      return { ...privacyDashboard.local_runtime };
+    }
+
+    if (command === "delete_local_model") {
+      privacyDashboard = {
+        ...privacyDashboard,
+        local_runtime: {
+          ...privacyDashboard.local_runtime,
+          reasoning_model_present: args?.kind === "reasoning" ? false : privacyDashboard.local_runtime.reasoning_model_present,
+          embedding_model_present: args?.kind === "embedding" ? false : privacyDashboard.local_runtime.embedding_model_present
+        }
+      };
+      return { ...privacyDashboard.local_runtime };
+    }
+
+    if (command === "download_local_model") {
+      privacyDashboard = {
+        ...privacyDashboard,
+        local_runtime: {
+          ...privacyDashboard.local_runtime,
+          reasoning_model_present: args?.kind === "reasoning" ? true : privacyDashboard.local_runtime.reasoning_model_present,
+          embedding_model_present: args?.kind === "embedding" ? true : privacyDashboard.local_runtime.embedding_model_present,
+          installed_model_bytes: 42
+        }
+      };
+      return { ...privacyDashboard.local_runtime };
     }
 
     if (command === "get_relational_profile") {

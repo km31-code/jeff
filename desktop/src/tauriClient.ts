@@ -363,7 +363,7 @@ export async function getAnthropicKeyConfigured(): Promise<boolean> {
 }
 
 export interface TierConfigDto {
-  provider: "openai" | "anthropic";
+  provider: "local" | "openai" | "anthropic";
   model: string;
 }
 
@@ -374,12 +374,63 @@ export interface RouterConfigDto {
   craft: TierConfigDto;
 }
 
+export interface LocalRuntimeStatusDto {
+  enabled: boolean;
+  healthy: boolean;
+  running: boolean;
+  mode: string;
+  sidecar_configured: boolean;
+  sidecar_pid: number | null;
+  endpoint: string;
+  model_dir: string;
+  reasoning_model_id: string;
+  reasoning_model_path: string;
+  reasoning_model_present: boolean;
+  embedding_model_id: string;
+  embedding_model_path: string;
+  embedding_model_present: boolean;
+  deterministic_fallback_enabled: boolean;
+  last_error: string | null;
+  disk_available_bytes: number | null;
+  installed_model_bytes: number;
+}
+
 export async function getTierModelMap(): Promise<RouterConfigDto> {
   return invoke<RouterConfigDto>("get_tier_model_map");
 }
 
 export async function setTierModelMap(config: RouterConfigDto): Promise<void> {
   return invoke<void>("set_tier_model_map", { config });
+}
+
+export async function getLocalRuntimeStatus(): Promise<LocalRuntimeStatusDto> {
+  return invoke<LocalRuntimeStatusDto>("get_local_runtime_status");
+}
+
+export async function startLocalRuntime(): Promise<LocalRuntimeStatusDto> {
+  return invoke<LocalRuntimeStatusDto>("start_local_runtime");
+}
+
+export async function stopLocalRuntime(): Promise<LocalRuntimeStatusDto> {
+  return invoke<LocalRuntimeStatusDto>("stop_local_runtime");
+}
+
+export async function deleteLocalModel(kind: "reasoning" | "embedding"): Promise<LocalRuntimeStatusDto> {
+  return invoke<LocalRuntimeStatusDto>("delete_local_model", { kind });
+}
+
+export async function downloadLocalModel(
+  kind: "reasoning" | "embedding",
+  url: string,
+  sha256: string,
+  expectedBytes?: number | null
+): Promise<LocalRuntimeStatusDto> {
+  return invoke<LocalRuntimeStatusDto>("download_local_model", {
+    kind,
+    url,
+    sha256,
+    expectedBytes: expectedBytes ?? null,
+  });
 }
 
 export async function completeOnboarding(): Promise<void> {
@@ -978,6 +1029,7 @@ export interface PrivacyCenterDashboardDto {
   content_observation_last_captured_at: string | null;
   content_observation_capture_failed: boolean;
   content_observation_failed_app: string | null;
+  local_runtime: LocalRuntimeStatusDto;
 }
 
 export type SelectionCaptureStatus = "captured" | "failed";

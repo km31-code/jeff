@@ -837,7 +837,7 @@ directional and may be re-scoped when their epoch begins.
 |----|-----------|------------|--------|
 | A1 | Model router and capability tiers | — | implementation + live OpenAI eval passed; OpenAI-only A/B failed 9/20 then 8/20; user accepted model-confounded waiver |
 | A2 | Cache-stable prompt assembly | A1 | complete; `scripts/apex_a2_check.sh`, `cargo test --quiet`, and 20-turn scripted cache ratio gate passed |
-| A3 | Local model runtime (Reflex + embeddings) | A1 | not started |
+| A3 | Local model runtime (Reflex + embeddings) | A1 | complete; `scripts/apex_a3_check.sh`, no-key local Reflex tests, local embedding smoke tests, `cargo test --quiet`, `npm run lint`, and `npm test` passed |
 | A4 | Cost governor and spend visibility | A1 | not started |
 | A5 | Character eval harness | A1 | not started |
 | B1 | Semantic document model | A3 | not started |
