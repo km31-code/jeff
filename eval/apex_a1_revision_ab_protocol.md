@@ -23,12 +23,29 @@ Each output line must be:
 
 ## procedure
 
-1. Generate `legacy.jsonl` using the old single-model configuration.
-2. Generate `apex.jsonl` using the A1 router defaults.
+1. Generate `legacy.jsonl` using the old single-model configuration:
+
+```sh
+JEFF_RUN_EXTERNAL_EVAL=1 scripts/apex_a1_ab_generate.sh legacy \
+  artifacts/apex_a1_ab/legacy.jsonl
+```
+
+2. Generate `apex.jsonl` using the A1 router default intent:
+
+```sh
+JEFF_RUN_EXTERNAL_EVAL=1 scripts/apex_a1_ab_generate.sh apex \
+  artifacts/apex_a1_ab/apex.jsonl
+```
+
+The generator supports model/provider overrides for reproducibility:
+`APEX_A1_LEGACY_MODEL`, `APEX_A1_APEX_PROVIDER`, and `APEX_A1_APEX_MODEL`.
+
 3. Run:
 
 ```sh
-scripts/apex_a1_ab_packet.sh legacy.jsonl apex.jsonl
+scripts/apex_a1_ab_packet.sh \
+  artifacts/apex_a1_ab/legacy.jsonl \
+  artifacts/apex_a1_ab/apex.jsonl
 ```
 
 4. Give the generated `packet.md` to the evaluator. Do not give them
