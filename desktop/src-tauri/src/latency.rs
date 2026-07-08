@@ -13,11 +13,14 @@ fn provider_instantiation_is_fast() {
     use std::time::Instant;
 
     let started = Instant::now();
-    let _reasoning = crate::providers::OpenAiReasoningProvider::from_env();
+    // apex a1: reasoning and classification construct through the model
+    // router; the router itself is config-only and instantiates instantly.
+    let _router = crate::model_router::ModelRouter::new(
+        crate::model_router::RouterConfig::default(),
+    );
     let _stt = crate::providers::OpenAiSttProvider::from_env();
     let _tts = crate::providers::OpenAiTtsProvider::from_env();
     let _embeddings = crate::providers::OpenAiEmbeddingsProvider::from_env();
-    let _classifier = crate::providers::OpenAiClassifierProvider::new();
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
     assert!(

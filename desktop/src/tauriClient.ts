@@ -346,6 +346,42 @@ export async function deleteOpenAiApiKey(): Promise<void> {
   return invoke<void>("delete_openai_api_key");
 }
 
+// apex a1: anthropic key management + model router tier config.
+// the anthropic key is optional — without it, anthropic-configured tiers
+// fall back to openai automatically.
+
+export async function storeAnthropicApiKey(apiKey: string): Promise<void> {
+  return invoke<void>("store_anthropic_api_key", { apiKey });
+}
+
+export async function deleteAnthropicApiKey(): Promise<void> {
+  return invoke<void>("delete_anthropic_api_key");
+}
+
+export async function getAnthropicKeyConfigured(): Promise<boolean> {
+  return invoke<boolean>("get_anthropic_key_configured");
+}
+
+export interface TierConfigDto {
+  provider: "openai" | "anthropic";
+  model: string;
+}
+
+export interface RouterConfigDto {
+  reflex: TierConfigDto;
+  conversation: TierConfigDto;
+  judgment: TierConfigDto;
+  craft: TierConfigDto;
+}
+
+export async function getTierModelMap(): Promise<RouterConfigDto> {
+  return invoke<RouterConfigDto>("get_tier_model_map");
+}
+
+export async function setTierModelMap(config: RouterConfigDto): Promise<void> {
+  return invoke<void>("set_tier_model_map", { config });
+}
+
 export async function completeOnboarding(): Promise<void> {
   return invoke<void>("complete_onboarding");
 }

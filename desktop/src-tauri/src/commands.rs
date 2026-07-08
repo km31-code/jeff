@@ -286,6 +286,43 @@ pub fn delete_openai_api_key() -> Result<(), String> {
     crate::secrets::delete_openai_api_key().map_err(map_jeff_error)
 }
 
+// ---- apex a1: anthropic api key + model router config ------------------------
+// the anthropic key is optional. when absent, anthropic-configured tiers fall
+// back to openai with a logged notice — nothing breaks.
+
+#[tauri::command]
+pub fn store_anthropic_api_key(api_key: String) -> Result<(), String> {
+    crate::secrets::store_anthropic_api_key(&api_key).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn delete_anthropic_api_key() -> Result<(), String> {
+    crate::secrets::delete_anthropic_api_key().map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn get_anthropic_key_configured() -> Result<bool, String> {
+    Ok(crate::secrets::resolve_anthropic_api_key().is_some())
+}
+
+#[tauri::command]
+pub fn get_tier_model_map(
+    state: State<'_, JeffState>,
+) -> Result<crate::model_router::RouterConfig, String> {
+    Ok(state.model_router.config())
+}
+
+#[tauri::command]
+pub fn set_tier_model_map(
+    state: State<'_, JeffState>,
+    config: crate::model_router::RouterConfig,
+) -> Result<(), String> {
+    state
+        .model_router
+        .set_config(config, &state.store)
+        .map_err(map_jeff_error)
+}
+
 #[tauri::command]
 pub fn get_workspace_prompt_dismissed(state: State<'_, JeffState>) -> Result<bool, String> {
     state
@@ -727,7 +764,7 @@ pub fn evaluate_proactive_nudge<R: Runtime>(
         evaluate_proactive_nudge_for_task(
             &state.store,
             state.embeddings.as_ref(),
-            state.reasoning.as_ref(),
+            state.judgment_reasoning().as_ref(),
             &mut runtime,
             task_id,
             now,
@@ -778,7 +815,7 @@ pub fn propose_artifact_revision(
     propose_revision_for_artifact(
         &state.store,
         state.embeddings.as_ref(),
-        state.reasoning.as_ref(),
+        state.craft_reasoning().as_ref(),
         task_id,
         artifact_id,
         selection_or_range,
@@ -863,7 +900,7 @@ pub fn generate_revision_alternative(
     };
     generate_revision_alternative_inner(
         &state.store,
-        state.reasoning.as_ref(),
+        state.craft_reasoning().as_ref(),
         task_id,
         revision_id,
         snapshot_summary.as_deref(),
@@ -911,7 +948,7 @@ pub fn create_subtask(
     create_subtask_and_start(
         &state.store,
         state.embeddings.as_ref(),
-        state.reasoning.clone(),
+        state.craft_reasoning(),
         state.subtasks.as_ref(),
         task_id,
         &title,
@@ -966,7 +1003,7 @@ pub fn suggest_subtask(
     suggest_subtask_for_task(
         &state.store,
         state.embeddings.as_ref(),
-        state.reasoning.as_ref(),
+        state.craft_reasoning().as_ref(),
         task_id,
     )
     .map_err(map_jeff_error)
@@ -982,7 +1019,7 @@ pub fn refine_subtask(
     refine_subtask_and_start(
         &state.store,
         state.embeddings.as_ref(),
-        state.reasoning.clone(),
+        state.craft_reasoning(),
         state.subtasks.as_ref(),
         subtask_id,
         &instruction,
@@ -1002,7 +1039,7 @@ pub fn convert_subtask_to_revision(
     convert_subtask_result_to_revision(
         &state.store,
         state.embeddings.as_ref(),
-        state.reasoning.as_ref(),
+        state.craft_reasoning().as_ref(),
         task_id,
         subtask_id,
         artifact_id,
@@ -1074,7 +1111,7 @@ pub fn accept_suggestion(
     accept_suggestion_for_task(
         &state.store,
         state.embeddings.as_ref(),
-        state.reasoning.clone(),
+        state.craft_reasoning(),
         state.subtasks.as_ref(),
         task_id,
         suggestion_id,
@@ -1430,8 +1467,9 @@ pub fn classify_message_intent(
         .get_task_summary(task_id)
         .map_err(map_jeff_error)?;
 
-    let api_key = crate::secrets::resolve_openai_api_key_required().map_err(map_jeff_error)?;
-    crate::classifier::classify_intent(trimmed, &api_key).map_err(map_jeff_error)
+    // apex a1: classification routes through the model router at reflex tier.
+    // key resolution happens inside the router (keychain-aware).
+    state.model_router.classify(trimmed).map_err(map_jeff_error)
 }
 
 // phase 15: proactive initiation commands
@@ -1460,7 +1498,7 @@ pub fn trigger_task_resume(
     let current_snapshot_summary = crate::awareness_core::snapshot_summary(&current_snapshot);
     crate::proactive::generate_reorientation(
         &state.store,
-        state.reasoning.as_ref(),
+        state.judgment_reasoning().as_ref(),
         task_id,
         active_ctx.as_deref(),
         None, // calendar context injected at the command layer when CalendarState is available
@@ -1493,7 +1531,7 @@ pub fn check_task_drift(
     let active_ctx = active_context_string_if_enabled(state.inner(), &context_state);
     crate::proactive::evaluate_drift(
         &state.store,
-        state.reasoning.as_ref(),
+        state.judgment_reasoning().as_ref(),
         state.embeddings.as_ref(),
         task_id,
         &current_text,
@@ -1521,7 +1559,7 @@ pub async fn trigger_speculative_subtask<R: Runtime>(
     let subtask = crate::proactive::propose_speculative_subtask(
         &state.store,
         state.embeddings.as_ref(),
-        std::sync::Arc::clone(&state.reasoning),
+        state.craft_reasoning(),
         &state.subtasks,
         task_id,
     )
@@ -2422,7 +2460,7 @@ pub fn start_subtask_chain<R: Runtime>(
     create_chain_subtask_and_start(
         &state.store,
         state.embeddings.clone(),
-        state.reasoning.clone(),
+        state.craft_reasoning(),
         &state.subtasks,
         task_id,
         &title,

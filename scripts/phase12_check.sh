@@ -38,8 +38,9 @@ pass "stream event name constants present"
 # 4. streaming llm pipeline (m12.2)
 grep -q "start_streaming_turn" "$CHAT_STREAMING_RS" || fail "start_streaming_turn not in chat_streaming.rs"
 grep -q "run_llm_stream" "$CHAT_STREAMING_RS" || fail "run_llm_stream not in chat_streaming.rs"
-grep -q "OpenAiStreamingReasoningProvider" "$CHAT_STREAMING_RS" || fail "streaming reasoning provider not used"
-grep -q "stream_response" "$CHAT_STREAMING_RS" || fail "stream_response not called in pipeline"
+# apex a1: streaming dispatches through the model router at conversation tier.
+grep -q "model_router.stream" "$CHAT_STREAMING_RS" || fail "streaming not routed through model router"
+grep -q "Tier::Conversation" "$CHAT_STREAMING_RS" || fail "conversation tier not declared in streaming pipeline"
 pass "streaming llm pipeline present (m12.2)"
 
 # 5. phrase-chunked tts (m12.3 core feature)

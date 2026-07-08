@@ -1,10 +1,11 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::models::{IntentClassificationDto, IntentLabel, IntentSlotsDto};
 
-pub(crate) const MODEL: &str = "gpt-4o-mini";
-pub(crate) const REQUEST_TIMEOUT_MS: u64 = 300;
+// apex a1: the classifier model and timeout are owned by the model router
+// (reflex tier); see model_router::DEFAULT_REFLEX_MODEL. this module keeps
+// the system prompt and response parsing, which are provider-agnostic.
 
 pub(crate) const SYSTEM_PROMPT: &str =
     "You are an intent classifier for a writing assistant called Jeff.\
@@ -34,23 +35,6 @@ pub(crate) const SYSTEM_PROMPT: &str =
 \n    \"topic\": <string or null>\
 \n  }\
 \n}";
-
-pub fn classify_intent(text: &str, api_key: &str) -> Result<IntentClassificationDto> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Ok(IntentClassificationDto {
-            intent: IntentLabel::Unknown,
-            confidence: 0.0,
-            slots: IntentSlotsDto::default(),
-        });
-    }
-
-    use crate::providers::ClassifierProvider;
-    let provider = crate::providers::OpenAiClassifierProvider::new();
-    provider
-        .classify(trimmed, api_key)
-        .map_err(|error| anyhow!(error))
-}
 
 pub(crate) fn parse_classification(content: &str) -> Result<IntentClassificationDto> {
     #[derive(Deserialize)]

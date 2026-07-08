@@ -6,39 +6,19 @@ use tokio::sync::mpsc;
 // reasoning::ReasoningProvider resolves to providers::ReasoningModelProvider.
 pub use crate::providers::ReasoningModelProvider as ReasoningProvider;
 
-#[derive(Clone)]
-pub struct OpenAiReasoningProvider {
-    inner: crate::providers::OpenAiReasoningProvider,
-}
-
-impl OpenAiReasoningProvider {
-    pub fn from_env() -> Self {
-        Self {
-            inner: crate::providers::OpenAiReasoningProvider::from_env(),
-        }
-    }
-}
-
-impl crate::providers::ReasoningModelProvider for OpenAiReasoningProvider {
-    fn generate_response(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        self.inner.generate_response(system_prompt, user_prompt)
-    }
-}
-
 // ---- streaming provider -----------------------------------------------------
 
-// separate struct from the blocking provider so callers are explicit about
-// which path they use. shares api_key and model config with the original.
+// apex a1: the model is injected by the model router — no model names live in
+// this module. blocking generation also moved into the router; the legacy
+// blocking wrapper that lived here is gone.
 #[derive(Clone)]
 pub struct OpenAiStreamingReasoningProvider {
     model: String,
 }
 
 impl OpenAiStreamingReasoningProvider {
-    pub fn from_env() -> Self {
-        Self {
-            model: "gpt-4o-mini".to_string(),
-        }
+    pub fn with_model(model: String) -> Self {
+        Self { model }
     }
 
     // streams LLM tokens through an mpsc channel. spawns a tokio task that

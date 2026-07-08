@@ -5,6 +5,7 @@ use crate::onboarding::{API_KEY_SOURCE_ENV, API_KEY_SOURCE_KEYCHAIN, API_KEY_SOU
 
 pub const OPENAI_KEYCHAIN_SERVICE: &str = "com.jeff.desktop";
 pub const OPENAI_KEYCHAIN_ACCOUNT: &str = "openai_api_key";
+pub const ANTHROPIC_KEYCHAIN_ACCOUNT: &str = "anthropic_api_key";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAiKeyResolution {
@@ -125,6 +126,62 @@ pub fn store_openai_api_key(api_key: &str) -> Result<()> {
 
 pub fn delete_openai_api_key() -> Result<()> {
     SystemOpenAiKeyStore.delete_openai_api_key()
+}
+
+// ---- apex a1: anthropic api key ----------------------------------------------
+// mirrors the openai key path: keychain first, env var fallback. the anthropic
+// key is optional — the model router falls back to openai when it is absent.
+
+fn anthropic_entry() -> Result<Entry> {
+    Entry::new(OPENAI_KEYCHAIN_SERVICE, ANTHROPIC_KEYCHAIN_ACCOUNT)
+        .context("failed to initialize Anthropic API key keychain entry")
+}
+
+pub fn anthropic_api_key_from_env() -> Option<String> {
+    std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+pub fn resolve_anthropic_api_key() -> Option<String> {
+    match anthropic_entry().and_then(|entry| match entry.get_password() {
+        Ok(value) => Ok(Some(value.trim().to_string()).filter(|v| !v.is_empty())),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(err) => Err(anyhow!(
+            "failed to read Anthropic API key from keychain: {err}"
+        )),
+    }) {
+        Ok(Some(key)) => Some(key),
+        Ok(None) => anthropic_api_key_from_env(),
+        Err(err) => {
+            eprintln!("[jeff secrets] anthropic keychain read failed, falling back to env: {err}");
+            anthropic_api_key_from_env()
+        }
+    }
+}
+
+pub fn resolve_anthropic_api_key_required() -> Result<String> {
+    resolve_anthropic_api_key().ok_or_else(|| anyhow!("ANTHROPIC_API_KEY is not configured"))
+}
+
+pub fn store_anthropic_api_key(api_key: &str) -> Result<()> {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("API key cannot be empty"));
+    }
+    anthropic_entry()?
+        .set_password(trimmed)
+        .context("failed to store Anthropic API key in keychain")
+}
+
+pub fn delete_anthropic_api_key() -> Result<()> {
+    match anthropic_entry()?.delete_credential() {
+        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+        Err(err) => Err(anyhow!(
+            "failed to delete Anthropic API key from keychain: {err}"
+        )),
+    }
 }
 
 #[cfg(test)]

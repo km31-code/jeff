@@ -100,21 +100,23 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
         return;
     }
 
-    let Some(api_key) = crate::secrets::resolve_openai_api_key().api_key else {
+    if !jeff.model_router.any_key_available() {
         log_synthesis_decision(
             &jeff,
             task.id,
             Some(&reason),
             &snapshot,
-            Some("missing_openai_api_key"),
+            Some("missing_api_key"),
             None,
             false,
         );
         return;
-    };
+    }
 
     let message =
-        match awareness_core::synthesize_proactive_message(&reason, &snapshot, &api_key).await {
+        match awareness_core::synthesize_proactive_message(&reason, &snapshot, &jeff.model_router)
+            .await
+        {
             Ok(message) => message.trim().to_string(),
             Err(error) => {
                 log_synthesis_decision(

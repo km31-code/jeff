@@ -19,7 +19,7 @@ use crate::{
     coworking::unix_now_seconds,
     embedding::EmbeddingProvider,
     message_kind::MessageKind,
-    reasoning::OpenAiStreamingReasoningProvider,
+    model_router::{ModelRouter, Tier},
     retrieval::build_task_context_pack,
     state::JeffState,
     store::TaskStore,
@@ -41,7 +41,7 @@ async fn synthesize_phrase_async(api_key: &str, text: &str, voice: &str) -> Resu
         .post("https://api.openai.com/v1/audio/speech")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-4o-mini-tts",
+            "model": crate::providers::OPENAI_TTS_MODEL,
             "voice": voice,
             "input": text,
             "format": "mp3"
@@ -189,7 +189,8 @@ pub async fn start_streaming_turn(
     // 3. build context pack (db reads + embedding — blocking but fast).
     let store = state.store.clone();
     let embeddings = state.embeddings.clone();
-    let reasoning = OpenAiStreamingReasoningProvider::from_env();
+    // apex a1: conversation-tier streaming through the model router.
+    let model_router = state.model_router.clone();
     let tts_voice = state.store.get_tts_voice()?;
     let current_snapshot = state.awareness_core.snapshot_immediate();
     let current_snapshot_summary = crate::awareness_core::snapshot_summary(&current_snapshot);
@@ -198,7 +199,7 @@ pub async fn start_streaming_turn(
     tauri::async_runtime::spawn(run_llm_stream(
         store,
         embeddings,
-        reasoning,
+        model_router,
         app,
         task_id,
         clean,
@@ -217,7 +218,7 @@ pub async fn start_streaming_turn(
 async fn run_llm_stream<R: Runtime + 'static>(
     store: TaskStore,
     embeddings: Arc<dyn EmbeddingProvider>,
-    reasoning: OpenAiStreamingReasoningProvider,
+    model_router: Arc<ModelRouter>,
     app: AppHandle<R>,
     task_id: i64,
     message: String,
@@ -308,8 +309,9 @@ async fn run_llm_stream<R: Runtime + 'static>(
         snapshot_summary.as_deref(),
     );
 
-    // open the streaming LLM channel.
-    let mut rx = match reasoning.stream_response(
+    // open the streaming LLM channel through the model router.
+    let mut rx = match model_router.stream(
+        Tier::Conversation,
         &effective_system_prompt,
         &user_prompt,
         token.cancel.clone(),

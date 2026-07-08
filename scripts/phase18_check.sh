@@ -55,9 +55,10 @@ for symbol in \
 done
 pass "secrets resolver and keychain store symbols are present"
 
+# apex a1: the classify path delegates key resolution to the model router,
+# whose provider adapters use the unified resolver (asserted on providers.rs).
 grep -q "resolve_openai_api_key_required" "$PROVIDERS_RS" || fail "providers.rs does not use unified key resolver"
-grep -q "resolve_openai_api_key_required" "$REASONING_RS" || fail "reasoning.rs does not use unified key resolver"
-grep -q "resolve_openai_api_key_required" "$COMMANDS_RS" || fail "commands.rs classify path does not use unified key resolver"
+grep -q "model_router.classify" "$COMMANDS_RS" || fail "commands.rs classify path does not route through model router"
 grep -q "resolve_openai_api_key().api_key" "$CHAT_STREAMING_RS" || fail "chat_streaming.rs tts path does not use unified key resolver"
 pass "runtime call paths read OpenAI key via unified resolver"
 

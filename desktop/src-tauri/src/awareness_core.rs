@@ -1,6 +1,6 @@
 use std::{
     sync::Mutex as StdMutex,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -397,7 +397,7 @@ pub fn should_speak_proactively(
 pub async fn synthesize_proactive_message(
     reason: &ProactiveSpeechReason,
     snapshot: &SituationalSnapshot,
-    api_key: &str,
+    router: &crate::model_router::ModelRouter,
 ) -> Result<String> {
     let system_prompt = crate::character::build_reorientation_system_prompt(
         &crate::character::ReorientationContext {
@@ -422,41 +422,23 @@ pub async fn synthesize_proactive_message(
         snapshot_summary(snapshot)
     );
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .context("failed to build synthesis http client")?;
-    let response = client
-        .post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(api_key)
-        .json(&serde_json::json!({
-            "model": "gpt-4o-mini",
-            "temperature": 0.2,
-            "max_tokens": 80,
-            "messages": [
-                { "role": "system", "content": system_prompt },
-                { "role": "user", "content": user_prompt }
-            ]
-        }))
-        .send()
+    // apex a1: judgment-tier call through the model router. the 5s timeout
+    // and short output budget from the phase 27 spec are preserved.
+    let text = router
+        .generate_async(
+            crate::model_router::Tier::Judgment,
+            &system_prompt,
+            &user_prompt,
+            crate::model_router::GenerateOptions {
+                temperature: 0.2,
+                max_tokens: Some(80),
+                json_object: false,
+                timeout_ms: Some(5000),
+            },
+        )
         .await
         .context("synthesis LLM request failed")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("synthesis LLM status {status}: {body}");
-    }
-
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .context("failed to decode synthesis LLM response")?;
-    let text = json["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .trim();
-    Ok(crate::character::strip_filler_phrases(text))
+    Ok(crate::character::strip_filler_phrases(text.trim()))
 }
 
 fn assemble_snapshot(

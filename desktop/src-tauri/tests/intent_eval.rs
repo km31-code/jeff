@@ -2,8 +2,8 @@
 // gated on OPENAI_API_KEY — skips when not set so ci does not require credentials.
 // run with: cargo test --manifest-path src-tauri/Cargo.toml --test intent_eval -- --nocapture
 
-use jeff_desktop::classifier::classify_intent;
 use jeff_desktop::latency;
+use jeff_desktop::model_router::{ModelRouter, RouterConfig};
 use serde::Deserialize;
 use std::time::Instant;
 
@@ -24,13 +24,17 @@ struct EvalExample {
 
 #[test]
 fn intent_classifier_accuracy_and_latency() {
-    let api_key = match std::env::var("OPENAI_API_KEY") {
-        Ok(k) if !k.trim().is_empty() => k,
+    // apex a1: classification routes through the model router (reflex tier).
+    // the router resolves OPENAI_API_KEY from env; this gate only skips the
+    // live eval when no credentials are available (ci safety).
+    match std::env::var("OPENAI_API_KEY") {
+        Ok(k) if !k.trim().is_empty() => {}
         _ => {
             println!("[intent_eval] OPENAI_API_KEY not set — skipping live eval");
             return;
         }
-    };
+    }
+    let router = ModelRouter::new(RouterConfig::default());
 
     let fixture_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -50,8 +54,9 @@ fn intent_classifier_accuracy_and_latency() {
 
     for (i, ex) in examples.iter().enumerate() {
         let start = Instant::now();
-        let result = classify_intent(&ex.input, &api_key)
-            .unwrap_or_else(|e| panic!("classify_intent failed on example {i}: {e}"));
+        let result = router
+            .classify(&ex.input)
+            .unwrap_or_else(|e| panic!("router classify failed on example {i}: {e}"));
         let elapsed = start.elapsed().as_millis();
         latencies_ms.push(elapsed);
 

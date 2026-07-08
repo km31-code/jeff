@@ -9,15 +9,27 @@ use std::{
 use crate::context_observer::{ActiveWindowContext, ContentObservationState};
 
 use crate::{
-    awareness_core::AwarenessCore, coworking::CoworkingRuntime, embedding::EmbeddingProvider,
-    providers::VoiceProvider, reasoning::ReasoningProvider, store::TaskStore,
-    streaming::SharedRegistry, subtask::SubTaskRunner, watcher::WatcherState,
+    awareness_core::AwarenessCore,
+    coworking::CoworkingRuntime,
+    embedding::EmbeddingProvider,
+    model_router::{ModelRouter, Tier},
+    providers::VoiceProvider,
+    reasoning::ReasoningProvider,
+    store::TaskStore,
+    streaming::SharedRegistry,
+    subtask::SubTaskRunner,
+    watcher::WatcherState,
 };
 
 #[derive(Clone)]
 pub struct JeffState {
     pub store: TaskStore,
     pub embeddings: Arc<dyn EmbeddingProvider>,
+    // apex a1: the model router owns tier→model resolution for every llm call.
+    pub model_router: Arc<ModelRouter>,
+    // conversation-tier handle kept under the legacy field name so existing
+    // call sites and their tests keep compiling; craft/judgment call sites
+    // use the explicit tier helpers below.
     pub reasoning: Arc<dyn ReasoningProvider>,
     pub voice: Arc<dyn VoiceProvider>,
     pub interaction_epoch: Arc<AtomicU64>,
@@ -36,7 +48,7 @@ impl JeffState {
     pub fn new(
         store: TaskStore,
         embeddings: Arc<dyn EmbeddingProvider>,
-        reasoning: Arc<dyn ReasoningProvider>,
+        model_router: Arc<ModelRouter>,
         voice: Arc<dyn VoiceProvider>,
     ) -> Self {
         let proactive_mode = store
@@ -44,9 +56,11 @@ impl JeffState {
             .ok()
             .flatten()
             .unwrap_or(true);
+        let reasoning = model_router.handle(Tier::Conversation);
         Self {
             store,
             embeddings,
+            model_router,
             reasoning,
             voice,
             interaction_epoch: Arc::new(AtomicU64::new(0)),
@@ -59,6 +73,16 @@ impl JeffState {
             awareness_core: Arc::new(AwarenessCore::new()),
             content_observation: Arc::new(Mutex::new(ContentObservationState::default())),
         }
+    }
+
+    // apex a1: explicit tier handles. craft = drafting/revision/subtask work;
+    // judgment = proactive synthesis, reorientation, drift evaluation.
+    pub fn craft_reasoning(&self) -> Arc<dyn ReasoningProvider> {
+        self.model_router.handle(Tier::Craft)
+    }
+
+    pub fn judgment_reasoning(&self) -> Arc<dyn ReasoningProvider> {
+        self.model_router.handle(Tier::Judgment)
     }
 
     pub fn next_interaction_epoch(&self) -> u64 {

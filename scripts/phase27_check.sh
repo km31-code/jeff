@@ -56,8 +56,10 @@ grep_check "UserProfile reads reorientation weight" "trigger_weight_reorientatio
 grep_check "should_speak_proactively function present" "pub fn should_speak_proactively" "$SRC/awareness_core.rs"
 grep_check "synthesize_proactive_message function present" "pub async fn synthesize_proactive_message" "$SRC/awareness_core.rs"
 grep_check "synthesis uses character reorientation prompt" "build_reorientation_system_prompt" "$SRC/awareness_core.rs"
-grep_check "synthesis uses gpt-4o-mini" "gpt-4o-mini" "$SRC/awareness_core.rs"
-grep_check "synthesis has 5 second timeout" "Duration::from_secs(5)" "$SRC/awareness_core.rs"
+# apex a1: synthesis routes through the model router at judgment tier; the
+# 5-second timeout from the phase 27 spec is preserved as timeout_ms.
+grep_check "synthesis uses judgment tier" "Tier::Judgment" "$SRC/awareness_core.rs"
+grep_check "synthesis has 5 second timeout" "timeout_ms: Some(5000)" "$SRC/awareness_core.rs"
 grep_check "synthesis strips filler phrases" "strip_filler_phrases" "$SRC/awareness_core.rs"
 
 grep_check "synthesis_log table migration present" "CREATE TABLE IF NOT EXISTS synthesis_log" "$SRC/store.rs"

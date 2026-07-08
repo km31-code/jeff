@@ -70,6 +70,7 @@ import {
   setActiveTask,
   setPreferredWorkspaceFolder,
   startSubtaskChain,
+  storeAnthropicApiKey,
   storeOpenAiApiKey,
   transcribeAudio,
   validateOpenAiApiKey
@@ -395,6 +396,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(1);
   const [onboardingBusy, setOnboardingBusy] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
+  const [anthropicKeyInput, setAnthropicKeyInput] = useState("");
   const [apiKeyValidation, setApiKeyValidation] =
     useState<ApiKeyValidationDto | null>(null);
   const [workspaceFolder, setWorkspaceFolder] = useState<string | null>(null);
@@ -1402,6 +1404,22 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     setOnboardingStep(2);
   }, []);
 
+  // apex a1: optionally stores the anthropic key alongside the openai key.
+  // stored without a validation call — the model router falls back to openai
+  // if the key turns out to be unusable.
+  const maybeStoreAnthropicKey = useCallback(async () => {
+    const trimmedAnthropic = anthropicKeyInput.trim();
+    if (!trimmedAnthropic) {
+      return;
+    }
+    try {
+      await storeAnthropicApiKey(trimmedAnthropic);
+      setAnthropicKeyInput("");
+    } catch (error) {
+      console.warn(`[jeff] anthropic_key_store_failed: ${String(error)}`);
+    }
+  }, [anthropicKeyInput]);
+
   const handleOnboardingValidateApiKey = useCallback(async () => {
     const trimmed = apiKeyInput.trim();
 
@@ -1410,6 +1428,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
         is_valid: true,
         message: "Using existing stored API key."
       });
+      await maybeStoreAnthropicKey();
       setOnboardingStep(3);
       return;
     }
@@ -1424,6 +1443,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
       }
 
       await storeOpenAiApiKey(trimmed);
+      await maybeStoreAnthropicKey();
       await refreshOnboarding(false);
       setOnboardingStep(3);
     } catch (error) {
@@ -1434,7 +1454,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     } finally {
       setOnboardingBusy(false);
     }
-  }, [apiKeyInput, onboardingStatus?.has_stored_api_key, refreshOnboarding]);
+  }, [apiKeyInput, maybeStoreAnthropicKey, onboardingStatus?.has_stored_api_key, refreshOnboarding]);
 
   const handleChooseWorkspaceFolder = useCallback(async () => {
     setOnboardingBusy(true);
@@ -2112,6 +2132,18 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                   {onboardingStatus?.has_stored_api_key ? (
                     <p className="overlay-meta">A key is already available from {onboardingStatus.api_key_source}.</p>
                   ) : null}
+                  <p className="overlay-meta">
+                    Optional: add an Anthropic API key for Jeff's strongest reasoning. Without it, everything runs on OpenAI.
+                  </p>
+                  <input
+                    type="password"
+                    className="overlay-input"
+                    value={anthropicKeyInput}
+                    onChange={(event) => setAnthropicKeyInput(event.target.value)}
+                    placeholder="sk-ant-... (optional)"
+                    data-testid="onboarding-anthropic-key-input"
+                    disabled={onboardingBusy}
+                  />
                   {apiKeyValidation ? (
                     <p
                       className={apiKeyValidation.is_valid ? "overlay-meta" : "overlay-error"}

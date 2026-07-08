@@ -18,8 +18,11 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 pass() { echo "PASS: $1"; }
 
 # 1. classifier.rs exists with required symbols (m14.1)
+# apex a1: classification entry point moved to model_router.classify (reflex
+# tier); classifier.rs keeps the system prompt and response parsing.
 test -f "$CLASSIFIER_RS" || fail "classifier.rs missing"
-grep -q "fn classify_intent" "$CLASSIFIER_RS" || fail "classify_intent function missing from classifier.rs"
+MODEL_ROUTER_RS="$ROOT_DIR/desktop/src-tauri/src/model_router.rs"
+grep -q "fn classify" "$MODEL_ROUTER_RS" || fail "classify function missing from model_router.rs"
 grep -q "fn parse_classification" "$CLASSIFIER_RS" || fail "parse_classification function missing from classifier.rs"
 # request formatting may live in classifier.rs or provider seam after phase 17 refactor.
 if ! grep -q "response_format" "$CLASSIFIER_RS" && ! grep -q "response_format" "$PROVIDERS_RS"; then
@@ -87,8 +90,10 @@ grep -q "intent_classifier_timeout" "$APP_TSX" || fail "intent classifier timeou
 pass "classifier integration with keyword fallback present in App.tsx (m14.3)"
 
 # 9. explicit timeout budget configured on frontend and backend classifier
+# apex a1: the backend timeout constant moved to model_router.rs with the
+# rest of the classification dispatch (CLASSIFY_TIMEOUT_OPENAI_MS).
 grep -q "INTENT_CLASSIFIER_TIMEOUT_MS" "$APP_TSX" || fail "frontend classifier timeout constant missing"
-grep -q "REQUEST_TIMEOUT_MS" "$CLASSIFIER_RS" || fail "backend classifier timeout constant missing"
+grep -q "CLASSIFY_TIMEOUT_OPENAI_MS" "$MODEL_ROUTER_RS" || fail "backend classifier timeout constant missing"
 pass "frontend and backend timeout budgets are explicitly configured"
 
 # 10. unknown-intent clarify path is explicit

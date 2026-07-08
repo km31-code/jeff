@@ -3,7 +3,14 @@ use reqwest::blocking::{multipart, Client};
 use serde::Deserialize;
 use std::time::Duration;
 
-use crate::models::{IntentClassificationDto, SpeechSynthesisDto, TranscriptionResultDto};
+use crate::models::{SpeechSynthesisDto, TranscriptionResultDto};
+
+// apex a1: anthropic messages api adapter, dispatched to by the model router.
+pub mod anthropic;
+
+// tts model constant lives here so no call site outside providers/ names a
+// model string (apex a1 grep gate). replaced by the voice session work in c4.
+pub const OPENAI_TTS_MODEL: &str = "gpt-4o-mini-tts";
 
 pub trait SpeechToTextProvider: Send + Sync {
     fn transcribe(&self, audio_bytes: &[u8], mime_type: &str) -> Result<String>;
@@ -21,14 +28,6 @@ pub trait EmbeddingsProvider: Send + Sync {
     fn embed_text(&self, text: &str) -> Result<Vec<f32>>;
 }
 
-pub trait ClassifierProvider: Send + Sync {
-    fn classify(
-        &self,
-        text: &str,
-        api_key: &str,
-    ) -> std::result::Result<IntentClassificationDto, String>;
-}
-
 // composite voice seam: transcription + synthesis behind a single injectable interface.
 // concrete implementation is OpenAiVoiceProvider in voice.rs; state.rs holds
 // Arc<dyn VoiceProvider> so the call path is provider-agnostic.
@@ -41,72 +40,9 @@ pub trait VoiceProvider: Send + Sync {
     fn synthesize_speech(&self, text: &str, voice: &str) -> Result<SpeechSynthesisDto>;
 }
 
-#[derive(Clone)]
-pub struct OpenAiReasoningProvider {
-    client: Client,
-    model: String,
-}
-
-impl OpenAiReasoningProvider {
-    pub fn from_env() -> Self {
-        Self {
-            client: Client::new(),
-            model: "gpt-4o-mini".to_string(),
-        }
-    }
-}
-
-impl ReasoningModelProvider for OpenAiReasoningProvider {
-    fn generate_response(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        let api_key = crate::secrets::resolve_openai_api_key_required()?;
-
-        let response = self
-            .client
-            .post("https://api.openai.com/v1/chat/completions")
-            .bearer_auth(&api_key)
-            .json(&serde_json::json!({
-                "model": self.model,
-                "temperature": 0,
-                "messages": [
-                    { "role": "system", "content": system_prompt },
-                    { "role": "user", "content": user_prompt }
-                ]
-            }))
-            .send()
-            .context("failed to call OpenAI chat completions API")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .unwrap_or_else(|_| "<unreadable-body>".to_string());
-            return Err(anyhow!(
-                "OpenAI reasoning request failed with status {}: {}",
-                status,
-                body
-            ));
-        }
-
-        let payload: ChatCompletionResponse = response
-            .json()
-            .context("failed to parse chat completions response")?;
-
-        let content = payload
-            .choices
-            .into_iter()
-            .next()
-            .map(|choice| choice.message.content)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-
-        if content.is_empty() {
-            Err(anyhow!("OpenAI reasoning response was empty"))
-        } else {
-            Ok(content)
-        }
-    }
-}
+// apex a1: the blocking OpenAiReasoningProvider struct is gone — blocking
+// generation lives in openai_generate_blocking below, dispatched by the
+// model router with the model injected per tier.
 
 #[derive(Clone)]
 pub struct OpenAiSttProvider {
@@ -306,83 +242,167 @@ impl EmbeddingsProvider for OpenAiEmbeddingsProvider {
     }
 }
 
-#[derive(Clone)]
-pub struct OpenAiClassifierProvider {
-    model: String,
+// ---- apex a1: parameterized openai generation for the model router ----------
+// free functions rather than provider structs: the router owns tier→model
+// resolution, so these take the model explicitly and return usage for the
+// cost governor (a4).
+
+fn openai_chat_body(
+    model: &str,
+    system: &str,
+    user: &str,
+    temperature: f32,
+    max_tokens: Option<u32>,
+    json_object: bool,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "temperature": temperature,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user }
+        ]
+    });
+    if let Some(max) = max_tokens {
+        body["max_tokens"] = serde_json::json!(max);
+    }
+    if json_object {
+        body["response_format"] = serde_json::json!({ "type": "json_object" });
+    }
+    body
 }
 
-impl OpenAiClassifierProvider {
-    pub fn new() -> Self {
-        Self {
-            model: crate::classifier::MODEL.to_string(),
-        }
+fn parse_openai_chat_response(
+    payload: ChatCompletionResponse,
+) -> Result<(String, crate::model_router::LlmUsage)> {
+    let usage = payload
+        .usage
+        .as_ref()
+        .map(|usage| crate::model_router::LlmUsage {
+            input_tokens: usage.prompt_tokens.unwrap_or(0),
+            output_tokens: usage.completion_tokens.unwrap_or(0),
+            cached_tokens: usage
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens)
+                .unwrap_or(0),
+        })
+        .unwrap_or_default();
+
+    let content = payload
+        .choices
+        .into_iter()
+        .next()
+        .map(|choice| choice.message.content)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    if content.is_empty() {
+        Err(anyhow!("OpenAI response was empty"))
+    } else {
+        Ok((content, usage))
     }
 }
 
-impl ClassifierProvider for OpenAiClassifierProvider {
-    fn classify(
-        &self,
-        text: &str,
-        api_key: &str,
-    ) -> std::result::Result<IntentClassificationDto, String> {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return Ok(IntentClassificationDto {
-                intent: crate::models::IntentLabel::Unknown,
-                confidence: 0.0,
-                slots: crate::models::IntentSlotsDto::default(),
-            });
-        }
+pub fn openai_generate_blocking(
+    model: &str,
+    system: &str,
+    user: &str,
+    temperature: f32,
+    max_tokens: Option<u32>,
+    json_object: bool,
+    timeout_ms: Option<u64>,
+) -> Result<(String, crate::model_router::LlmUsage)> {
+    let api_key = crate::secrets::resolve_openai_api_key_required()?;
 
-        let client = Client::builder()
-            .timeout(Duration::from_millis(crate::classifier::REQUEST_TIMEOUT_MS))
-            .connect_timeout(Duration::from_millis(crate::classifier::REQUEST_TIMEOUT_MS))
-            .build()
-            .map_err(|err| {
-                format!("failed to build HTTP client for intent classification: {err}")
-            })?;
-
-        let response = client
-            .post("https://api.openai.com/v1/chat/completions")
-            .bearer_auth(api_key)
-            .json(&serde_json::json!({
-                "model": self.model,
-                "temperature": 0,
-                "response_format": { "type": "json_object" },
-                "messages": [
-                    { "role": "system", "content": crate::classifier::SYSTEM_PROMPT },
-                    { "role": "user", "content": trimmed }
-                ]
-            }))
-            .send()
-            .map_err(|err| {
-                format!("failed to call OpenAI chat completions for intent classification: {err}")
-            })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .unwrap_or_else(|_| "<unreadable>".to_string());
-            return Err(format!(
-                "intent classifier request failed with status {}: {}",
-                status, body
-            ));
-        }
-
-        let payload: ClassifierApiResponse = response
-            .json()
-            .map_err(|err| format!("failed to parse intent classifier API response: {err}"))?;
-
-        let content = payload
-            .choices
-            .into_iter()
-            .next()
-            .map(|choice| choice.message.content)
-            .ok_or_else(|| "intent classifier response contained no choices".to_string())?;
-
-        crate::classifier::parse_classification(&content).map_err(|err| err.to_string())
+    let mut builder = Client::builder();
+    if let Some(timeout) = timeout_ms {
+        builder = builder
+            .timeout(Duration::from_millis(timeout))
+            .connect_timeout(Duration::from_millis(timeout));
     }
+    let client = builder.build().context("failed to build openai client")?;
+
+    let response = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(&api_key)
+        .json(&openai_chat_body(
+            model,
+            system,
+            user,
+            temperature,
+            max_tokens,
+            json_object,
+        ))
+        .send()
+        .context("failed to call OpenAI chat completions API")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .unwrap_or_else(|_| "<unreadable-body>".to_string());
+        return Err(anyhow!(
+            "OpenAI request failed with status {}: {}",
+            status,
+            body
+        ));
+    }
+
+    let payload: ChatCompletionResponse = response
+        .json()
+        .context("failed to parse chat completions response")?;
+    parse_openai_chat_response(payload)
+}
+
+pub async fn openai_generate_async(
+    model: &str,
+    system: &str,
+    user: &str,
+    temperature: f32,
+    max_tokens: Option<u32>,
+    json_object: bool,
+    timeout_ms: Option<u64>,
+) -> Result<(String, crate::model_router::LlmUsage)> {
+    let api_key = crate::secrets::resolve_openai_api_key_required()?;
+
+    let mut builder = reqwest::Client::builder();
+    if let Some(timeout) = timeout_ms {
+        builder = builder.timeout(Duration::from_millis(timeout));
+    }
+    let client = builder.build().context("failed to build openai client")?;
+
+    let response = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(&api_key)
+        .json(&openai_chat_body(
+            model,
+            system,
+            user,
+            temperature,
+            max_tokens,
+            json_object,
+        ))
+        .send()
+        .await
+        .context("failed to call OpenAI chat completions API")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "OpenAI request failed with status {}: {}",
+            status,
+            body
+        ));
+    }
+
+    let payload: ChatCompletionResponse = response
+        .json()
+        .await
+        .context("failed to parse chat completions response")?;
+    parse_openai_chat_response(payload)
 }
 
 fn extension_from_mime_type(mime_type: &str) -> &'static str {
@@ -399,6 +419,21 @@ fn extension_from_mime_type(mime_type: &str) -> &'static str {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     choices: Vec<ChatCompletionChoice>,
+    #[serde(default)]
+    usage: Option<OpenAiUsagePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiUsagePayload {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiPromptTokensDetails {
+    cached_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -426,17 +461,3 @@ struct OpenAiEmbeddingData {
     embedding: Vec<f32>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ClassifierApiResponse {
-    choices: Vec<ClassifierChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClassifierChoice {
-    message: ClassifierMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClassifierMessage {
-    content: String,
-}
