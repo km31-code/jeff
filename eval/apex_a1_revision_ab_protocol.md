@@ -10,6 +10,11 @@ with the stronger assessment and revision.
 - `legacy.jsonl`: one line per case from the pre-Apex/v2 path.
 - `apex.jsonl`: one line per case from the Apex router path.
 
+Generating model outputs and running the live intent eval send prompts to the
+configured external provider. Do that only after explicit approval for external
+eval disclosure. The A1 check requires `JEFF_RUN_EXTERNAL_EVAL=1` before it will
+run the live eval.
+
 Each output line must be:
 
 ```json

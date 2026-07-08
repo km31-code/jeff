@@ -87,8 +87,10 @@ echo "$ROUTER_TEST_OUT" | grep -q "test result: ok" || fail "model_router unit t
 echo "$ROUTER_TEST_OUT" | grep -q "FAILED" && fail "model_router unit tests failed"
 pass "model_router unit tests pass"
 
-# 9. behavioral: live classification through the router (gated on key)
-if [ -n "${OPENAI_API_KEY:-}" ]; then
+# 9. behavioral: live classification through the router. this sends eval
+# prompts to the configured provider, so it requires an explicit opt-in in
+# addition to OPENAI_API_KEY.
+if [ "${JEFF_RUN_EXTERNAL_EVAL:-}" = "1" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
   if ! EVAL_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test --test intent_eval --quiet 2>&1); then
     echo "$EVAL_OUT"
     fail "live intent eval through router failed"
@@ -97,7 +99,7 @@ if [ -n "${OPENAI_API_KEY:-}" ]; then
   echo "$EVAL_OUT" | grep -q "FAILED" && fail "live intent eval through router failed"
   pass "live intent eval through router passes"
 else
-  echo "SKIP: OPENAI_API_KEY not set — live eval skipped"
+  echo "SKIP: set JEFF_RUN_EXTERNAL_EVAL=1 with OPENAI_API_KEY to run live external eval"
 fi
 
 echo "--- apex a1 check passed ---"
