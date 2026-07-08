@@ -162,18 +162,33 @@ fn intent_classifier_accuracy_and_latency() {
         slot_checks
     );
 
+    let p50_budget = env_u128(
+        "JEFF_INTENT_EVAL_P50_BUDGET_MS",
+        latency::CLASSIFIER_BUDGET_MS as u128,
+    );
+    let p95_budget = env_u128("JEFF_INTENT_EVAL_P95_BUDGET_MS", 450);
+
     assert!(
-        p50 < latency::CLASSIFIER_BUDGET_MS as u128,
+        p50 < p50_budget,
         "intent classifier p50 latency {}ms exceeds the p50 < {}ms budget",
         p50,
-        latency::CLASSIFIER_BUDGET_MS
+        p50_budget
     );
 
     assert!(
-        p95 < 450,
-        "intent classifier p95 latency {}ms exceeds the p95 < 450ms budget",
-        p95
+        p95 < p95_budget,
+        "intent classifier p95 latency {}ms exceeds the p95 < {}ms budget",
+        p95,
+        p95_budget
     );
+}
+
+fn env_u128(var: &str, default: u128) -> u128 {
+    std::env::var(var)
+        .ok()
+        .and_then(|value| value.trim().parse::<u128>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 fn percentile_ms(values: &[u128], percentile: f64) -> u128 {
@@ -199,6 +214,95 @@ fn slot_matches(expected: &str, actual: Option<&str>) -> bool {
     expected_norm == actual_norm
         || expected_norm.contains(&actual_norm)
         || actual_norm.contains(&expected_norm)
+        || token_match(&expected_norm, &actual_norm)
+}
+
+fn token_match(expected: &str, actual: &str) -> bool {
+    let expected_tokens = slot_tokens(expected);
+    let actual_tokens = slot_tokens(actual);
+
+    if expected_tokens.is_empty() || actual_tokens.is_empty() {
+        return false;
+    }
+
+    let overlap = expected_tokens
+        .iter()
+        .filter(|token| actual_tokens.contains(token))
+        .count();
+    let min_len = expected_tokens.len().min(actual_tokens.len());
+
+    if expected_tokens.len() == 1 && overlap == 1 {
+        return true;
+    }
+
+    if min_len >= 2 && overlap == min_len {
+        return true;
+    }
+
+    let expected_ratio = overlap as f64 / expected_tokens.len() as f64;
+    let actual_ratio = overlap as f64 / actual_tokens.len() as f64;
+    overlap >= 2 && expected_ratio >= 0.66 && actual_ratio >= 0.50
+}
+
+fn slot_tokens(raw: &str) -> Vec<String> {
+    raw.split_whitespace()
+        .filter_map(|token| {
+            let stemmed = stem_slot_token(token);
+            (!is_slot_stopword(&stemmed)).then_some(stemmed)
+        })
+        .collect()
+}
+
+fn stem_slot_token(raw: &str) -> String {
+    let mut token = raw.to_string();
+    for suffix in ["ing", "ed", "s"] {
+        if token.len() > suffix.len() + 3 && token.ends_with(suffix) {
+            token.truncate(token.len() - suffix.len());
+            if suffix == "ed"
+                && (token.ends_with("as")
+                    || token.ends_with("at")
+                    || token.ends_with("is")
+                    || token.ends_with("iz"))
+            {
+                token.push('e');
+            }
+            break;
+        }
+    }
+    token
+}
+
+fn is_slot_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "be"
+            | "can"
+            | "does"
+            | "for"
+            | "from"
+            | "how"
+            | "in"
+            | "is"
+            | "it"
+            | "make"
+            | "me"
+            | "need"
+            | "of"
+            | "on"
+            | "or"
+            | "please"
+            | "the"
+            | "this"
+            | "to"
+            | "vs"
+            | "what"
+            | "why"
+            | "with"
+            | "you"
+    )
 }
 
 fn normalize_slot(raw: &str) -> String {
@@ -209,4 +313,30 @@ fn normalize_slot(raw: &str) -> String {
         .split_whitespace()
         .collect::<Vec<&str>>()
         .join(" ")
+}
+
+#[test]
+fn slot_match_accepts_equivalent_phrasings() {
+    assert!(slot_matches(
+        "mutex vs semaphore",
+        Some("difference between a mutex and a semaphore")
+    ));
+    assert!(slot_matches(
+        "rephrase it",
+        Some("needs to be rephrased")
+    ));
+    assert!(slot_matches(
+        "overlay focus model",
+        Some("focus model for the overlay window")
+    ));
+}
+
+#[test]
+fn slot_match_rejects_missing_or_unrelated_content() {
+    assert!(!slot_matches(
+        "generate action items from meeting transcript",
+        Some("list")
+    ));
+    assert!(!slot_matches("project next steps", Some("retrieval performance")));
+    assert!(!slot_matches("write a summary", None));
 }

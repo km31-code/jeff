@@ -33,6 +33,7 @@ pub const OPENAI_FALLBACK_MODEL: &str = "gpt-4o-mini";
 
 const CLASSIFY_TIMEOUT_OPENAI_MS: u64 = 300;
 const CLASSIFY_TIMEOUT_ANTHROPIC_MS: u64 = 2000;
+const CLASSIFY_TIMEOUT_OPENAI_ENV: &str = "JEFF_CLASSIFY_TIMEOUT_OPENAI_MS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -544,7 +545,10 @@ impl ModelRouter {
         }
         let cfg = self.resolve(Tier::Reflex);
         let timeout_ms = match cfg.provider {
-            ProviderKind::OpenAi => CLASSIFY_TIMEOUT_OPENAI_MS,
+            ProviderKind::OpenAi => timeout_override_ms(
+                std::env::var(CLASSIFY_TIMEOUT_OPENAI_ENV).ok().as_deref(),
+                CLASSIFY_TIMEOUT_OPENAI_MS,
+            ),
             ProviderKind::Anthropic => CLASSIFY_TIMEOUT_ANTHROPIC_MS,
         };
         let raw = self.generate_with(
@@ -569,6 +573,12 @@ impl ModelRouter {
             tier,
         })
     }
+}
+
+fn timeout_override_ms(raw: Option<&str>, default: u64) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 struct TierHandle {
@@ -706,6 +716,14 @@ mod tests {
         assert_eq!(request.max_tokens, Some(12));
         assert_eq!(request.timeout_ms, Some(50));
         assert!(request.json_schema.is_some());
+    }
+
+    #[test]
+    fn timeout_override_ignores_invalid_values() {
+        assert_eq!(timeout_override_ms(None, 300), 300);
+        assert_eq!(timeout_override_ms(Some(""), 300), 300);
+        assert_eq!(timeout_override_ms(Some("0"), 300), 300);
+        assert_eq!(timeout_override_ms(Some("5000"), 300), 5000);
     }
 
     #[test]

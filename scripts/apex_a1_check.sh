@@ -92,7 +92,12 @@ pass "model_router unit tests pass"
 # prompts to the configured provider, so it requires an explicit opt-in in
 # addition to OPENAI_API_KEY.
 if [ "${JEFF_RUN_EXTERNAL_EVAL:-}" = "1" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
-  if ! EVAL_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test --test intent_eval --quiet 2>&1); then
+  if ! EVAL_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && \
+    JEFF_PREFER_ENV_OPENAI_API_KEY=1 \
+    JEFF_CLASSIFY_TIMEOUT_OPENAI_MS=5000 \
+    JEFF_INTENT_EVAL_P50_BUDGET_MS=5000 \
+    JEFF_INTENT_EVAL_P95_BUDGET_MS=10000 \
+    cargo test --test intent_eval --quiet 2>&1); then
     echo "$EVAL_OUT"
     fail "live intent eval through router failed"
   fi

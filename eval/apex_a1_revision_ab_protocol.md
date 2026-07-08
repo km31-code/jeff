@@ -57,6 +57,12 @@ Limited outputs are smoke-test artifacts only. Final A1 scoring must unset
 `apex.jsonl`. Harder model calls should be explicit model overrides, not the
 default test path.
 
+The scripted live router eval sets `JEFF_PREFER_ENV_OPENAI_API_KEY=1` so a fresh
+repo `.env` key is used even when the app keychain has an older stored key.
+It also widens the classifier timeout and latency assertion for the live network
+eval. Normal app key resolution and the runtime classifier timeout remain
+keychain-first and tight by default.
+
 3. Run:
 
 ```sh

@@ -6,6 +6,7 @@ use crate::onboarding::{API_KEY_SOURCE_ENV, API_KEY_SOURCE_KEYCHAIN, API_KEY_SOU
 pub const OPENAI_KEYCHAIN_SERVICE: &str = "com.jeff.desktop";
 pub const OPENAI_KEYCHAIN_ACCOUNT: &str = "openai_api_key";
 pub const ANTHROPIC_KEYCHAIN_ACCOUNT: &str = "anthropic_api_key";
+pub const PREFER_ENV_OPENAI_KEY_VAR: &str = "JEFF_PREFER_ENV_OPENAI_API_KEY";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAiKeyResolution {
@@ -93,10 +94,23 @@ fn env_or_none_resolution(env_value: Option<String>) -> OpenAiKeyResolution {
     }
 }
 
+#[allow(dead_code)]
 pub fn resolve_openai_api_key_with_store<S: OpenAiKeyStore>(
     store: &S,
     env_value: Option<String>,
 ) -> OpenAiKeyResolution {
+    resolve_openai_api_key_with_preference(store, env_value, false)
+}
+
+pub fn resolve_openai_api_key_with_preference<S: OpenAiKeyStore>(
+    store: &S,
+    env_value: Option<String>,
+    prefer_env: bool,
+) -> OpenAiKeyResolution {
+    if prefer_env && env_value.is_some() {
+        return env_or_none_resolution(env_value);
+    }
+
     match store.get_openai_api_key() {
         Ok(Some(api_key)) => OpenAiKeyResolution {
             api_key: Some(api_key),
@@ -111,7 +125,20 @@ pub fn resolve_openai_api_key_with_store<S: OpenAiKeyStore>(
 }
 
 pub fn resolve_openai_api_key() -> OpenAiKeyResolution {
-    resolve_openai_api_key_with_store(&SystemOpenAiKeyStore, openai_api_key_from_env())
+    resolve_openai_api_key_with_preference(
+        &SystemOpenAiKeyStore,
+        openai_api_key_from_env(),
+        prefer_env_openai_api_key(),
+    )
+}
+
+fn prefer_env_openai_api_key() -> bool {
+    matches!(
+        std::env::var(PREFER_ENV_OPENAI_KEY_VAR)
+            .unwrap_or_default()
+            .trim(),
+        "1" | "true" | "TRUE" | "yes" | "YES"
+    )
 }
 
 pub fn resolve_openai_api_key_required() -> Result<String> {
@@ -219,6 +246,18 @@ mod tests {
         let resolved = resolve_openai_api_key_with_store(&store, Some("sk-env".to_string()));
         assert_eq!(resolved.source, API_KEY_SOURCE_KEYCHAIN);
         assert_eq!(resolved.api_key.as_deref(), Some("sk-keychain"));
+    }
+
+    #[test]
+    fn resolve_can_prefer_env_for_eval_runs() {
+        let store = MockStore {
+            key: Some("sk-keychain".to_string()),
+            fail: false,
+        };
+        let resolved =
+            resolve_openai_api_key_with_preference(&store, Some("sk-env".to_string()), true);
+        assert_eq!(resolved.source, API_KEY_SOURCE_ENV);
+        assert_eq!(resolved.api_key.as_deref(), Some("sk-env"));
     }
 
     #[test]
