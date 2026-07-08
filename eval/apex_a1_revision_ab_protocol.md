@@ -28,8 +28,16 @@ scripts/apex_a1_ab_packet.sh legacy.jsonl apex.jsonl
 
 4. Give the generated `packet.md` to the evaluator. Do not give them
    `answer_key.json`.
-5. Record one winner per case: `A`, `B`, or `tie`.
-6. Reveal the answer key and count Apex wins.
+5. Fill `scorecard_template.json` with one winner per case: `A`, `B`, or
+   `tie`.
+6. Reveal the answer key and score the result:
+
+```sh
+scripts/apex_a1_ab_score.sh \
+  artifacts/apex_a1_ab/answer_key.json \
+  artifacts/apex_a1_ab/filled_scorecard.json \
+  artifacts/apex_a1_ab/summary.json
+```
 
 ## pass bar
 

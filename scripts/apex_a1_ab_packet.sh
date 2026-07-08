@@ -114,6 +114,7 @@ packet_lines = [
     "",
 ]
 answer_key = []
+scorecard = []
 
 for case in cases:
     case_id = case["id"]
@@ -125,6 +126,11 @@ for case in cases:
         "id": case_id,
         "A": "apex" if apex_is_a else "legacy",
         "B": "legacy" if apex_is_a else "apex",
+    })
+    scorecard.append({
+        "id": case_id,
+        "winner": "",
+        "notes": "",
     })
     packet_lines.extend([
         f"## {case_id}: {case['artifact_title']}",
@@ -156,6 +162,11 @@ for case in cases:
     json.dumps(answer_key, indent=2) + "\n",
     encoding="utf-8",
 )
+(out / "scorecard_template.json").write_text(
+    json.dumps(scorecard, indent=2) + "\n",
+    encoding="utf-8",
+)
 print(f"PASS: wrote {out / 'packet.md'}")
 print(f"PASS: wrote {out / 'answer_key.json'}")
+print(f"PASS: wrote {out / 'scorecard_template.json'}")
 PY

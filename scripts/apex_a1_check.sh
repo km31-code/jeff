@@ -78,6 +78,7 @@ pass "usage logging present"
 
 # 7. blind a/b gate packet is present and well-formed
 "$ROOT_DIR/scripts/apex_a1_ab_packet.sh" --check
+"$ROOT_DIR/scripts/apex_a1_ab_score.sh" --check
 pass "blind a/b packet protocol is present"
 
 # 8. behavioral: router unit tests
