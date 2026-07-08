@@ -40,6 +40,23 @@ JEFF_RUN_EXTERNAL_EVAL=1 scripts/apex_a1_ab_generate.sh apex \
 The generator supports model/provider overrides for reproducibility:
 `APEX_A1_LEGACY_MODEL`, `APEX_A1_APEX_PROVIDER`, and `APEX_A1_APEX_MODEL`.
 
+## spend discipline
+
+Use `gpt-4o-mini` and OpenAI-only provider overrides for smoke tests. To verify
+plumbing without spending on the full packet, set `APEX_A1_CASE_LIMIT` to a
+small number:
+
+```sh
+JEFF_RUN_EXTERNAL_EVAL=1 APEX_A1_CASE_LIMIT=2 \
+  APEX_A1_APEX_PROVIDER=openai APEX_A1_APEX_MODEL=gpt-4o-mini \
+  scripts/apex_a1_ab_generate.sh apex artifacts/apex_a1_ab/apex-smoke.jsonl
+```
+
+Limited outputs are smoke-test artifacts only. Final A1 scoring must unset
+`APEX_A1_CASE_LIMIT` and generate all twenty cases for both `legacy.jsonl` and
+`apex.jsonl`. Harder model calls should be explicit model overrides, not the
+default test path.
+
 3. Run:
 
 ```sh

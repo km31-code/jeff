@@ -47,6 +47,7 @@ optional overrides:
   APEX_A1_LEGACY_MODEL=gpt-4o-mini
   APEX_A1_APEX_PROVIDER=anthropic|openai
   APEX_A1_APEX_MODEL=<model name>
+  APEX_A1_CASE_LIMIT=<n>  smoke-test only; final scoring requires all 20 cases
 EOF
   exit 0
 fi
@@ -74,6 +75,20 @@ cases_path, mode, out_path = sys.argv[1:4]
 
 with open(cases_path, "r", encoding="utf-8") as fh:
     cases = json.load(fh)
+
+case_limit_raw = os.environ.get("APEX_A1_CASE_LIMIT", "").strip()
+if case_limit_raw:
+    try:
+        case_limit = int(case_limit_raw)
+    except ValueError as exc:
+        raise SystemExit("APEX_A1_CASE_LIMIT must be an integer") from exc
+    if case_limit <= 0 or case_limit > len(cases):
+        raise SystemExit(f"APEX_A1_CASE_LIMIT must be between 1 and {len(cases)}")
+    cases = cases[:case_limit]
+    print(
+        f"INFO: limiting generation to {case_limit} case(s); "
+        "do not use this output for final A1 scoring"
+    )
 
 SYSTEM_PROMPT = """You are Jeff, a direct writing coworker.
 Revise the given artifact according to the instruction.
