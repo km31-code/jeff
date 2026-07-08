@@ -90,6 +90,101 @@ pub struct LlmUsage {
     pub cached_tokens: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelMessageRole {
+    User,
+    Assistant,
+}
+
+impl ModelMessageRole {
+    fn as_prompt_label(&self) -> &'static str {
+        match self {
+            ModelMessageRole::User => "user",
+            ModelMessageRole::Assistant => "assistant",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelMessage {
+    pub role: ModelMessageRole,
+    pub content: String,
+}
+
+impl ModelMessage {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: ModelMessageRole::User,
+            content: content.into(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: ModelMessageRole::Assistant,
+            content: content.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelRequest {
+    pub tier: Tier,
+    pub system_blocks: Vec<SystemBlock>,
+    pub messages: Vec<ModelMessage>,
+    pub json_schema: Option<serde_json::Value>,
+    pub stream: bool,
+    pub max_tokens: Option<u32>,
+    pub temperature: f32,
+    pub timeout_ms: Option<u64>,
+    #[allow(dead_code)]
+    pub purpose: Option<String>,
+}
+
+impl ModelRequest {
+    pub fn new(tier: Tier, system: impl Into<String>, user: impl Into<String>) -> Self {
+        Self {
+            tier,
+            system_blocks: vec![SystemBlock {
+                text: system.into(),
+                cache_hint: CacheHint::Volatile,
+            }],
+            messages: vec![ModelMessage::user(user)],
+            json_schema: None,
+            stream: false,
+            max_tokens: None,
+            temperature: 0.0,
+            timeout_ms: None,
+            purpose: None,
+        }
+    }
+
+    pub fn with_options(mut self, options: GenerateOptions) -> Self {
+        self.temperature = options.temperature;
+        self.max_tokens = options.max_tokens;
+        self.timeout_ms = options.timeout_ms;
+        if options.json_object {
+            self.json_schema = Some(serde_json::json!({ "type": "json_object" }));
+        }
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelResponse {
+    pub text: String,
+    #[allow(dead_code)]
+    pub usage: LlmUsage,
+    #[allow(dead_code)]
+    pub provider: ProviderKind,
+    #[allow(dead_code)]
+    pub model: String,
+    #[allow(dead_code)]
+    pub tier: Tier,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
@@ -273,6 +368,84 @@ impl ModelRouter {
         );
     }
 
+    fn request_user_text(request: &ModelRequest) -> Result<String> {
+        let non_empty = request
+            .messages
+            .iter()
+            .filter_map(|message| {
+                let content = message.content.trim();
+                (!content.is_empty()).then_some((message.role.clone(), content.to_string()))
+            })
+            .collect::<Vec<_>>();
+
+        if non_empty.is_empty() {
+            return Err(anyhow!("model request contains no message content"));
+        }
+
+        if non_empty.len() == 1 && non_empty[0].0 == ModelMessageRole::User {
+            return Ok(non_empty[0].1.clone());
+        }
+
+        Ok(non_empty
+            .into_iter()
+            .map(|(role, content)| format!("{}: {}", role.as_prompt_label(), content))
+            .collect::<Vec<_>>()
+            .join("\n\n"))
+    }
+
+    pub fn route(&self, request: ModelRequest) -> Result<ModelResponse> {
+        if request.stream {
+            return Err(anyhow!(
+                "streaming model requests must use route_streaming"
+            ));
+        }
+
+        let system = join_system_blocks(&request.system_blocks);
+        let user = Self::request_user_text(&request)?;
+        let cfg = self.resolve(request.tier);
+        let json_object = request.json_schema.is_some();
+        let (text, usage) = match cfg.provider {
+            ProviderKind::OpenAi => crate::providers::openai_generate_blocking(
+                &cfg.model,
+                &system,
+                &user,
+                request.temperature,
+                request.max_tokens,
+                json_object,
+                request.timeout_ms,
+            )?,
+            ProviderKind::Anthropic => anthropic::generate_blocking(&AnthropicRequest {
+                model: &cfg.model,
+                system: &system,
+                user: &user,
+                temperature: request.temperature,
+                max_tokens: request.max_tokens,
+                json_only: json_object,
+                timeout_ms: request.timeout_ms,
+            })?,
+        };
+        self.log_usage(request.tier, &cfg, &usage);
+        Ok(ModelResponse {
+            text,
+            usage,
+            provider: cfg.provider,
+            model: cfg.model,
+            tier: request.tier,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn route_streaming(
+        &self,
+        mut request: ModelRequest,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<mpsc::Receiver<Result<String>>> {
+        request.stream = true;
+        let system = join_system_blocks(&request.system_blocks);
+        let user = Self::request_user_text(&request)?;
+        self.stream(request.tier, &system, &user, cancel)
+    }
+
     // blocking generation with default options (temperature 0, no cap).
     pub fn generate(&self, tier: Tier, system: &str, user: &str) -> Result<String> {
         self.generate_with(tier, system, user, GenerateOptions::default())
@@ -285,29 +458,9 @@ impl ModelRouter {
         user: &str,
         options: GenerateOptions,
     ) -> Result<String> {
-        let cfg = self.resolve(tier);
-        let (text, usage) = match cfg.provider {
-            ProviderKind::OpenAi => crate::providers::openai_generate_blocking(
-                &cfg.model,
-                system,
-                user,
-                options.temperature,
-                options.max_tokens,
-                options.json_object,
-                options.timeout_ms,
-            )?,
-            ProviderKind::Anthropic => anthropic::generate_blocking(&AnthropicRequest {
-                model: &cfg.model,
-                system,
-                user,
-                temperature: options.temperature,
-                max_tokens: options.max_tokens,
-                json_only: options.json_object,
-                timeout_ms: options.timeout_ms,
-            })?,
-        };
-        self.log_usage(tier, &cfg, &usage);
-        Ok(text)
+        Ok(self
+            .route(ModelRequest::new(tier, system, user).with_options(options))?
+            .text)
     }
 
     pub async fn generate_async(
@@ -500,6 +653,59 @@ mod tests {
             },
         ];
         assert_eq!(join_system_blocks(&blocks), "character\n\nsnapshot");
+    }
+
+    #[test]
+    fn model_request_preserves_single_user_prompt() {
+        let request = ModelRequest::new(Tier::Conversation, "system", "revise this");
+        assert_eq!(
+            ModelRouter::request_user_text(&request).unwrap(),
+            "revise this"
+        );
+    }
+
+    #[test]
+    fn model_request_labels_multi_turn_messages() {
+        let request = ModelRequest {
+            tier: Tier::Craft,
+            system_blocks: vec![SystemBlock {
+                text: "system".to_string(),
+                cache_hint: CacheHint::Stable,
+            }],
+            messages: vec![
+                ModelMessage::user("draft one"),
+                ModelMessage::assistant("drafted"),
+                ModelMessage::user("make it sharper"),
+            ],
+            json_schema: None,
+            stream: false,
+            max_tokens: None,
+            temperature: 0.0,
+            timeout_ms: None,
+            purpose: Some("test".to_string()),
+        };
+
+        assert_eq!(
+            ModelRouter::request_user_text(&request).unwrap(),
+            "user: draft one\n\nassistant: drafted\n\nuser: make it sharper"
+        );
+    }
+
+    #[test]
+    fn model_request_options_map_json_object() {
+        let request = ModelRequest::new(Tier::Reflex, "system", "classify").with_options(
+            GenerateOptions {
+                temperature: 0.2,
+                max_tokens: Some(12),
+                json_object: true,
+                timeout_ms: Some(50),
+            },
+        );
+
+        assert_eq!(request.temperature, 0.2);
+        assert_eq!(request.max_tokens, Some(12));
+        assert_eq!(request.timeout_ms, Some(50));
+        assert!(request.json_schema.is_some());
     }
 
     #[test]

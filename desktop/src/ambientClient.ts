@@ -24,6 +24,10 @@ export interface NotificationPayload {
   context_id?: number | null;
 }
 
+export function isOverlayWindow(): boolean {
+  return window.location.hash === "#overlay";
+}
+
 export function toggleOverlay(): Promise<void> {
   return invoke("ambient_toggle_overlay");
 }

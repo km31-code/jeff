@@ -77,19 +77,26 @@ pass "quiet_mode_suppresses_reorientation test passes"
 grep -q "is_quiet_mode" "$COMMANDS_RS" || fail "quiet mode guard (is_quiet_mode) missing from commands.rs"
 pass "quiet mode guard present in proactive commands (m15.3)"
 
-# 9. frontend: reorientationBanner and triggerTaskResume in App.tsx (m15.4)
-grep -q "reorientationBanner" "$APP_TSX" || fail "reorientationBanner state missing from App.tsx"
-grep -q "triggerTaskResume" "$APP_TSX" || fail "triggerTaskResume call missing from App.tsx"
-pass "re-orientation banner and triggerTaskResume present in App.tsx (m15.4)"
+# 9. frontend/current architecture: focus recording in overlay and background
+# monitor-driven reorientation delivery as proactive chat messages.
+grep -q "recordTaskFocus" "$ROOT_DIR/desktop/src/Overlay.tsx" || \
+  fail "recordTaskFocus call missing from Overlay.tsx"
+grep -q "spawn_ambient_monitor" "$MAIN_RS" || fail "ambient monitor not spawned in main.rs"
+grep -q "run_synthesis_check" "$PROACTIVE_RS" || fail "ambient monitor does not run synthesis check"
+grep -q "proactive_reorientation" "$PROACTIVE_RS" || \
+  fail "proactive_reorientation chat delivery missing from proactive.rs"
+pass "re-orientation is monitor-driven and delivered as proactive chat (m15.4/current)"
 
 # 10. frontend: drift detection after send and drift flag notice (m15.4)
 grep -q "checkTaskDrift" "$APP_TSX" || fail "checkTaskDrift call missing from App.tsx"
 grep -q "drift-flag-notice" "$APP_TSX" || fail "drift-flag-notice test id missing from App.tsx"
 pass "drift detection and drift-flag-notice present in App.tsx (m15.4)"
 
-# 11. frontend: triggerSpeculativeSubtask in App.tsx (m15.4)
-grep -q "triggerSpeculativeSubtask" "$APP_TSX" || fail "triggerSpeculativeSubtask call missing from App.tsx"
-pass "triggerSpeculativeSubtask wired in App.tsx (m15.4)"
+# 11. speculative subtask command/wrapper exists and surfaced in app state.
+grep -q "triggerSpeculativeSubtask" "$TAURI_CLIENT_TS" || \
+  fail "triggerSpeculativeSubtask wrapper missing from tauriClient.ts"
+grep -q "speculativeSubtask" "$APP_TSX" || fail "speculativeSubtask state missing from App.tsx"
+pass "triggerSpeculativeSubtask wrapper and app state present (m15.4/current)"
 
 # 12. speculative subtask offer card with correct test id (m15.4)
 grep -q "speculative-subtask-card" "$APP_TSX" || fail "speculative-subtask-card test id missing from App.tsx"
@@ -109,10 +116,12 @@ grep -q "quiet-mode-toggle" "$APP_TSX" || fail "quiet-mode-toggle test id missin
 grep -q "handleToggleQuietMode" "$APP_TSX" || fail "handleToggleQuietMode missing from App.tsx"
 pass "quiet mode toggle button present in companion header (m15.4)"
 
-# 16. reorientation banner test id and auto-dismiss (m15.4)
-grep -q "reorientation-banner" "$APP_TSX" || fail "reorientation-banner test id missing from App.tsx"
-grep -q "8000" "$APP_TSX" || fail "8 second auto-dismiss timer (8000ms) missing from App.tsx"
-pass "reorientation banner with auto-dismiss timer present (m15.4)"
+# 16. proactive reorientation uses conversation-shaped delivery, not a banner.
+grep -q "deliver_proactive_as_chat_message" "$COMMANDS_RS" "$PROACTIVE_RS" || \
+  fail "proactive chat delivery path missing"
+grep -q "deliver_proactive_inserts_message_with_correct_kind" "$PROACTIVE_RS" || \
+  fail "proactive chat delivery unit test missing"
+pass "reorientation delivered as proactive chat, not banner (m15.4/current)"
 
 # 17. typescript wrappers in tauriClient.ts (m15.4)
 grep -q "ReorientationDto" "$TAURI_CLIENT_TS" || fail "ReorientationDto interface missing from tauriClient.ts"

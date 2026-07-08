@@ -835,7 +835,7 @@ directional and may be re-scoped when their epoch begins.
 
 | ID | Milestone | Depends on | Status |
 |----|-----------|------------|--------|
-| A1 | Model router and capability tiers | — | code complete; pending user A/B (done-when 3) |
+| A1 | Model router and capability tiers | — | local gates hardened; pending live API eval + user A/B |
 | A2 | Cache-stable prompt assembly | A1 | not started |
 | A3 | Local model runtime (Reflex + embeddings) | A1 | not started |
 | A4 | Cost governor and spend visibility | A1 | not started |

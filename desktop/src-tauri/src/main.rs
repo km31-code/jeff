@@ -226,6 +226,17 @@ fn main() {
             // phase 23: manage calendar state for EventKit polling.
             app.manage(CalendarState::new());
 
+            // phase 11: the hidden workspace window also closes to hide.
+            if let Some(main_window) = app.get_webview_window("main") {
+                let main_window_for_close = main_window.clone();
+                main_window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = main_window_for_close.hide();
+                    }
+                });
+            }
+
             // phase 19: sync the macos SMAppService login-item registry with
             // the persisted preference. if registration fails, clear the
             // persisted setting so the tray checkmark cannot lie about state.

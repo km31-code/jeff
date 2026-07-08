@@ -1,13 +1,16 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import Root from "./Root";
+import { isOverlayWindow } from "./ambientClient";
 import "./styles.css";
 
-// single-window design: the overlay window is the only window. Root switches
-// between Overlay (companion bar) and App (workspace mode) by resizing the
-// same os window — no second window is created or managed.
 const rootElement = document.getElementById("root") as HTMLElement;
-document.body.classList.add("overlay-body");
+if (isOverlayWindow()) {
+  document.body.classList.add("overlay-body");
+}
+
+// Root owns the overlay/workspace switch inside the overlay window. the hidden
+// main window stays available as a close-to-hide workspace escape hatch.
 ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     <Root />

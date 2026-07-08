@@ -3,7 +3,7 @@ use reqwest::blocking::{multipart, Client};
 use serde::Deserialize;
 use std::time::Duration;
 
-use crate::models::{SpeechSynthesisDto, TranscriptionResultDto};
+use crate::models::{IntentClassificationDto, SpeechSynthesisDto, TranscriptionResultDto};
 
 // apex a1: anthropic messages api adapter, dispatched to by the model router.
 pub mod anthropic;
@@ -28,6 +28,11 @@ pub trait EmbeddingsProvider: Send + Sync {
     fn embed_text(&self, text: &str) -> Result<Vec<f32>>;
 }
 
+#[allow(dead_code)]
+pub trait ClassifierProvider: Send + Sync {
+    fn classify(&self, text: &str) -> Result<IntentClassificationDto>;
+}
+
 // composite voice seam: transcription + synthesis behind a single injectable interface.
 // concrete implementation is OpenAiVoiceProvider in voice.rs; state.rs holds
 // Arc<dyn VoiceProvider> so the call path is provider-agnostic.
@@ -40,9 +45,65 @@ pub trait VoiceProvider: Send + Sync {
     fn synthesize_speech(&self, text: &str, voice: &str) -> Result<SpeechSynthesisDto>;
 }
 
-// apex a1: the blocking OpenAiReasoningProvider struct is gone — blocking
-// generation lives in openai_generate_blocking below, dispatched by the
-// model router with the model injected per tier.
+// apex a1: call sites use the model router, but phase 17's provider seam
+// remains available for tests and fallback wiring.
+
+#[allow(dead_code)]
+#[derive(Clone)]
+pub struct OpenAiReasoningProvider {
+    model: String,
+}
+
+#[allow(dead_code)]
+impl OpenAiReasoningProvider {
+    pub fn with_model(model: String) -> Self {
+        Self { model }
+    }
+}
+
+impl ReasoningModelProvider for OpenAiReasoningProvider {
+    fn generate_response(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+        openai_generate_blocking(
+            &self.model,
+            system_prompt,
+            user_prompt,
+            0.0,
+            None,
+            false,
+            None,
+        )
+        .map(|(text, _usage)| text)
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+pub struct OpenAiClassifierProvider {
+    model: String,
+}
+
+#[allow(dead_code)]
+impl OpenAiClassifierProvider {
+    pub fn with_model(model: String) -> Self {
+        Self { model }
+    }
+}
+
+impl ClassifierProvider for OpenAiClassifierProvider {
+    fn classify(&self, text: &str) -> Result<IntentClassificationDto> {
+        let raw = openai_generate_blocking(
+            &self.model,
+            crate::classifier::SYSTEM_PROMPT,
+            text.trim(),
+            0.0,
+            Some(300),
+            true,
+            Some(300),
+        )?
+        .0;
+        crate::classifier::parse_classification(&raw)
+    }
+}
 
 #[derive(Clone)]
 pub struct OpenAiSttProvider {
@@ -460,4 +521,3 @@ struct OpenAiEmbeddingsResponse {
 struct OpenAiEmbeddingData {
     embedding: Vec<f32>,
 }
-

@@ -23,8 +23,12 @@ grep -q "pub enum Tier" "$MODEL_ROUTER_RS" || fail "Tier enum missing"
 grep -q "Reflex" "$MODEL_ROUTER_RS" || fail "Reflex tier missing"
 grep -q "pub struct RouterConfig" "$MODEL_ROUTER_RS" || fail "RouterConfig missing"
 grep -q "pub struct ModelRouter" "$MODEL_ROUTER_RS" || fail "ModelRouter missing"
+grep -q "pub struct ModelRequest" "$MODEL_ROUTER_RS" || fail "ModelRequest missing"
+grep -q "pub struct ModelResponse" "$MODEL_ROUTER_RS" || fail "ModelResponse missing"
 grep -q "pub struct SystemBlock" "$MODEL_ROUTER_RS" || fail "SystemBlock missing (a2 plumbing)"
 grep -q "pub struct LlmUsage" "$MODEL_ROUTER_RS" || fail "LlmUsage missing"
+grep -q "pub fn route(" "$MODEL_ROUTER_RS" || fail "route(request) API missing"
+grep -q "pub fn route_streaming" "$MODEL_ROUTER_RS" || fail "route_streaming(request) API missing"
 grep -q "fn stream" "$MODEL_ROUTER_RS" || fail "router stream dispatch missing"
 grep -q "fn classify" "$MODEL_ROUTER_RS" || fail "router classify missing"
 grep -q "fn handle" "$MODEL_ROUTER_RS" || fail "tier handle constructor missing"
@@ -62,21 +66,32 @@ grep -q "craft_reasoning" "$SRC/commands.rs" || fail "craft tier not used in com
 grep -q "judgment_reasoning" "$SRC/commands.rs" || fail "judgment tier not used in commands"
 grep -q "model_router: Arc<ModelRouter>" "$SRC/state.rs" || fail "model router not held in JeffState"
 grep -q "model_router.classify" "$SRC/commands.rs" || fail "classification not routed through router"
+grep -q "model_router.stream" "$SRC/chat_streaming.rs" || fail "streaming chat does not call router"
+grep -q "state.craft_reasoning().as_ref()" "$SRC/commands.rs" || fail "revision path does not use craft tier handle"
+grep -q "state.craft_reasoning()" "$SRC/commands.rs" || fail "subtask path does not use craft tier handle"
+grep -q "state.judgment_reasoning().as_ref()" "$SRC/commands.rs" || fail "proactive path does not use judgment tier handle"
 pass "call sites declare tiers (conversation/judgment/craft/reflex)"
 
 # 6. usage logging for the a4 cost governor
 grep -q "llm_usage" "$MODEL_ROUTER_RS" || fail "usage logging missing"
 pass "usage logging present"
 
-# 7. behavioral: router unit tests
+# 7. blind a/b gate packet is present and well-formed
+"$ROOT_DIR/scripts/apex_a1_ab_packet.sh" --check
+pass "blind a/b packet protocol is present"
+
+# 8. behavioral: router unit tests
 ROUTER_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test model_router --quiet 2>&1)
 echo "$ROUTER_TEST_OUT" | grep -q "test result: ok" || fail "model_router unit tests failed"
 echo "$ROUTER_TEST_OUT" | grep -q "FAILED" && fail "model_router unit tests failed"
 pass "model_router unit tests pass"
 
-# 8. behavioral: live classification through the router (gated on key)
+# 9. behavioral: live classification through the router (gated on key)
 if [ -n "${OPENAI_API_KEY:-}" ]; then
-  EVAL_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test --test intent_eval --quiet 2>&1)
+  if ! EVAL_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test --test intent_eval --quiet 2>&1); then
+    echo "$EVAL_OUT"
+    fail "live intent eval through router failed"
+  fi
   echo "$EVAL_OUT" | grep -q "test result: ok" || fail "live intent eval through router failed"
   echo "$EVAL_OUT" | grep -q "FAILED" && fail "live intent eval through router failed"
   pass "live intent eval through router passes"

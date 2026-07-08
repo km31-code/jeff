@@ -1,0 +1,142 @@
+[
+  {
+    "id": "a1-ab-001",
+    "artifact_title": "history essay introduction",
+    "artifact": "The American Revolution was a major event in history. It changed many things for many people and had a big effect on the future of the United States. This essay will talk about some causes and effects of the Revolution.",
+    "instruction": "Revise the opening so it makes a specific argument instead of announcing the topic.",
+    "judging_focus": "prefer the version that states a defensible thesis quickly and avoids generic setup"
+  },
+  {
+    "id": "a1-ab-002",
+    "artifact_title": "product spec problem statement",
+    "artifact": "Users sometimes do not finish onboarding. This is probably because the flow is long and asks for a lot of information. We should make onboarding better so more people complete it.",
+    "instruction": "Make the problem statement sharper and more testable.",
+    "judging_focus": "prefer the version that separates observed behavior from hypothesis and names a measurable outcome"
+  },
+  {
+    "id": "a1-ab-003",
+    "artifact_title": "legal motion paragraph",
+    "artifact": "The defendant's position should not be accepted. The contract language is clear and the plaintiff did what the contract required. Therefore, the court should reject the defendant's argument.",
+    "instruction": "Revise this into a more forceful paragraph for a motion.",
+    "judging_focus": "prefer the version that leads with the legal reason and keeps the tone precise"
+  },
+  {
+    "id": "a1-ab-004",
+    "artifact_title": "grant proposal abstract",
+    "artifact": "This project will study community gardens and public health. It will look at neighborhoods, food access, and social connection. The project is important because community gardens are becoming more popular.",
+    "instruction": "Rewrite this abstract so the value of the study is clearer.",
+    "judging_focus": "prefer the version that names the research gap and expected contribution"
+  },
+  {
+    "id": "a1-ab-005",
+    "artifact_title": "thesis transition",
+    "artifact": "Another important thing to consider is the role of newspapers. Newspapers were also part of the political environment and they influenced how people understood what was happening.",
+    "instruction": "Tighten this transition and make it less vague.",
+    "judging_focus": "prefer the version that shows why the next section follows from the previous one"
+  },
+  {
+    "id": "a1-ab-006",
+    "artifact_title": "customer email",
+    "artifact": "Hi Maya, I wanted to follow up on the issue from last week. We are still looking into it and hope to have an update soon. Thanks for your patience.",
+    "instruction": "Make this email more accountable without overpromising.",
+    "judging_focus": "prefer the version that gives a concrete next step and avoids empty reassurance"
+  },
+  {
+    "id": "a1-ab-007",
+    "artifact_title": "research methods section",
+    "artifact": "I interviewed people who had experience with the program. The interviews helped me understand what they thought. I then looked for common themes in what they said.",
+    "instruction": "Make this methods description sound more rigorous.",
+    "judging_focus": "prefer the version that specifies method, sample, and analysis without inventing facts"
+  },
+  {
+    "id": "a1-ab-008",
+    "artifact_title": "design critique",
+    "artifact": "The dashboard looks clean, but it might be confusing. There are many cards and the important information is not always obvious. It could be improved by making it simpler.",
+    "instruction": "Turn this into a direct, useful critique.",
+    "judging_focus": "prefer the version that names the hierarchy problem and gives an actionable fix"
+  },
+  {
+    "id": "a1-ab-009",
+    "artifact_title": "cover letter paragraph",
+    "artifact": "I am interested in this role because I have always wanted to work in this field. I believe my experience and skills would make me a good fit for your company.",
+    "instruction": "Make this paragraph specific and less generic.",
+    "judging_focus": "prefer the version that ties concrete experience to the role without padding"
+  },
+  {
+    "id": "a1-ab-010",
+    "artifact_title": "meeting summary",
+    "artifact": "We discussed the launch timeline and some concerns about engineering capacity. The team agreed that the timeline is tight but possible if we stay focused.",
+    "instruction": "Revise this into a useful executive summary.",
+    "judging_focus": "prefer the version that captures decision, risk, and owner/action clearly"
+  },
+  {
+    "id": "a1-ab-011",
+    "artifact_title": "argument paragraph",
+    "artifact": "Social media can be harmful for democracy because people see false information. This makes people believe things that are not true, and then they make political choices based on those beliefs.",
+    "instruction": "Make the causal chain more careful.",
+    "judging_focus": "prefer the version that avoids overclaiming and explains the mechanism"
+  },
+  {
+    "id": "a1-ab-012",
+    "artifact_title": "performance review feedback",
+    "artifact": "You did a good job this quarter, but communication could be better. Sometimes updates came late and that made planning harder for the rest of the team.",
+    "instruction": "Make this feedback clearer and more constructive.",
+    "judging_focus": "prefer the version that is candid, specific, and usable"
+  },
+  {
+    "id": "a1-ab-013",
+    "artifact_title": "policy memo recommendation",
+    "artifact": "The city should invest more in bus service. Buses are important for people and can help reduce traffic. Better bus service would be good for the city.",
+    "instruction": "Revise this recommendation so it sounds policy-ready.",
+    "judging_focus": "prefer the version that names the intervention, beneficiaries, and rationale"
+  },
+  {
+    "id": "a1-ab-014",
+    "artifact_title": "startup pitch",
+    "artifact": "Our app helps students manage their assignments. Students have a lot to do and often forget things. Our app solves that by putting everything in one place.",
+    "instruction": "Make this pitch less obvious and more compelling.",
+    "judging_focus": "prefer the version that names a sharper pain and differentiated approach"
+  },
+  {
+    "id": "a1-ab-015",
+    "artifact_title": "literature review sentence",
+    "artifact": "Many scholars have written about migration and identity, and their work shows that identity is complicated and changes over time.",
+    "instruction": "Revise this sentence so it does real literature-review work.",
+    "judging_focus": "prefer the version that sets up a debate or gap rather than summarizing vaguely"
+  },
+  {
+    "id": "a1-ab-016",
+    "artifact_title": "bug report",
+    "artifact": "The save button sometimes does not work. I clicked it a few times and the page did not update. This seems like a bug.",
+    "instruction": "Make this bug report actionable for engineering.",
+    "judging_focus": "prefer the version that includes steps, observed result, expected result, and scope without inventing environment details"
+  },
+  {
+    "id": "a1-ab-017",
+    "artifact_title": "fundraising update",
+    "artifact": "We made progress this month. We talked to several investors and got useful feedback. We are continuing conversations and working on the product.",
+    "instruction": "Rewrite this investor update so it has more signal.",
+    "judging_focus": "prefer the version that gives concrete progress, risk, and next milestone without false precision"
+  },
+  {
+    "id": "a1-ab-018",
+    "artifact_title": "academic conclusion",
+    "artifact": "In conclusion, this paper has shown that public schools were important in shaping citizenship. This topic matters because education is important for society.",
+    "instruction": "Make the conclusion land harder.",
+    "judging_focus": "prefer the version that returns to the thesis and states the implication"
+  },
+  {
+    "id": "a1-ab-019",
+    "artifact_title": "project risk note",
+    "artifact": "There is some risk that the migration will take longer than expected. If that happens, the launch date could be affected and we may need to adjust the plan.",
+    "instruction": "Make this risk note more concrete for leadership.",
+    "judging_focus": "prefer the version that names trigger, impact, and mitigation"
+  },
+  {
+    "id": "a1-ab-020",
+    "artifact_title": "personal statement paragraph",
+    "artifact": "This experience taught me that I like helping people and solving problems. It also showed me that I can work hard when something matters to me.",
+    "instruction": "Make this more specific and less clichéd.",
+    "judging_focus": "prefer the version that grounds the lesson in observable detail without melodrama"
+  }
+]
