@@ -607,6 +607,7 @@ fn main() {
             commands::get_anthropic_key_configured,
             commands::get_tier_model_map,
             commands::set_tier_model_map,
+            commands::debug_llm_cache_metrics,
             commands::get_workspace_prompt_dismissed,
             commands::set_workspace_prompt_dismissed,
             commands::get_task_workspace,

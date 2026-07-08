@@ -8,6 +8,7 @@ use crate::{
     chunking::{chunk_text, DEFAULT_CHUNK_OVERLAP_CHARS, DEFAULT_CHUNK_SIZE_CHARS},
     embedding::EmbeddingProvider,
     message_kind::MessageKind,
+    model_router::SystemBlock,
     models::{
         ArtifactContentDto, ArtifactVersionDto, RevisionApplyResultDto, RevisionProposalDto,
         RevisionProposalResultDto, RevisionTargetDto,
@@ -129,14 +130,15 @@ pub fn propose_artifact_revision(
             .join("\n\n"),
     );
 
-    let revision_system_prompt = build_revision_system_prompt(
+    let revision_system_blocks = build_revision_system_blocks(
         store,
         &context_pack.task_summary,
         &resolved_target.target_description,
         clean_instruction,
         snapshot_summary,
     );
-    let raw_candidate = reasoning.generate_response(&revision_system_prompt, &revision_prompt)?;
+    let raw_candidate =
+        reasoning.generate_response_blocks(&revision_system_blocks, &revision_prompt)?;
     let generated = parse_generated_revision(
         &raw_candidate,
         &resolved_target.original_text,
@@ -477,13 +479,13 @@ fn build_revision_prompt(
     )
 }
 
-fn build_revision_system_prompt(
+fn build_revision_system_blocks(
     store: &TaskStore,
     task_summary: &str,
     target_description: &str,
     instruction: &str,
     snapshot_summary: Option<&str>,
-) -> String {
+) -> Vec<SystemBlock> {
     let profile_injection = if store
         .get_privacy_user_profile_memory_enabled()
         .unwrap_or(false)
@@ -503,7 +505,7 @@ fn build_revision_system_prompt(
         None
     };
 
-    character::build_revision_system_prompt(&RevisionContext {
+    character::build_revision_system_blocks(&RevisionContext {
         task_summary: task_summary.to_string(),
         target_description: target_description.to_string(),
         instruction: instruction.to_string(),
@@ -691,7 +693,13 @@ pub fn extract_assessment_sentence(output: &str) -> Option<String> {
     }
 
     let lower = sentence.to_ascii_lowercase();
-    if lower.contains("i ") || lower.contains("i'm") || lower.contains("i've") || lower.starts_with("i ") || lower.contains(" my ") || lower.starts_with("my ") {
+    if lower.contains("i ")
+        || lower.contains("i'm")
+        || lower.contains("i've")
+        || lower.starts_with("i ")
+        || lower.contains(" my ")
+        || lower.starts_with("my ")
+    {
         Some(sentence.to_string())
     } else {
         None
@@ -735,10 +743,7 @@ pub fn generate_revision_alternative(
         ));
     }
 
-    let prior_rationale = original
-        .rationale
-        .as_deref()
-        .unwrap_or("a direct approach");
+    let prior_rationale = original.rationale.as_deref().unwrap_or("a direct approach");
 
     let artifact = get_artifact_content_for_edit(store, original.artifact_id)?;
     let profile_injection = if store
@@ -760,7 +765,7 @@ pub fn generate_revision_alternative(
         None
     };
 
-    let system_prompt = character::build_revision_system_prompt(&character::RevisionContext {
+    let system_blocks = character::build_revision_system_blocks(&character::RevisionContext {
         task_summary: artifact.file_name.clone(),
         target_description: original.target_description.clone(),
         instruction: format!(
@@ -782,7 +787,7 @@ pub fn generate_revision_alternative(
         prior_rationale
     );
 
-    let raw_candidate = reasoning.generate_response(&system_prompt, &user_prompt)?;
+    let raw_candidate = reasoning.generate_response_blocks(&system_blocks, &user_prompt)?;
     let generated = parse_generated_revision(&raw_candidate, &original.proposed_text, 0.5, false);
 
     let proposal = store.create_revision_proposal(&NewRevisionProposalInput {
@@ -1358,9 +1363,13 @@ mod tests {
 
     #[test]
     fn extract_assessment_sentence_extracts_first_person_sentence() {
-        let input = "I moved the argument to the front. The conclusion now:\n\nYour new argument here.";
+        let input =
+            "I moved the argument to the front. The conclusion now:\n\nYour new argument here.";
         let result = super::extract_assessment_sentence(input);
-        assert_eq!(result, Some("I moved the argument to the front.".to_string()));
+        assert_eq!(
+            result,
+            Some("I moved the argument to the front.".to_string())
+        );
     }
 
     #[test]
@@ -1373,7 +1382,7 @@ mod tests {
     #[test]
     fn revision_system_prompt_includes_assessment_instruction() {
         use crate::character::{self, RevisionContext};
-        let prompt = character::build_revision_system_prompt(&RevisionContext {
+        let blocks = character::build_revision_system_blocks(&RevisionContext {
             task_summary: "test task".to_string(),
             target_description: "intro paragraph".to_string(),
             instruction: "tighten this".to_string(),
@@ -1381,10 +1390,13 @@ mod tests {
             prefers_opinions: None,
             snapshot_summary: None,
         });
+        let prompt = crate::model_router::join_system_blocks(&blocks);
         let lower = prompt.to_ascii_lowercase();
         // the assessment instruction tells jeff to lead with the judgment it made
         assert!(
-            lower.contains("assessment") || lower.contains("tradeoff") || lower.contains("before presenting"),
+            lower.contains("assessment")
+                || lower.contains("tradeoff")
+                || lower.contains("before presenting"),
             "revision system prompt does not contain the assessment instruction"
         );
         assert!(

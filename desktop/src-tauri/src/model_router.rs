@@ -91,6 +91,16 @@ pub struct LlmUsage {
     pub cached_tokens: u64,
 }
 
+impl LlmUsage {
+    pub fn cached_ratio(&self) -> f64 {
+        if self.input_tokens == 0 {
+            0.0
+        } else {
+            self.cached_tokens as f64 / self.input_tokens as f64
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelMessageRole {
@@ -170,6 +180,24 @@ impl ModelRequest {
             self.json_schema = Some(serde_json::json!({ "type": "json_object" }));
         }
         self
+    }
+
+    pub fn new_blocks(
+        tier: Tier,
+        system_blocks: Vec<SystemBlock>,
+        user: impl Into<String>,
+    ) -> Self {
+        Self {
+            tier,
+            system_blocks,
+            messages: vec![ModelMessage::user(user)],
+            json_schema: None,
+            stream: false,
+            max_tokens: None,
+            temperature: 0.0,
+            timeout_ms: None,
+            purpose: None,
+        }
     }
 }
 
@@ -299,9 +327,7 @@ impl ModelRouter {
             Ok(Some(raw)) => match RouterConfig::parse(&raw) {
                 Ok(parsed) => parsed,
                 Err(err) => {
-                    eprintln!(
-                        "[jeff] model_router_config_invalid: {err}; using defaults"
-                    );
+                    eprintln!("[jeff] model_router_config_invalid: {err}; using defaults");
                     RouterConfig::default()
                 }
             },
@@ -358,14 +384,17 @@ impl ModelRouter {
     }
 
     fn log_usage(&self, tier: Tier, cfg: &TierConfig, usage: &LlmUsage) {
+        let cumulative = crate::latency::record_llm_usage(*usage);
         eprintln!(
-            "[jeff] llm_usage tier={} provider={} model={} input={} output={} cached={}",
+            "[jeff] llm_usage tier={} provider={} model={} input={} output={} cached={} cached_ratio={:.3} cumulative_cached_ratio={:.3}",
             tier.as_str(),
             cfg.provider.as_str(),
             cfg.model,
             usage.input_tokens,
             usage.output_tokens,
-            usage.cached_tokens
+            usage.cached_tokens,
+            usage.cached_ratio(),
+            cumulative.cached_ratio
         );
     }
 
@@ -396,9 +425,7 @@ impl ModelRouter {
 
     pub fn route(&self, request: ModelRequest) -> Result<ModelResponse> {
         if request.stream {
-            return Err(anyhow!(
-                "streaming model requests must use route_streaming"
-            ));
+            return Err(anyhow!("streaming model requests must use route_streaming"));
         }
 
         let system = join_system_blocks(&request.system_blocks);
@@ -417,7 +444,7 @@ impl ModelRouter {
             )?,
             ProviderKind::Anthropic => anthropic::generate_blocking(&AnthropicRequest {
                 model: &cfg.model,
-                system: &system,
+                system_blocks: &request.system_blocks,
                 user: &user,
                 temperature: request.temperature,
                 max_tokens: request.max_tokens,
@@ -442,9 +469,8 @@ impl ModelRouter {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<mpsc::Receiver<Result<String>>> {
         request.stream = true;
-        let system = join_system_blocks(&request.system_blocks);
         let user = Self::request_user_text(&request)?;
-        self.stream(request.tier, &system, &user, cancel)
+        self.stream_blocks(request.tier, request.system_blocks, &user, cancel)
     }
 
     // blocking generation with default options (temperature 0, no cap).
@@ -464,6 +490,19 @@ impl ModelRouter {
             .text)
     }
 
+    pub fn generate_blocks(
+        &self,
+        tier: Tier,
+        system_blocks: Vec<SystemBlock>,
+        user: &str,
+        options: GenerateOptions,
+    ) -> Result<String> {
+        Ok(self
+            .route(ModelRequest::new_blocks(tier, system_blocks, user).with_options(options))?
+            .text)
+    }
+
+    #[allow(dead_code)]
     pub async fn generate_async(
         &self,
         tier: Tier,
@@ -471,12 +510,32 @@ impl ModelRouter {
         user: &str,
         options: GenerateOptions,
     ) -> Result<String> {
+        self.generate_blocks_async(
+            tier,
+            vec![SystemBlock {
+                text: system.to_string(),
+                cache_hint: CacheHint::Volatile,
+            }],
+            user,
+            options,
+        )
+        .await
+    }
+
+    pub async fn generate_blocks_async(
+        &self,
+        tier: Tier,
+        system_blocks: Vec<SystemBlock>,
+        user: &str,
+        options: GenerateOptions,
+    ) -> Result<String> {
         let cfg = self.resolve(tier);
         let (text, usage) = match cfg.provider {
             ProviderKind::OpenAi => {
+                let system = join_system_blocks(&system_blocks);
                 crate::providers::openai_generate_async(
                     &cfg.model,
-                    system,
+                    &system,
                     user,
                     options.temperature,
                     options.max_tokens,
@@ -488,7 +547,7 @@ impl ModelRouter {
             ProviderKind::Anthropic => {
                 anthropic::generate_async(&AnthropicRequest {
                     model: &cfg.model,
-                    system,
+                    system_blocks: &system_blocks,
                     user,
                     temperature: options.temperature,
                     max_tokens: options.max_tokens,
@@ -504,10 +563,29 @@ impl ModelRouter {
 
     // streaming generation with the same channel contract as the legacy
     // openai streaming provider: text deltas until the channel closes.
+    #[allow(dead_code)]
     pub fn stream(
         &self,
         tier: Tier,
         system: &str,
+        user: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<mpsc::Receiver<Result<String>>> {
+        self.stream_blocks(
+            tier,
+            vec![SystemBlock {
+                text: system.to_string(),
+                cache_hint: CacheHint::Volatile,
+            }],
+            user,
+            cancel,
+        )
+    }
+
+    pub fn stream_blocks(
+        &self,
+        tier: Tier,
+        system_blocks: Vec<SystemBlock>,
         user: &str,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<mpsc::Receiver<Result<String>>> {
@@ -518,17 +596,15 @@ impl ModelRouter {
             cfg.provider.as_str(),
             cfg.model
         );
+        let system = join_system_blocks(&system_blocks);
         match cfg.provider {
-            ProviderKind::OpenAi => crate::reasoning::OpenAiStreamingReasoningProvider::with_model(
-                cfg.model.clone(),
-            )
-            .stream_response(system, user, cancel),
-            ProviderKind::Anthropic => anthropic::stream(
-                cfg.model.clone(),
-                system.to_string(),
-                user.to_string(),
-                cancel,
-            ),
+            ProviderKind::OpenAi => {
+                crate::reasoning::OpenAiStreamingReasoningProvider::with_model(cfg.model.clone())
+                    .stream_response(&system, user, cancel)
+            }
+            ProviderKind::Anthropic => {
+                anthropic::stream(cfg.model.clone(), system_blocks, user.to_string(), cancel)
+            }
         }
     }
 
@@ -567,7 +643,10 @@ impl ModelRouter {
 
     // returns a tier-bound handle implementing the legacy reasoning trait so
     // existing function signatures (and their tests) keep working unchanged.
-    pub fn handle(self: &Arc<Self>, tier: Tier) -> Arc<dyn crate::providers::ReasoningModelProvider> {
+    pub fn handle(
+        self: &Arc<Self>,
+        tier: Tier,
+    ) -> Arc<dyn crate::providers::ReasoningModelProvider> {
         Arc::new(TierHandle {
             router: Arc::clone(self),
             tier,
@@ -589,6 +668,19 @@ struct TierHandle {
 impl crate::providers::ReasoningModelProvider for TierHandle {
     fn generate_response(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
         self.router.generate(self.tier, system_prompt, user_prompt)
+    }
+
+    fn generate_response_blocks(
+        &self,
+        system_blocks: &[SystemBlock],
+        user_prompt: &str,
+    ) -> Result<String> {
+        self.router.generate_blocks(
+            self.tier,
+            system_blocks.to_vec(),
+            user_prompt,
+            GenerateOptions::default(),
+        )
     }
 }
 
@@ -703,14 +795,13 @@ mod tests {
 
     #[test]
     fn model_request_options_map_json_object() {
-        let request = ModelRequest::new(Tier::Reflex, "system", "classify").with_options(
-            GenerateOptions {
+        let request =
+            ModelRequest::new(Tier::Reflex, "system", "classify").with_options(GenerateOptions {
                 temperature: 0.2,
                 max_tokens: Some(12),
                 json_object: true,
                 timeout_ms: Some(50),
-            },
-        );
+            });
 
         assert_eq!(request.temperature, 0.2);
         assert_eq!(request.max_tokens, Some(12));

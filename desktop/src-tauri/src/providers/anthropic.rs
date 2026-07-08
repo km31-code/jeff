@@ -9,7 +9,7 @@ use serde::Deserialize;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::model_router::LlmUsage;
+use crate::model_router::{CacheHint, LlmUsage, SystemBlock};
 
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -17,7 +17,7 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 pub struct AnthropicRequest<'a> {
     pub model: &'a str,
-    pub system: &'a str,
+    pub system_blocks: &'a [SystemBlock],
     pub user: &'a str,
     pub temperature: f32,
     pub max_tokens: Option<u32>,
@@ -29,14 +29,7 @@ pub struct AnthropicRequest<'a> {
 }
 
 fn request_body(req: &AnthropicRequest, stream: bool) -> serde_json::Value {
-    let system = if req.json_only {
-        format!(
-            "{}\n\nRespond with a single valid JSON object and nothing else.",
-            req.system
-        )
-    } else {
-        req.system.to_string()
-    };
+    let system = system_content_blocks(req);
     serde_json::json!({
         "model": req.model,
         "max_tokens": req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
@@ -47,6 +40,36 @@ fn request_body(req: &AnthropicRequest, stream: bool) -> serde_json::Value {
             { "role": "user", "content": req.user }
         ]
     })
+}
+
+fn system_content_blocks(req: &AnthropicRequest) -> Vec<serde_json::Value> {
+    let mut blocks = req
+        .system_blocks
+        .iter()
+        .filter_map(|block| {
+            let text = block.text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let mut value = serde_json::json!({
+                "type": "text",
+                "text": text,
+            });
+            if matches!(block.cache_hint, CacheHint::Stable | CacheHint::Session) {
+                value["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+            }
+            Some(value)
+        })
+        .collect::<Vec<_>>();
+
+    if req.json_only {
+        blocks.push(serde_json::json!({
+            "type": "text",
+            "text": "Respond with a single valid JSON object and nothing else."
+        }));
+    }
+
+    blocks
 }
 
 pub fn generate_blocking(req: &AnthropicRequest) -> Result<(String, LlmUsage)> {
@@ -129,7 +152,7 @@ pub async fn generate_async(req: &AnthropicRequest<'_>) -> Result<(String, LlmUs
 // openai streaming path: caller reads Result<String> deltas until close.
 pub fn stream(
     model: String,
-    system: String,
+    system_blocks: Vec<SystemBlock>,
     user: String,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<mpsc::Receiver<Result<String>>> {
@@ -138,7 +161,7 @@ pub fn stream(
     let body = request_body(
         &AnthropicRequest {
             model: &model,
-            system: &system,
+            system_blocks: &system_blocks,
             user: &user,
             temperature: 0.0,
             max_tokens: None,

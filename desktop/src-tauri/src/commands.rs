@@ -324,6 +324,11 @@ pub fn set_tier_model_map(
 }
 
 #[tauri::command]
+pub fn debug_llm_cache_metrics() -> crate::latency::LlmCacheMetrics {
+    crate::latency::llm_cache_metrics()
+}
+
+#[tauri::command]
 pub fn get_workspace_prompt_dismissed(state: State<'_, JeffState>) -> Result<bool, String> {
     state
         .store
@@ -2061,17 +2066,13 @@ fn build_privacy_center_dashboard(
         content_observation_enabled: active_task_id_for_content
             .and_then(|tid| state.store.get_content_observation_enabled(tid).ok())
             .unwrap_or(false),
-        content_observation_last_captured_at: state
-            .content_observation
-            .lock()
-            .ok()
-            .and_then(|g| {
-                g.last_captured_at.map(|ts| {
-                    // format as a readable timestamp for the UI
-                    let secs = ts as u64;
-                    format!("{secs}")
-                })
-            }),
+        content_observation_last_captured_at: state.content_observation.lock().ok().and_then(|g| {
+            g.last_captured_at.map(|ts| {
+                // format as a readable timestamp for the UI
+                let secs = ts as u64;
+                format!("{secs}")
+            })
+        }),
         content_observation_capture_failed: state
             .content_observation
             .lock()
@@ -2270,9 +2271,7 @@ pub fn delete_struggle_pattern(
 }
 
 #[tauri::command]
-pub fn clear_relational_profile(
-    state: State<'_, JeffState>,
-) -> Result<RelationalProfile, String> {
+pub fn clear_relational_profile(state: State<'_, JeffState>) -> Result<RelationalProfile, String> {
     relational_model::clear_relational_profile(&state.store).map_err(map_jeff_error)?;
     get_relational_profile(state)
 }

@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ambient,
-    chat::{build_system_prompt, build_user_prompt},
+    chat::{build_system_blocks, build_user_prompt},
     coworking::unix_now_seconds,
     embedding::EmbeddingProvider,
     message_kind::MessageKind,
@@ -300,7 +300,7 @@ async fn run_llm_stream<R: Runtime + 'static>(
     let user_prompt = build_user_prompt(&message, &context_pack, active_context.as_deref());
 
     // phase 20/23: prepend active window context and user profile to system prompt.
-    let effective_system_prompt = build_system_prompt(
+    let effective_system_blocks = build_system_blocks(
         &store,
         &context_pack.task_summary,
         active_context.as_deref(),
@@ -310,9 +310,9 @@ async fn run_llm_stream<R: Runtime + 'static>(
     );
 
     // open the streaming LLM channel through the model router.
-    let mut rx = match model_router.stream(
+    let mut rx = match model_router.stream_blocks(
         Tier::Conversation,
-        &effective_system_prompt,
+        effective_system_blocks,
         &user_prompt,
         token.cancel.clone(),
     ) {

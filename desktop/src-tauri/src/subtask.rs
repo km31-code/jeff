@@ -14,6 +14,7 @@ use crate::{
     character::{self, SubtaskContext},
     embedding::EmbeddingProvider,
     message_kind::MessageKind,
+    model_router::SystemBlock,
     models::{
         FileWriteProposalDto, RetrievedChunkDto, RevisionProposalResultDto, RevisionTargetDto,
         SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto,
@@ -407,13 +408,13 @@ pub fn suggest_subtask_for_task(
             .join("\n\n")
     );
 
-    let system_prompt = build_subtask_system_prompt(
+    let system_blocks = build_subtask_system_blocks(
         store,
         &context_pack.task_summary,
         "suggest bounded subtask",
         "subtask_suggestion",
     );
-    let raw = reasoning.generate_response(&system_prompt, &prompt)?;
+    let raw = reasoning.generate_response_blocks(&system_blocks, &prompt)?;
     let parsed = serde_json::from_str::<SubTaskSuggestionJson>(raw.trim())
         .unwrap_or(SubTaskSuggestionJson {
         title: "Draft a stronger intro paragraph".to_string(),
@@ -801,14 +802,14 @@ fn run_subtask_chain(
 
     // chain planning phase: ask LLM to produce a step list
     let planning_prompt = build_chain_planning_prompt(&subtask, &snapshot);
-    let planning_system_prompt = build_subtask_system_prompt(
+    let planning_system_blocks = build_subtask_system_blocks(
         store,
         &snapshot.task_summary,
         &subtask.title,
         "chain_planning",
     );
     let raw_plan = reasoning
-        .generate_response(&planning_system_prompt, &planning_prompt)
+        .generate_response_blocks(&planning_system_blocks, &planning_prompt)
         .context("chain planning LLM call failed")?;
 
     let mut plan = serde_json::from_str::<ChainPlan>(raw_plan.trim()).unwrap_or(ChainPlan {
@@ -1020,9 +1021,9 @@ fn execute_chain_step(
 
         "llm_call" => {
             let context = build_chain_step_context(subtask, prior_payloads, &step.description);
-            let system_prompt = build_subtask_system_prompt(store, "", &subtask.title, "step_llm");
+            let system_blocks = build_subtask_system_blocks(store, "", &subtask.title, "step_llm");
             let output = reasoning
-                .generate_response(&system_prompt, &context)
+                .generate_response_blocks(&system_blocks, &context)
                 .context("chain llm_call step failed")?;
             Ok(truncate_chars(
                 &character::strip_filler_phrases(&output),
@@ -1033,10 +1034,10 @@ fn execute_chain_step(
         "file_write_proposal" => {
             let (proposed_path, intent) = parse_file_write_step_description(&step.description);
             let context = build_chain_step_context(subtask, prior_payloads, &intent);
-            let system_prompt =
-                build_subtask_system_prompt(store, "", &subtask.title, "file_write_proposal");
+            let system_blocks =
+                build_subtask_system_blocks(store, "", &subtask.title, "file_write_proposal");
             let content = reasoning
-                .generate_response(&system_prompt, &context)
+                .generate_response_blocks(&system_blocks, &context)
                 .context("chain file_write_proposal content generation failed")?;
             if content.chars().count() > MAX_CHAIN_FILE_PROPOSAL_CONTENT_CHARS {
                 return Err(anyhow!(
@@ -1208,12 +1209,12 @@ fn auto_reject_pending_proposals(store: &TaskStore, subtask_id: i64) {
     }
 }
 
-fn build_subtask_system_prompt(
+fn build_subtask_system_blocks(
     store: &TaskStore,
     task_summary: &str,
     subtask_title: &str,
     execution_type: &str,
-) -> String {
+) -> Vec<SystemBlock> {
     let profile_injection = if store
         .get_privacy_user_profile_memory_enabled()
         .unwrap_or(false)
@@ -1233,7 +1234,7 @@ fn build_subtask_system_prompt(
         None
     };
 
-    character::build_subtask_system_prompt(&SubtaskContext {
+    character::build_subtask_system_blocks(&SubtaskContext {
         task_summary: task_summary.to_string(),
         subtask_title: subtask_title.to_string(),
         execution_type: execution_type.to_string(),
@@ -1302,13 +1303,13 @@ fn execute_subtask_with_reasoning(
         }
     );
 
-    let system_prompt = build_subtask_system_prompt(
+    let system_blocks = build_subtask_system_blocks(
         store,
         &snapshot.task_summary,
         &subtask.title,
         &subtask.execution_type,
     );
-    let raw = reasoning.generate_response(&system_prompt, &prompt)?;
+    let raw = reasoning.generate_response_blocks(&system_blocks, &prompt)?;
     Ok(parse_subtask_output(&raw, &subtask.execution_type))
 }
 

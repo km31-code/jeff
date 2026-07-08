@@ -399,7 +399,7 @@ pub async fn synthesize_proactive_message(
     snapshot: &SituationalSnapshot,
     router: &crate::model_router::ModelRouter,
 ) -> Result<String> {
-    let system_prompt = crate::character::build_reorientation_system_prompt(
+    let system_blocks = crate::character::build_reorientation_system_blocks(
         &crate::character::ReorientationContext {
             task_summary: snapshot.current_goal.clone().unwrap_or_default(),
             last_active: snapshot
@@ -425,9 +425,9 @@ pub async fn synthesize_proactive_message(
     // apex a1: judgment-tier call through the model router. the 5s timeout
     // and short output budget from the phase 27 spec are preserved.
     let text = router
-        .generate_async(
+        .generate_blocks_async(
             crate::model_router::Tier::Judgment,
-            &system_prompt,
+            system_blocks,
             &user_prompt,
             crate::model_router::GenerateOptions {
                 temperature: 0.2,
@@ -573,7 +573,10 @@ fn content_observation_summary(state: &JeffState) -> (Option<String>, Option<u32
         DraftState::Mid => "mid-draft",
         DraftState::Late => "late draft",
     };
-    let excerpt = format!("~{} words, {}, {}", obs.word_count, draft_str, change_phrase);
+    let excerpt = format!(
+        "~{} words, {}, {}",
+        obs.word_count, draft_str, change_phrase
+    );
     let idle_secs = obs
         .stable_for_ticks
         .saturating_mul(crate::context_observer::CONTENT_OBSERVATION_POLL_INTERVAL_SECONDS as u32);
@@ -863,7 +866,9 @@ mod tests {
             snapshot_confidence: 1.0,
             updated_at: 2,
             trigger: "test".to_string(),
-            active_document_excerpt: Some("~840 words, mid-draft, content changed recently".to_string()),
+            active_document_excerpt: Some(
+                "~840 words, mid-draft, content changed recently".to_string(),
+            ),
             content_idle_seconds: Some(0),
         };
         assert!(snapshot_summary(&snapshot).chars().count() <= 600);
@@ -1020,9 +1025,13 @@ mod tests {
         let mut snapshot = SituationalSnapshot::default();
         assert!(snapshot.active_document_excerpt.is_none());
         assert!(snapshot.content_idle_seconds.is_none());
-        snapshot.active_document_excerpt = Some("~300 words, mid-draft, no recent changes".to_string());
+        snapshot.active_document_excerpt =
+            Some("~300 words, mid-draft, no recent changes".to_string());
         snapshot.content_idle_seconds = Some(60);
-        assert_eq!(snapshot.active_document_excerpt.as_deref(), Some("~300 words, mid-draft, no recent changes"));
+        assert_eq!(
+            snapshot.active_document_excerpt.as_deref(),
+            Some("~300 words, mid-draft, no recent changes")
+        );
         assert_eq!(snapshot.content_idle_seconds, Some(60));
     }
 

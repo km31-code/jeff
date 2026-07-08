@@ -4,6 +4,7 @@ use crate::{
     character::{self, ChatContext},
     embedding::EmbeddingProvider,
     message_kind::{classify_user_message_kind, MessageKind},
+    model_router::SystemBlock,
     models::{SendMessageResponseDto, TaskContextPackDto},
     reasoning::ReasoningProvider,
     relational_model,
@@ -63,7 +64,7 @@ pub fn send_message_for_task(
     let context_pack = build_task_context_pack(store, embeddings, task_id, clean_message)?;
     let user_prompt = build_user_prompt(clean_message, &context_pack, active_context);
 
-    let effective_system_prompt = build_system_prompt(
+    let effective_system_blocks = build_system_blocks(
         store,
         &context_pack.task_summary,
         active_context,
@@ -72,7 +73,7 @@ pub fn send_message_for_task(
         snapshot_summary,
     );
     let assistant_response = character::strip_filler_phrases(
-        &reasoning.generate_response(&effective_system_prompt, &user_prompt)?,
+        &reasoning.generate_response_blocks(&effective_system_blocks, &user_prompt)?,
     );
     if is_cancelled() {
         return Ok(SendMessageResponseDto {
@@ -101,6 +102,7 @@ pub fn send_message_for_task(
 /// profile injection when present. profile injection is gated on the privacy setting.
 /// g2: when is_first_message is true, the active window context is wrapped in a
 /// coworker-joining phrase so jeff orients itself to the user's current work.
+#[allow(dead_code)]
 pub fn build_system_prompt(
     store: &TaskStore,
     task_summary: &str,
@@ -109,6 +111,24 @@ pub fn build_system_prompt(
     recent_transcript: &[String],
     snapshot_summary: Option<&str>,
 ) -> String {
+    crate::model_router::join_system_blocks(&build_system_blocks(
+        store,
+        task_summary,
+        active_context,
+        is_first_message,
+        recent_transcript,
+        snapshot_summary,
+    ))
+}
+
+pub fn build_system_blocks(
+    store: &TaskStore,
+    task_summary: &str,
+    active_context: Option<&str>,
+    is_first_message: bool,
+    recent_transcript: &[String],
+    snapshot_summary: Option<&str>,
+) -> Vec<SystemBlock> {
     let profile_injection = if store
         .get_privacy_user_profile_memory_enabled()
         .unwrap_or(false)
@@ -121,12 +141,14 @@ pub fn build_system_prompt(
         .get_privacy_user_profile_memory_enabled()
         .unwrap_or(false)
     {
-        relational_model::build_relational_context(store).ok().flatten()
+        relational_model::build_relational_context(store)
+            .ok()
+            .flatten()
     } else {
         None
     };
 
-    character::build_chat_system_prompt(&ChatContext {
+    character::build_chat_system_blocks(&ChatContext {
         task_summary: task_summary.to_string(),
         active_window: active_context.map(|value| value.to_string()),
         profile_injection,

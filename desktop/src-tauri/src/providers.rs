@@ -3,6 +3,7 @@ use reqwest::blocking::{multipart, Client};
 use serde::Deserialize;
 use std::time::Duration;
 
+use crate::model_router::{join_system_blocks, SystemBlock};
 use crate::models::{IntentClassificationDto, SpeechSynthesisDto, TranscriptionResultDto};
 
 // apex a1: anthropic messages api adapter, dispatched to by the model router.
@@ -22,6 +23,14 @@ pub trait TextToSpeechProvider: Send + Sync {
 
 pub trait ReasoningModelProvider: Send + Sync {
     fn generate_response(&self, system_prompt: &str, user_prompt: &str) -> Result<String>;
+
+    fn generate_response_blocks(
+        &self,
+        system_blocks: &[SystemBlock],
+        user_prompt: &str,
+    ) -> Result<String> {
+        self.generate_response(&join_system_blocks(system_blocks), user_prompt)
+    }
 }
 
 pub trait EmbeddingsProvider: Send + Sync {

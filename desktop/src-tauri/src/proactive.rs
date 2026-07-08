@@ -270,8 +270,8 @@ pub fn generate_reorientation(
         None
     };
 
-    let effective_reorientation_prompt =
-        character::build_reorientation_system_prompt(&ReorientationContext {
+    let effective_reorientation_blocks =
+        character::build_reorientation_system_blocks(&ReorientationContext {
             task_summary: task_summary.summary_text.clone(),
             last_active: store
                 .get_last_task_focus(task_id)?
@@ -282,7 +282,7 @@ pub fn generate_reorientation(
             snapshot_summary: snapshot_summary.map(|value| value.to_string()),
         });
     let summary = reasoning
-        .generate_response(&effective_reorientation_prompt, &user_prompt)
+        .generate_response_blocks(&effective_reorientation_blocks, &user_prompt)
         .context("reorientation LLM call failed")?;
 
     let clean_summary = character::strip_filler_phrases(summary.trim());
