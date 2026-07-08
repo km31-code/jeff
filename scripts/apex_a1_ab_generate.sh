@@ -48,6 +48,7 @@ optional overrides:
   APEX_A1_APEX_PROVIDER=anthropic|openai
   APEX_A1_APEX_MODEL=<model name>
   APEX_A1_CASE_LIMIT=<n>  smoke-test only; final scoring requires all 20 cases
+  APEX_A1_CASE_IDS=a1-ab-001,a1-ab-009  smoke-test selected cases only
 EOF
   exit 0
 fi
@@ -76,7 +77,25 @@ cases_path, mode, out_path = sys.argv[1:4]
 with open(cases_path, "r", encoding="utf-8") as fh:
     cases = json.load(fh)
 
+case_ids_raw = os.environ.get("APEX_A1_CASE_IDS", "").strip()
 case_limit_raw = os.environ.get("APEX_A1_CASE_LIMIT", "").strip()
+if case_ids_raw and case_limit_raw:
+    raise SystemExit("set APEX_A1_CASE_IDS or APEX_A1_CASE_LIMIT, not both")
+
+if case_ids_raw:
+    requested = [case_id.strip() for case_id in case_ids_raw.split(",") if case_id.strip()]
+    if not requested:
+        raise SystemExit("APEX_A1_CASE_IDS did not contain any case ids")
+    by_id = {case["id"]: case for case in cases}
+    missing = [case_id for case_id in requested if case_id not in by_id]
+    if missing:
+        raise SystemExit(f"unknown APEX_A1_CASE_IDS: {', '.join(missing)}")
+    cases = [by_id[case_id] for case_id in requested]
+    print(
+        f"INFO: limiting generation to selected case(s): {', '.join(requested)}; "
+        "do not use this output for final A1 scoring"
+    )
+
 if case_limit_raw:
     try:
         case_limit = int(case_limit_raw)
@@ -90,10 +109,27 @@ if case_limit_raw:
         "do not use this output for final A1 scoring"
     )
 
-SYSTEM_PROMPT = """You are Jeff, a direct writing coworker.
+LEGACY_SYSTEM_PROMPT = """You are Jeff, a direct writing coworker.
 Revise the given artifact according to the instruction.
 Return strict JSON only with this shape:
 {"assessment":"one direct sentence naming the tradeoff or quality issue","revision":"the revised text"}
+No filler, no praise, no markdown fences."""
+
+APEX_SYSTEM_PROMPT = """You are Jeff, a direct writing coworker.
+Revise the given artifact according to the instruction and judging focus.
+Return strict JSON only with this shape:
+{"assessment":"one direct sentence naming the tradeoff or quality issue","revision":"the revised text"}
+Rules:
+- Satisfy the instruction literally; remove the weakness it names.
+- Use the judging focus as the decision rubric.
+- Preserve concrete useful consequences already present in the artifact.
+- Do not invent names, counts, metrics, dates, timelines, environments, commitments, mechanisms, legal facts, product features, user actions, implementation details, or causal triggers.
+- If facts are missing, improve precision through structure, scope, contrast, and wording rather than false specificity.
+- It is better to write a concise generic improvement than to invent a credential, statistic, industry, feature, commitment, timeline, cause, or concrete example.
+- When the instruction asks for specificity but the artifact lacks specifics, make the sentence more specific about the relationship between existing ideas; do not fabricate examples.
+- Before returning, compare every concrete detail in the revision against the artifact and remove anything unsupported.
+- Do not use placeholders, brackets, TODO text, or instructions to fill in missing facts.
+- Avoid hype, meta framing, filler transitions, absolute claims, and repeated weak phrasing from the original.
 No filler, no praise, no markdown fences."""
 
 def provider_and_model():
@@ -110,6 +146,7 @@ def provider_and_model():
     return provider, os.environ.get("APEX_A1_APEX_MODEL", default_model).strip()
 
 PROVIDER, MODEL = provider_and_model()
+SYSTEM_PROMPT = APEX_SYSTEM_PROMPT if mode == "apex" else LEGACY_SYSTEM_PROMPT
 
 if PROVIDER not in ("openai", "anthropic"):
     raise SystemExit(f"unsupported provider {PROVIDER!r}")
@@ -117,12 +154,18 @@ if not MODEL:
     raise SystemExit("model name cannot be empty")
 
 def case_prompt(case):
-    return "\n\n".join([
+    parts = [
         f"Artifact title: {case['artifact_title']}",
         f"Artifact:\n{case['artifact']}",
         f"Instruction:\n{case['instruction']}",
         f"Judging focus:\n{case['judging_focus']}",
-    ])
+    ]
+    if mode == "apex":
+        parts.extend([
+            "Source boundary: the artifact is the complete evidence. There is no outside context.",
+            "Scoring warning: unsupported concrete details count as failures, even if they make the revision sound more specific.",
+        ])
+    return "\n\n".join(parts)
 
 def parse_json_text(text, case_id):
     try:
@@ -153,18 +196,20 @@ def call_openai(prompt):
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is required for OpenAI generation")
+    body = {
+        "model": MODEL,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    if not MODEL.startswith("o"):
+        body["temperature"] = 0
     payload = request_json(
         "https://api.openai.com/v1/chat/completions",
         {"authorization": f"Bearer {api_key}"},
-        {
-            "model": MODEL,
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-        },
+        body,
     )
     return payload["choices"][0]["message"]["content"]
 

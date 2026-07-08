@@ -1387,5 +1387,11 @@ mod tests {
             lower.contains("assessment") || lower.contains("tradeoff") || lower.contains("before presenting"),
             "revision system prompt does not contain the assessment instruction"
         );
+        assert!(
+            lower.contains("do not invent")
+                && lower.contains("remove the weakness")
+                && lower.contains("false specificity"),
+            "revision system prompt does not include grounding and instruction-literal guardrails"
+        );
     }
 }
