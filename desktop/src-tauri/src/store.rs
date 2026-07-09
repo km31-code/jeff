@@ -267,7 +267,7 @@ impl TaskStore {
                 chunk_text TEXT NOT NULL,
                 position_index INTEGER NOT NULL,
                 embedding_json TEXT NOT NULL,
-                embedding_model TEXT NOT NULL DEFAULT 'openai:text-embedding-3-small'
+                embedding_model TEXT NOT NULL DEFAULT '{embedding_model}'
             );
 
             CREATE INDEX IF NOT EXISTS idx_artifact_chunks_task ON artifact_chunks(task_id);
@@ -529,6 +529,7 @@ impl TaskStore {
             CREATE INDEX IF NOT EXISTS idx_write_audit_task ON subtask_write_audit_log(task_id, id DESC);
             "#,
             now = SQLITE_NOW_EXPR,
+            embedding_model = crate::providers::OPENAI_EMBEDDING_MODEL_ID,
         ))
         .context("failed to initialize sqlite schema")?;
 
@@ -578,9 +579,10 @@ impl TaskStore {
         // before local embeddings and are treated as OpenAI small embeddings so
         // retrieval can dual-read and lazily re-embed when the active model id
         // changes.
-        let _ = conn.execute_batch(
-            "ALTER TABLE artifact_chunks ADD COLUMN embedding_model TEXT NOT NULL DEFAULT 'openai:text-embedding-3-small';",
-        );
+        let _ = conn.execute_batch(&format!(
+            "ALTER TABLE artifact_chunks ADD COLUMN embedding_model TEXT NOT NULL DEFAULT '{}';",
+            crate::providers::OPENAI_EMBEDDING_MODEL_ID
+        ));
 
         // phase 30: relational understanding.
         conn.execute_batch(&format!(

@@ -206,6 +206,8 @@ and a code change that enforces the character across all prompt assembly sites.
       - `revision.rs` calls `character::build_revision_system_prompt`
       - behavioral assertion: send a test message and verify the response
         does not begin with "Certainly" (requires a live API key in CI)
+- [ ] Run `scripts/character_eval.sh` after all prompt paths are wired; verify
+      at least 13 of 15 sampled cases pass before marking Phase 25 complete
 
 ---
 
@@ -228,6 +230,9 @@ and a code change that enforces the character across all prompt assembly sites.
 
 5. The `base_character_prompt()` text is verifiably under 300 tokens (checked
    by the unit test proxy).
+
+6. Run `scripts/character_eval.sh`. At least 13 of 15 sampled cases pass
+   (grader verdict agrees with labeled ground truth).
 
 ---
 

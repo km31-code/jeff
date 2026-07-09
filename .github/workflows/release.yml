@@ -1,6 +1,6 @@
 # jeff release pipeline
 # triggers on push to the `release` branch only.
-# job order: test -> build -> sign -> notarize -> release
+# job order: test -> build -> character-eval -> sign -> notarize -> release
 # all secrets are resolved from GitHub Actions secrets; no values are committed here.
 #
 # required secrets:
@@ -104,8 +104,24 @@ jobs:
           path: desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
           retention-days: 1
 
-  sign:
+  character-eval:
     needs: build
+    runs-on: macos-14
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: character eval
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          JEFF_CHARACTER_EVAL_SEED: release
+        run: bash scripts/character_eval.sh
+
+  sign:
+    needs: [build, character-eval]
     runs-on: macos-14
     steps:
       - name: checkout

@@ -13,6 +13,8 @@ pub mod local;
 // tts model constant lives here so no call site outside providers/ names a
 // model string (apex a1 grep gate). replaced by the voice session work in c4.
 pub const OPENAI_TTS_MODEL: &str = "gpt-4o-mini-tts";
+pub const OPENAI_EMBEDDING_MODEL: &str = "text-embedding-3-small";
+pub const OPENAI_EMBEDDING_MODEL_ID: &str = "openai:text-embedding-3-small";
 
 pub trait SpeechToTextProvider: Send + Sync {
     fn transcribe(&self, audio_bytes: &[u8], mime_type: &str) -> Result<String>;
@@ -262,7 +264,7 @@ impl OpenAiEmbeddingsProvider {
     pub fn from_env() -> Self {
         Self {
             client: Client::new(),
-            model: "text-embedding-3-small".to_string(),
+            model: OPENAI_EMBEDDING_MODEL.to_string(),
         }
     }
 }
@@ -319,7 +321,7 @@ impl EmbeddingsProvider for OpenAiEmbeddingsProvider {
     }
 
     fn model_id(&self) -> &'static str {
-        "openai:text-embedding-3-small"
+        OPENAI_EMBEDDING_MODEL_ID
     }
 }
 

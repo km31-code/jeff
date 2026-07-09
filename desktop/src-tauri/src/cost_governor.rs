@@ -72,7 +72,8 @@ pub fn preflight(store: Option<&TaskStore>, requested_tier: Tier, purpose: &str)
     for candidate in degradation_chain(requested_tier) {
         let key = budget_key_for_tier(candidate);
         let spent = store.sum_llm_usage_today(Some(key)).unwrap_or(0.0);
-        let budget = get_daily_budget_usd(store, key).unwrap_or_else(|_| default_daily_budget_usd(key));
+        let budget =
+            get_daily_budget_usd(store, key).unwrap_or_else(|_| default_daily_budget_usd(key));
         if spent <= budget || matches!(candidate, Tier::Conversation | Tier::Reflex) {
             effective = candidate;
             break;
@@ -81,7 +82,11 @@ pub fn preflight(store: Option<&TaskStore>, requested_tier: Tier, purpose: &str)
 
     let degraded = effective != requested_tier;
     let notice = degraded
-        .then(|| mark_degradation_notice(store, requested_tier, effective, purpose).ok().flatten())
+        .then(|| {
+            mark_degradation_notice(store, requested_tier, effective, purpose)
+                .ok()
+                .flatten()
+        })
         .flatten();
 
     BudgetDecision {
@@ -127,22 +132,28 @@ pub fn status(store: &TaskStore) -> Result<CostGovernorStatusDto> {
             .unwrap_or(0.0)
     };
 
-    let tiers = [Tier::Reflex, Tier::Conversation, Tier::Judgment, Tier::Craft]
-        .into_iter()
-        .map(|tier| {
-            let key = budget_key_for_tier(tier);
-            let budget = get_daily_budget_usd(store, key).unwrap_or_else(|_| default_daily_budget_usd(key));
-            let spent = spent_for(key);
-            CostTierSpendDto {
-                tier: key.to_string(),
-                budget_key: key.to_string(),
-                budget_usd: budget,
-                spent_usd: spent,
-                over_budget: spent > budget,
-                degrade_to: degrade_target(tier).map(|target| target.as_str().to_string()),
-            }
-        })
-        .collect::<Vec<_>>();
+    let tiers = [
+        Tier::Reflex,
+        Tier::Conversation,
+        Tier::Judgment,
+        Tier::Craft,
+    ]
+    .into_iter()
+    .map(|tier| {
+        let key = budget_key_for_tier(tier);
+        let budget =
+            get_daily_budget_usd(store, key).unwrap_or_else(|_| default_daily_budget_usd(key));
+        let spent = spent_for(key);
+        CostTierSpendDto {
+            tier: key.to_string(),
+            budget_key: key.to_string(),
+            budget_usd: budget,
+            spent_usd: spent,
+            over_budget: spent > budget,
+            degrade_to: degrade_target(tier).map(|target| target.as_str().to_string()),
+        }
+    })
+    .collect::<Vec<_>>();
 
     let history = store
         .llm_usage_history(7)?
@@ -174,7 +185,7 @@ pub fn estimate_cost_usd(provider: ProviderKind, model: &str, usage: LlmUsage) -
             (3.0, 0.30, 15.0)
         } else if model_lower.contains("haiku") {
             (0.80, 0.08, 4.0)
-        } else if model_lower.contains("gpt-4o-mini") {
+        } else if model_lower.contains(crate::model_router::OPENAI_FALLBACK_MODEL) {
             (0.15, 0.075, 0.60)
         } else {
             (1.0, 0.10, 3.0)
@@ -311,8 +322,10 @@ mod tests {
         }
         let decision = preflight(Some(&store), Tier::Craft, "runaway");
         assert_eq!(decision.effective_tier, Tier::Judgment);
-        assert!(status(&store).unwrap().tiers.iter().any(|tier| {
-            tier.tier == "craft" && tier.over_budget
-        }));
+        assert!(status(&store)
+            .unwrap()
+            .tiers
+            .iter()
+            .any(|tier| { tier.tier == "craft" && tier.over_budget }));
     }
 }
