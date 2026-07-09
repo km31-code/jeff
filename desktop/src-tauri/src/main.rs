@@ -15,6 +15,7 @@ mod document_model;
 mod embedding;
 mod errors;
 mod flow;
+mod goal_extraction;
 mod latency;
 mod local_runtime;
 mod login_item;
@@ -568,6 +569,17 @@ fn main() {
                 });
             }
 
+            // apex b2: goal extraction loop. on a conversation lull (a user turn
+            // that has settled for >= 30s) or a task switch, a reflex-tier
+            // structured extractor reads the recent transcript and records the
+            // understood goal into the relational model. never on a response path.
+            {
+                let goal_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    spawn_goal_extraction_poll(goal_handle).await;
+                });
+            }
+
             // phase 24: background update check — delayed 2 seconds so it
             // does not compete with tray-ready or session-restore on startup.
             {
@@ -905,6 +917,95 @@ async fn spawn_content_observation_poll(handle: tauri::AppHandle) {
                 awareness_core::SnapshotTrigger::ContentObservation,
                 task_id,
             );
+        }
+    }
+}
+
+// apex b2: reflex-tier goal extraction on conversation lulls.
+const GOAL_EXTRACTION_TICK_SECONDS: u64 = 15;
+const GOAL_LULL_SETTLE_SECONDS: i64 = 30;
+const GOAL_ACTIVITY_WINDOW_SECONDS: i64 = 30 * 60;
+
+async fn spawn_goal_extraction_poll(handle: tauri::AppHandle) {
+    if std::env::var("JEFF_DISABLE_GOAL_EXTRACTION").is_ok() {
+        return;
+    }
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(GOAL_EXTRACTION_TICK_SECONDS)).await;
+
+        let Some(jeff_state) = handle.try_state::<state::JeffState>() else {
+            continue;
+        };
+        let Some(task) = jeff_state.store.get_active_task().ok().flatten() else {
+            continue;
+        };
+        if !jeff_state
+            .store
+            .get_privacy_user_profile_memory_enabled()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let task_id = task.id;
+
+        // list_recent_chat_messages returns oldest -> newest, which is the
+        // transcript order the extractor expects.
+        let recent = jeff_state
+            .store
+            .list_recent_chat_messages(task_id, 20)
+            .unwrap_or_default();
+        let last_user_message = recent.iter().rev().find(|m| m.role == "user");
+        let Some(last_user_message) = last_user_message else {
+            continue;
+        };
+        let Some(last_user_turn) =
+            awareness_core::parse_sqlite_datetime_to_unix(&last_user_message.created_at)
+        else {
+            continue;
+        };
+
+        // only extract on a settled lull after a recent user turn, and at most
+        // once per (task, latest user message).
+        let now = chrono::Utc::now().timestamp();
+        let settled = now - last_user_turn;
+        if !(GOAL_LULL_SETTLE_SECONDS..=GOAL_ACTIVITY_WINDOW_SECONDS).contains(&settled) {
+            continue;
+        }
+        if !jeff_state
+            .goal_extraction
+            .should_extract(task_id, last_user_message.id)
+        {
+            continue;
+        }
+
+        // the reflex extractor is a blocking http call; keep it off the async
+        // worker thread.
+        let router = jeff_state.model_router.clone();
+        let extraction = match tokio::task::spawn_blocking(move || {
+            goal_extraction::extract_goal_with_fallback(&router, &recent)
+        })
+        .await
+        {
+            Ok(extraction) => extraction,
+            Err(err) => {
+                eprintln!("[jeff] goal_extraction_join_failed: {err}");
+                continue;
+            }
+        };
+
+        if extraction.is_recordable() {
+            if let Some(goal) = extraction.goal.as_deref() {
+                if let Err(err) =
+                    relational_model::record_goal_stated(&jeff_state.store, task_id, goal)
+                {
+                    eprintln!("[jeff] goal_extraction_record_failed: {err}");
+                } else {
+                    eprintln!(
+                        "[jeff] goal_extracted task={} confidence={:.2}",
+                        task_id, extraction.confidence
+                    );
+                }
+            }
         }
     }
 }

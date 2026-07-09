@@ -47,6 +47,9 @@ pub struct JeffState {
     // apex b1: semantic document model — raw paragraph text stays in-memory
     // inside this model; only structural deltas/summaries are exported.
     pub document_model: Arc<Mutex<crate::document_model::DocumentModel>>,
+    // apex b2: dedup guard for the lull-triggered goal extractor so it fires at
+    // most once per (task, latest user message).
+    pub goal_extraction: Arc<GoalExtractionState>,
 }
 
 impl JeffState {
@@ -80,6 +83,7 @@ impl JeffState {
             awareness_core: Arc::new(AwarenessCore::new()),
             content_observation: Arc::new(Mutex::new(ContentObservationState::default())),
             document_model: Arc::new(Mutex::new(crate::document_model::DocumentModel::new())),
+            goal_extraction: Arc::new(GoalExtractionState::new()),
         }
     }
 
@@ -99,6 +103,59 @@ impl JeffState {
 
     pub fn current_interaction_epoch(&self) -> u64 {
         self.interaction_epoch.load(Ordering::SeqCst)
+    }
+}
+
+// ---- apex b2: goal extraction lull guard ------------------------------------
+
+// ensures the reflex-tier goal extractor fires at most once per (task, latest
+// user message), so a persistent lull does not re-run it every tick.
+pub struct GoalExtractionState {
+    inner: Mutex<GoalExtractionInner>,
+}
+
+struct GoalExtractionInner {
+    task_id: i64,
+    last_user_message_id: i64,
+}
+
+impl GoalExtractionState {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(GoalExtractionInner {
+                task_id: -1,
+                last_user_message_id: 0,
+            }),
+        }
+    }
+
+    // returns true (and records) when this (task, latest user message) has not
+    // yet been extracted. a new task or a newer user message re-arms extraction.
+    pub fn should_extract(&self, task_id: i64, last_user_message_id: i64) -> bool {
+        if let Ok(mut guard) = self.inner.lock() {
+            if guard.task_id == task_id && guard.last_user_message_id == last_user_message_id {
+                return false;
+            }
+            guard.task_id = task_id;
+            guard.last_user_message_id = last_user_message_id;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GoalExtractionState;
+
+    #[test]
+    fn b2_goal_extraction_dedups_by_message_id_not_seconds() {
+        let state = GoalExtractionState::new();
+        assert!(state.should_extract(1, 10));
+        assert!(!state.should_extract(1, 10));
+        assert!(state.should_extract(1, 11));
+        assert!(state.should_extract(2, 11));
     }
 }
 

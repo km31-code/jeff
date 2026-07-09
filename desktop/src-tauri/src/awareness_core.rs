@@ -460,13 +460,20 @@ fn assemble_snapshot(
         .cloned()
         .collect::<Vec<_>>();
 
-    let current_goal = extract_current_goal(&recent_10).or_else(|| {
-        state
-            .store
-            .get_task_summary(task_id)
-            .ok()
-            .map(|summary| summary.summary_text)
-    });
+    // apex b2: prefer the goal understood by the extractor and stored in the
+    // relational model (refined on conversation lulls by the reflex-tier llm
+    // extractor). fall back to the deterministic heuristic over the recent
+    // transcript, then the task summary. the literal prefix matcher is retired
+    // from this path.
+    let current_goal = crate::relational_model::latest_active_goal_text(&state.store, task_id)
+        .or_else(|| crate::goal_extraction::extract_goal_heuristic(&recent_10).goal)
+        .or_else(|| {
+            state
+                .store
+                .get_task_summary(task_id)
+                .ok()
+                .map(|summary| summary.summary_text)
+        });
 
     // find the most recently accepted/completed subtask with a result summary.
     // the old approach (searching for non-existent message_kind strings) always
@@ -609,7 +616,9 @@ fn current_active_window_string<R: Runtime>(app: &AppHandle<R>) -> Option<String
         })
 }
 
-fn extract_current_goal(messages: &[crate::models::ChatMessageDto]) -> Option<String> {
+// retired from the live snapshot path in b2; kept for backward-compatible tests.
+#[allow(dead_code)]
+pub fn extract_current_goal(messages: &[crate::models::ChatMessageDto]) -> Option<String> {
     for message in messages.iter().rev() {
         if message.role != "user" {
             continue;
@@ -621,6 +630,8 @@ fn extract_current_goal(messages: &[crate::models::ChatMessageDto]) -> Option<St
     None
 }
 
+// retired prefix matcher; kept for backward-compatible tests only (b2).
+#[allow(dead_code)]
 pub fn extract_goal_from_text(text: &str) -> Option<String> {
     let lower = text.to_ascii_lowercase();
     for pattern in [
@@ -795,7 +806,7 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-fn parse_sqlite_datetime_to_unix(dt: &str) -> Option<i64> {
+pub fn parse_sqlite_datetime_to_unix(dt: &str) -> Option<i64> {
     let normalized = dt.trim().replace('T', " ");
     let date_time: Vec<&str> = normalized.splitn(2, ' ').collect();
     if date_time.len() != 2 {

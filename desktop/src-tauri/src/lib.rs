@@ -5,6 +5,7 @@ pub mod classifier;
 pub mod context_observer;
 pub mod cost_governor;
 pub mod errors;
+pub mod goal_extraction;
 pub mod latency;
 pub mod local_runtime;
 pub mod login_item;

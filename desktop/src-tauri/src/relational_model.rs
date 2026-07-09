@@ -96,6 +96,10 @@ pub struct RelationalProfile {
     pub trust_metrics: TrustMetrics,
 }
 
+// retired prefix matcher; off the live path in b2. kept as the goal-eval
+// contrast baseline (scored against the heuristic and llm extractors) and for
+// backward-compatible tests.
+#[allow(dead_code)]
 pub fn extract_goal_from_text(text: &str) -> Option<String> {
     let lower = text.to_ascii_lowercase();
     for pattern in [
@@ -148,8 +152,16 @@ pub fn message_marks_goal_done(text: &str) -> bool {
 pub fn record_message_signals(store: &TaskStore, task_id: i64, message: &str) -> Result<()> {
     record_proactive_engaged_if_reply(store, task_id)?;
 
-    if let Some(goal) = extract_goal_from_text(message) {
-        record_goal_stated(store, task_id, &goal)?;
+    // apex b2: the retired prefix matcher is replaced on the live path by the
+    // broader heuristic extractor. the reflex-tier llm extractor refines this
+    // on conversation lulls (see the goal extraction loop in main.rs). the
+    // relational model keeps its dedup/update semantics via record_goal_stated.
+    if let Some((goal, confidence, _evidence)) =
+        crate::goal_extraction::heuristic_goal_from_message(message)
+    {
+        if confidence >= crate::goal_extraction::RECORD_CONFIDENCE_MIN {
+            record_goal_stated(store, task_id, &goal)?;
+        }
     }
 
     if message_marks_goal_done(message) {
@@ -198,6 +210,18 @@ pub fn record_goal_stated(store: &TaskStore, task_id: i64, goal_text: &str) -> R
     )
     .context("failed to insert stated goal")?;
     Ok(())
+}
+
+// apex b2: the most recently updated active goal for a task, used by the
+// snapshot as the primary current_goal source (populated by the extractor).
+pub fn latest_active_goal_text(store: &TaskStore, task_id: i64) -> Option<String> {
+    let conn = store.connect().ok()?;
+    let goals = list_goals_for_task_status(&conn, task_id, "active").ok()?;
+    goals
+        .into_iter()
+        .next()
+        .map(|goal| goal.goal_text)
+        .filter(|text| !text.trim().is_empty())
 }
 
 pub fn update_goal_status(store: &TaskStore, goal_id: i64, status: GoalStatus) -> Result<()> {

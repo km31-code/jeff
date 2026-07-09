@@ -1,0 +1,37 @@
+[
+  { "id": "E1", "category": "explicit", "transcript": [{ "role": "user", "content": "I'm working on the thesis introduction and it's not landing." }], "expected_goal": "work on the thesis introduction", "keywords": ["thesis", "introduction", "intro"] },
+  { "id": "E2", "category": "explicit", "transcript": [{ "role": "user", "content": "My goal is to submit the grant proposal this week." }], "expected_goal": "submit the grant proposal", "keywords": ["grant", "proposal", "submit"] },
+  { "id": "E3", "category": "explicit", "transcript": [{ "role": "user", "content": "I need to rewrite the methods section before my advisor meeting." }], "expected_goal": "rewrite the methods section", "keywords": ["methods", "rewrite", "section"] },
+  { "id": "E4", "category": "explicit", "transcript": [{ "role": "user", "content": "I'm trying to finish chapter 3 tonight." }], "expected_goal": "finish chapter 3", "keywords": ["chapter 3", "chapter", "finish"] },
+  { "id": "E5", "category": "explicit", "transcript": [{ "role": "user", "content": "I want to tighten the conclusion so it doesn't ramble." }], "expected_goal": "tighten the conclusion", "keywords": ["conclusion", "tighten"] },
+  { "id": "E6", "category": "explicit", "transcript": [{ "role": "user", "content": "I'm working on cutting the intro down to one page." }], "expected_goal": "cut the intro to one page", "keywords": ["intro", "cut", "page"] },
+
+  { "id": "P1", "category": "paraphrase", "transcript": [{ "role": "user", "content": "This chapter needs to exist by Friday." }], "expected_goal": "finish the chapter by Friday", "keywords": ["chapter", "friday"] },
+  { "id": "P2", "category": "paraphrase", "transcript": [{ "role": "user", "content": "The abstract has to be ready before the Monday submission." }], "expected_goal": "get the abstract ready by Monday", "keywords": ["abstract", "monday"] },
+  { "id": "P3", "category": "paraphrase", "transcript": [{ "role": "user", "content": "The deck needs a stronger closing slide." }], "expected_goal": "add a stronger closing slide to the deck", "keywords": ["deck", "closing", "slide"] },
+  { "id": "P4", "category": "paraphrase", "transcript": [{ "role": "user", "content": "The bibliography still needs two missing citations added." }], "expected_goal": "add the missing citations to the bibliography", "keywords": ["bibliography", "citations"] },
+  { "id": "P5", "category": "paraphrase", "transcript": [{ "role": "user", "content": "The results section has to make the sample-size point clearer." }], "expected_goal": "clarify the sample-size point in results", "keywords": ["results", "sample", "size"] },
+  { "id": "P6", "category": "paraphrase", "transcript": [{ "role": "user", "content": "My slides need to be under ten minutes for the talk." }], "expected_goal": "cut the slides under ten minutes", "keywords": ["slides", "minutes", "talk"] },
+  { "id": "P7", "category": "paraphrase", "transcript": [{ "role": "user", "content": "The cover letter has to be tailored to this specific lab." }], "expected_goal": "tailor the cover letter to the lab", "keywords": ["cover letter", "lab", "tailor"] },
+
+  { "id": "I1", "category": "imperative", "transcript": [{ "role": "user", "content": "Help me draft the launch email." }], "expected_goal": "draft the launch email", "keywords": ["draft", "launch", "email"] },
+  { "id": "I2", "category": "imperative", "transcript": [{ "role": "user", "content": "Draft a one-paragraph summary of the changes." }], "expected_goal": "draft a summary of the changes", "keywords": ["draft", "summary", "changes"] },
+  { "id": "I3", "category": "imperative", "transcript": [{ "role": "user", "content": "Can you help me finish the related-work section?" }], "expected_goal": "finish the related-work section", "keywords": ["related-work", "finish", "section"] },
+  { "id": "I4", "category": "imperative", "transcript": [{ "role": "user", "content": "Outline the argument for the rebuttal." }], "expected_goal": "outline the rebuttal argument", "keywords": ["outline", "rebuttal", "argument"] },
+  { "id": "I5", "category": "imperative", "transcript": [{ "role": "user", "content": "Revise this paragraph so it's less passive." }], "expected_goal": "revise the paragraph to be less passive", "keywords": ["revise", "paragraph", "passive"] },
+  { "id": "I6", "category": "imperative", "transcript": [{ "role": "user", "content": "I'm supposed to prepare the slides for Thursday." }], "expected_goal": "prepare the slides for Thursday", "keywords": ["prepare", "slides", "thursday"] },
+
+  { "id": "H1", "category": "implicit", "transcript": [{ "role": "user", "content": "The reviewer said my sample size is too small." }, { "role": "assistant", "content": "That was one of three concerns." }, { "role": "user", "content": "yeah, that one's still open." }], "expected_goal": "address the reviewer's sample-size concern", "keywords": ["sample", "size", "reviewer"] },
+  { "id": "H2", "category": "implicit", "transcript": [{ "role": "user", "content": "The deadline for the abstract just got moved up to tomorrow." }], "expected_goal": "finish the abstract by tomorrow", "keywords": ["abstract", "tomorrow"] },
+  { "id": "H3", "category": "implicit", "transcript": [{ "role": "user", "content": "Chapter two still contradicts the thesis in a few places." }], "expected_goal": "fix chapter two's contradictions with the thesis", "keywords": ["chapter two", "thesis", "contradict"] },
+  { "id": "H4", "category": "implicit", "transcript": [{ "role": "user", "content": "I keep rewriting the same transition and it's still not working." }], "expected_goal": "fix the transition", "keywords": ["transition"] },
+  { "id": "H5", "category": "implicit", "transcript": [{ "role": "user", "content": "The intro is way too long for the journal's word limit." }], "expected_goal": "shorten the intro to the journal limit", "keywords": ["intro", "long", "journal"] },
+
+  { "id": "N1", "category": "no_goal", "transcript": [{ "role": "user", "content": "thanks, that makes sense." }], "expected_goal": null, "keywords": [] },
+  { "id": "N2", "category": "no_goal", "transcript": [{ "role": "user", "content": "what time is it in Tokyo right now?" }], "expected_goal": null, "keywords": [] },
+  { "id": "N3", "category": "no_goal", "transcript": [{ "role": "user", "content": "haha that's a great point." }], "expected_goal": null, "keywords": [] },
+
+  { "id": "T1", "category": "no_goal_trap", "transcript": [{ "role": "user", "content": "I need to say, this is really impressive work." }], "expected_goal": null, "keywords": [] },
+  { "id": "T2", "category": "no_goal_trap", "transcript": [{ "role": "user", "content": "I want to thank you for the help earlier." }], "expected_goal": null, "keywords": [] },
+  { "id": "T3", "category": "no_goal_trap", "transcript": [{ "role": "user", "content": "Honestly I'm working on my tan this weekend, don't mind me." }], "expected_goal": null, "keywords": [] }
+]
