@@ -93,6 +93,22 @@ export interface ChatMessageDto {
   created_at: string;
 }
 
+export interface EpisodeDto {
+  id: number;
+  task_id: number;
+  kind: string;
+  text: string;
+  salience: number;
+  source: string;
+  created_at: string;
+  consolidated_at: string | null;
+}
+
+export interface EpisodeSearchResultDto {
+  episode: EpisodeDto;
+  similarity_score: number;
+}
+
 export interface SendMessageResponseDto {
   assistant_response: string;
   retrieved_chunks: RetrievedChunkDto[];
@@ -543,6 +559,18 @@ export async function buildContextPack(taskId: number, query: string): Promise<T
 
 export async function listMessages(taskId: number): Promise<ChatMessageDto[]> {
   return invoke<ChatMessageDto[]>("list_messages", { taskId });
+}
+
+export async function listEpisodes(taskId: number, limit = 50): Promise<EpisodeDto[]> {
+  return invoke<EpisodeDto[]>("list_episodes", { taskId, limit });
+}
+
+export async function searchEpisodes(
+  taskId: number,
+  query: string,
+  limit = 10
+): Promise<EpisodeSearchResultDto[]> {
+  return invoke<EpisodeSearchResultDto[]>("search_episodes", { taskId, query, limit });
 }
 
 export async function sendMessage(

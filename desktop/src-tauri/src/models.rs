@@ -90,6 +90,24 @@ pub struct ChatMessageDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EpisodeDto {
+    pub id: i64,
+    pub task_id: i64,
+    pub kind: String,
+    pub text: String,
+    pub salience: f32,
+    pub source: String,
+    pub created_at: String,
+    pub consolidated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EpisodeSearchResultDto {
+    pub episode: EpisodeDto,
+    pub similarity_score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SendMessageResponseDto {
     pub assistant_response: String,
     pub retrieved_chunks: Vec<RetrievedChunkDto>,

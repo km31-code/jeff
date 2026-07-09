@@ -19,6 +19,7 @@ mod goal_extraction;
 mod latency;
 mod local_runtime;
 mod login_item;
+mod memory;
 mod message_kind;
 mod model_router;
 mod models;
@@ -580,6 +581,15 @@ fn main() {
                 });
             }
 
+            // apex b3: session-summary episodes on long idle lulls.
+            // summarization and embedding stay off the async worker thread.
+            {
+                let memory_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    spawn_memory_session_summary_poll(memory_handle).await;
+                });
+            }
+
             // phase 24: background update check — delayed 2 seconds so it
             // does not compete with tray-ready or session-restore on startup.
             {
@@ -732,6 +742,8 @@ fn main() {
             commands::get_privacy_center_dashboard,
             commands::set_privacy_surface_enabled,
             commands::clear_user_profile_memory,
+            commands::list_episodes,
+            commands::search_episodes,
             // phase 30
             commands::get_relational_profile,
             commands::delete_stated_goal,
@@ -981,12 +993,39 @@ async fn spawn_goal_extraction_poll(handle: tauri::AppHandle) {
         // the reflex extractor is a blocking http call; keep it off the async
         // worker thread.
         let router = jeff_state.model_router.clone();
+        let recent_for_worker = recent.clone();
         let extraction = match tokio::task::spawn_blocking(move || {
-            goal_extraction::extract_goal_with_fallback(&router, &recent)
+            (
+                goal_extraction::extract_goal_with_fallback(&router, &recent_for_worker),
+                memory::extract_memory_tags_with_fallback(&router, &recent_for_worker),
+            )
         })
         .await
         {
-            Ok(extraction) => extraction,
+            Ok((extraction, memory_tags)) => {
+                if !memory_tags.is_empty() {
+                    let store = jeff_state.store.clone();
+                    let embeddings = jeff_state.embeddings.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        memory::record_memory_tags_for_turn(
+                            &store,
+                            embeddings.as_ref(),
+                            task_id,
+                            &memory_tags,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(written)) if written > 0 => {
+                            eprintln!("[jeff] memory_tags_recorded task={task_id} count={written}");
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(err)) => eprintln!("[jeff] memory_tag_record_failed: {err}"),
+                        Err(err) => eprintln!("[jeff] memory_tag_join_failed: {err}"),
+                    }
+                }
+                extraction
+            }
             Err(err) => {
                 eprintln!("[jeff] goal_extraction_join_failed: {err}");
                 continue;
@@ -1005,6 +1044,58 @@ async fn spawn_goal_extraction_poll(handle: tauri::AppHandle) {
                         task_id, extraction.confidence
                     );
                 }
+            }
+        }
+    }
+}
+
+const MEMORY_SESSION_SUMMARY_TICK_SECONDS: u64 = 60;
+const MEMORY_SESSION_IDLE_SECONDS: i64 = 30 * 60;
+
+async fn spawn_memory_session_summary_poll(handle: tauri::AppHandle) {
+    if std::env::var("JEFF_DISABLE_MEMORY_SUMMARY").is_ok() {
+        return;
+    }
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(
+            MEMORY_SESSION_SUMMARY_TICK_SECONDS,
+        ))
+        .await;
+
+        let Some(jeff_state) = handle.try_state::<state::JeffState>() else {
+            continue;
+        };
+        if !jeff_state
+            .store
+            .get_privacy_user_profile_memory_enabled()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let tasks = jeff_state.store.list_tasks().unwrap_or_default();
+        for task in tasks {
+            let store = jeff_state.store.clone();
+            let embeddings = jeff_state.embeddings.clone();
+            let router = jeff_state.model_router.clone();
+            let task_id = task.id;
+            match tokio::task::spawn_blocking(move || {
+                memory::record_idle_session_summary_if_due(
+                    &store,
+                    embeddings.as_ref(),
+                    &router,
+                    task_id,
+                    MEMORY_SESSION_IDLE_SECONDS,
+                )
+            })
+            .await
+            {
+                Ok(Ok(Some(_episode))) => {
+                    eprintln!("[jeff] memory_session_summary_recorded task={task_id}");
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(err)) => eprintln!("[jeff] memory_session_summary_failed: {err}"),
+                Err(err) => eprintln!("[jeff] memory_session_summary_join_failed: {err}"),
             }
         }
     }

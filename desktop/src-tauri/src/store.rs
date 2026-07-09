@@ -651,6 +651,32 @@ impl TaskStore {
             .with_context(|| format!("failed to initialize collaboration style signal {key}"))?;
         }
 
+        // apex b3: typed episodic memory. embeddings are stored as a BLOB of
+        // little-endian f32 values so candidate search can stay local.
+        conn.execute_batch(&format!(
+            "
+            CREATE TABLE IF NOT EXISTS episodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_model TEXT NOT NULL DEFAULT '',
+                salience REAL NOT NULL,
+                source TEXT NOT NULL,
+                consolidated_at TEXT,
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_episodes_task_kind_created
+                ON episodes(task_id, kind, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_episodes_unconsolidated
+                ON episodes(consolidated_at, created_at DESC);
+            ",
+            now = SQLITE_NOW_EXPR,
+        ))
+        .context("failed to create apex b3 episode tables")?;
+
         Ok(())
     }
 
@@ -3927,6 +3953,10 @@ impl TaskStore {
             )
             .context("failed to clear stated goals")?;
         }
+        if Self::table_exists_tx(&tx, "episodes")? {
+            tx.execute("DELETE FROM episodes WHERE task_id = ?1", params![task_id])
+                .context("failed to clear episodes")?;
+        }
         tx.execute(
             "DELETE FROM app_settings WHERE key = ?1",
             params![format!("active_artifact_task_{task_id}")],
@@ -3969,6 +3999,10 @@ impl TaskStore {
         if Self::table_exists_tx(&tx, "trust_metrics")? {
             tx.execute("DELETE FROM trust_metrics", [])
                 .context("failed to clear trust metrics")?;
+        }
+        if Self::table_exists_tx(&tx, "episodes")? {
+            tx.execute("DELETE FROM episodes", [])
+                .context("failed to clear episodes")?;
         }
         let _ = tx.execute("DELETE FROM sqlite_sequence", []);
 

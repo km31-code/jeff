@@ -842,7 +842,7 @@ directional and may be re-scoped when their epoch begins.
 | A5 | Character eval harness | A1 | complete; `scripts/apex_a5_check.sh`, live OpenAI router-judged character eval 15/15, `cargo test --quiet`, `npm run lint`, and `npm test -- --run` passed |
 | B1 | Semantic document model | A3 | complete; includes step-0 real on-device embedding substrate (curated bge-small-en-v1.5, checksum-verified, mode-aware provider, non-fatal re-embed). `scripts/apex_b1_check.sh`, `cargo test` (b1 churn/structure/perf/re-embed), `phase31_check.sh` raw-text audit, `npm run lint`, and `npm test` passed. Semantic embedding endpoint quality is env-gated (needs a running llama.cpp sidecar), same live-eval posture as A1/A5 |
 | B2 | Goal understanding | A1, A3 | complete; `scripts/apex_b2_check.sh`, `cargo test --quiet`, `npm run lint`, `npm test -- --run`, phase30/phase31/phase21 checks, `scripts/apex_b1_check.sh`, and live `JEFF_RUN_EXTERNAL_EVAL=1 scripts/goal_eval.sh` passed. Eval: retired prefix 9/30, deterministic fallback 30/30, live Reflex LLM 30/30 |
-| B3 | Episodic memory store | A3 | not started |
+| B3 | Episodic memory store | A3 | complete; `scripts/apex_b3_check.sh` passed (schema, async writers, session-summary/tag capture, proposal outcomes, debug commands, scripted 5-turn session test, `cargo check`, B3 tests, frontend typecheck) |
 | B4 | Consolidation and memory panel | B3 | not started |
 | B5 | Recall injection | B3, B4 | not started |
 | B6 | Browser perception (Google Docs reader) | B1 | not started |

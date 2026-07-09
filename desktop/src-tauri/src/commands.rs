@@ -16,18 +16,18 @@ use crate::{
     models::{
         ActiveWindowContextDto, ApiKeyValidationDto, ArtifactContentDto, ArtifactDto,
         ArtifactVersionDto, BrowserSelectionCaptureRequestDto, CalendarEventDto, ChatMessageDto,
-        CostGovernorStatusDto, CoworkingStatusDto, DataClearResultDto, DriftFlagDto,
-        EventLogEntryDto, FileWriteProposalDto, IntentClassificationDto, IntentLabel,
-        IntentSlotsDto, LiveEditReceiptDto, LocalRuntimeStatusDto, OnboardingStatusDto,
-        OpenResourceDto, PendingLiveEditDto, PrivacyCenterDashboardDto, ProactiveAuditEntryDto,
-        ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto,
-        RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto, RevisionTargetDto,
-        SelectionBridgeStatusDto, SelectionCaptureIndicatorDto, SendMessageResponseDto,
-        SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto, SubTaskDto, SubTaskStepDto,
-        SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto, SuggestionEvaluationDto,
-        SynthesisLogEntryDto, TaskContextPackDto, TaskDto, TaskSummaryDto, TranscriptionResultDto,
-        UserProfileSignalDto, WatcherStatusDto, WorkloadSummaryDto, WorkspaceInfoDto,
-        WriteAuditEntryDto,
+        CostGovernorStatusDto, CoworkingStatusDto, DataClearResultDto, DriftFlagDto, EpisodeDto,
+        EpisodeSearchResultDto, EventLogEntryDto, FileWriteProposalDto, IntentClassificationDto,
+        IntentLabel, IntentSlotsDto, LiveEditReceiptDto, LocalRuntimeStatusDto,
+        OnboardingStatusDto, OpenResourceDto, PendingLiveEditDto, PrivacyCenterDashboardDto,
+        ProactiveAuditEntryDto, ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto,
+        RetrievedChunkDto, RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto,
+        RevisionTargetDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
+        SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
+        SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto,
+        SuggestionEvaluationDto, SynthesisLogEntryDto, TaskContextPackDto, TaskDto, TaskSummaryDto,
+        TranscriptionResultDto, UserProfileSignalDto, WatcherStatusDto, WorkloadSummaryDto,
+        WorkspaceInfoDto, WriteAuditEntryDto,
     },
     relational_model::{self, RelationalProfile},
     retrieval::{
@@ -65,6 +65,25 @@ fn user_profile_memory_enabled(state: &JeffState) -> bool {
         .store
         .get_privacy_user_profile_memory_enabled()
         .unwrap_or(false)
+}
+
+fn record_proposal_memory_outcome(
+    state: &JeffState,
+    task_id: i64,
+    source: impl Into<String>,
+    text: impl Into<String>,
+) {
+    if !user_profile_memory_enabled(state) {
+        return;
+    }
+    let source = source.into();
+    crate::memory::record_proposal_outcome_async(
+        state.store.clone(),
+        state.embeddings.clone(),
+        task_id,
+        &source,
+        text.into(),
+    );
 }
 
 // phase 20: build the context prefix string from ContextState.
@@ -949,6 +968,17 @@ pub fn apply_revision(
             let _ = user_model::record_revision_accepted(&state.store, accepted_text);
         }
     }
+    record_proposal_memory_outcome(
+        state.inner(),
+        result.revision.task_id,
+        format!("revision:{}:accepted", result.revision.revision_id),
+        format!(
+            "Accepted revision #{} for artifact #{}: {}",
+            result.revision.revision_id,
+            result.revision.artifact_id,
+            result.revision.instruction_text
+        ),
+    );
 
     Ok(result)
 }
@@ -958,7 +988,17 @@ pub fn reject_revision(
     state: State<'_, JeffState>,
     revision_id: i64,
 ) -> Result<RevisionProposalDto, String> {
-    reject_artifact_revision(&state.store, revision_id).map_err(map_jeff_error)
+    let result = reject_artifact_revision(&state.store, revision_id).map_err(map_jeff_error)?;
+    record_proposal_memory_outcome(
+        state.inner(),
+        result.task_id,
+        format!("revision:{}:rejected", result.revision_id),
+        format!(
+            "Rejected revision #{} for artifact #{}: {}",
+            result.revision_id, result.artifact_id, result.instruction_text
+        ),
+    );
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1057,6 +1097,17 @@ pub fn accept_subtask_result(
         // phase 23: record delegation acceptance pattern
         let _ = user_model::record_subtask_accepted(&state.store, &result.execution_type);
     }
+    record_proposal_memory_outcome(
+        state.inner(),
+        result.task_id,
+        format!("subtask:{}:accepted", result.subtask_id),
+        format!(
+            "Accepted subtask #{} result '{}': {}",
+            result.subtask_id,
+            result.title,
+            result.result_summary.clone().unwrap_or_default()
+        ),
+    );
     Ok(result)
 }
 
@@ -1070,6 +1121,17 @@ pub fn reject_subtask_result(
         // phase 23: record delegation rejection pattern
         let _ = user_model::record_subtask_rejected(&state.store, &result.execution_type);
     }
+    record_proposal_memory_outcome(
+        state.inner(),
+        result.task_id,
+        format!("subtask:{}:rejected", result.subtask_id),
+        format!(
+            "Rejected subtask #{} result '{}': {}",
+            result.subtask_id,
+            result.title,
+            result.result_summary.clone().unwrap_or_default()
+        ),
+    );
     Ok(result)
 }
 
@@ -1166,7 +1228,18 @@ pub fn dismiss_suggestion(
     task_id: i64,
     suggestion_id: i64,
 ) -> Result<SuggestionDto, String> {
-    dismiss_suggestion_for_task(&state.store, task_id, suggestion_id).map_err(map_jeff_error)
+    let result = dismiss_suggestion_for_task(&state.store, task_id, suggestion_id)
+        .map_err(map_jeff_error)?;
+    record_proposal_memory_outcome(
+        state.inner(),
+        task_id,
+        format!("suggestion:{}:dismissed", suggestion_id),
+        format!(
+            "Dismissed suggestion '{}': {}",
+            result.title, result.description
+        ),
+    );
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1186,7 +1259,7 @@ pub fn accept_suggestion(
     active_artifact_id: Option<i64>,
     selection_or_range: Option<RevisionTargetDto>,
 ) -> Result<SuggestionAcceptanceDto, String> {
-    accept_suggestion_for_task(
+    let result = accept_suggestion_for_task(
         &state.store,
         state.embeddings.as_ref(),
         state.craft_reasoning(),
@@ -1196,7 +1269,17 @@ pub fn accept_suggestion(
         active_artifact_id,
         selection_or_range,
     )
-    .map_err(map_jeff_error)
+    .map_err(map_jeff_error)?;
+    record_proposal_memory_outcome(
+        state.inner(),
+        task_id,
+        format!("suggestion:{}:accepted", suggestion_id),
+        format!(
+            "Accepted suggestion '{}': {}",
+            result.suggestion.title, result.suggestion.description
+        ),
+    );
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1975,6 +2058,15 @@ pub fn approve_subtask_file_write(
         .next()
         .ok_or_else(|| "audit entry was written but could not be loaded".to_string())?;
     audit.resolved_path = Some(dest.display().to_string());
+    record_proposal_memory_outcome(
+        state.inner(),
+        proposal.task_id,
+        format!("file_write:{}:approved", proposal_id),
+        format!(
+            "Approved file write proposal #{} for {}.",
+            proposal_id, proposal.proposed_path
+        ),
+    );
     Ok(audit)
 }
 
@@ -2026,6 +2118,18 @@ pub fn reject_subtask_file_write(
         .into_iter()
         .next()
         .ok_or_else(|| "audit entry was written but could not be loaded".to_string())
+        .map(|audit| {
+            record_proposal_memory_outcome(
+                state.inner(),
+                proposal.task_id,
+                format!("file_write:{}:rejected", proposal_id),
+                format!(
+                    "Rejected file write proposal #{} for {}.",
+                    proposal_id, proposal.proposed_path
+                ),
+            );
+            audit
+        })
 }
 
 #[tauri::command]
@@ -2037,6 +2141,39 @@ pub fn list_write_audit_log(
         .store
         .list_write_audit_log(task_id, 100)
         .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_episodes(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    limit: Option<usize>,
+) -> Result<Vec<EpisodeDto>, String> {
+    if !user_profile_memory_enabled(state.inner()) {
+        return Ok(Vec::new());
+    }
+    crate::memory::list_episodes(&state.store, task_id, limit.unwrap_or(50).min(200))
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn search_episodes(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<EpisodeSearchResultDto>, String> {
+    if !user_profile_memory_enabled(state.inner()) || query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    crate::memory::search_episodes(
+        &state.store,
+        state.embeddings.as_ref(),
+        task_id,
+        &query,
+        limit.unwrap_or(10).min(50),
+    )
+    .map_err(map_jeff_error)
 }
 
 fn build_privacy_center_dashboard(
@@ -2278,6 +2415,7 @@ pub fn clear_user_profile_memory(
 ) -> Result<PrivacyCenterDashboardDto, String> {
     state.store.clear_user_profile().map_err(map_jeff_error)?;
     relational_model::clear_relational_profile(&state.store).map_err(map_jeff_error)?;
+    crate::memory::clear_all_episodes(&state.store).map_err(map_jeff_error)?;
     build_privacy_center_dashboard(state.inner(), &ambient)
 }
 
