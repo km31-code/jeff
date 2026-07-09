@@ -152,6 +152,19 @@ grep_check "content-observation-status in App.tsx" \
 grep_check "explanation text in App.tsx" \
     "This text never leaves your device" "$FRONTEND/App.tsx"
 
+# --- apex b1: semantic document model raw-text containment ---
+grep_check "document_model.rs present" \
+    "pub struct DocumentModel" "$SRC/document_model.rs"
+
+absent_check "document_model.rs never touches the task store (no raw-text persistence)" \
+    "TaskStore" "$SRC/document_model.rs"
+
+absent_check "document_model.rs does not log (no raw-text in logs)" \
+    "eprintln!" "$SRC/document_model.rs"
+
+grep_check "document model documents its in-memory raw-text contract" \
+    "raw paragraph text" "$SRC/document_model.rs"
+
 # --- behavioral: unit tests ---
 echo ""
 echo "  running content observation unit tests..."

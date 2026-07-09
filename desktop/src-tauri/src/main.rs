@@ -11,6 +11,7 @@ mod commands;
 mod context_observer;
 mod cost_governor;
 mod coworking;
+mod document_model;
 mod embedding;
 mod errors;
 mod flow;
@@ -618,6 +619,7 @@ fn main() {
             commands::start_local_runtime,
             commands::stop_local_runtime,
             commands::download_local_model,
+            commands::download_curated_embedding_model,
             commands::delete_local_model,
             commands::get_cost_governor_status,
             commands::set_llm_daily_budget,
@@ -844,6 +846,18 @@ async fn spawn_content_observation_poll(handle: tauri::AppHandle) {
 
         let text_opt = context_observer::read_ax_document_text(pid);
 
+        // apex b1: drive the semantic document model outside the content
+        // observation lock so per-paragraph embedding never blocks snapshot
+        // assembly. raw text stays inside document_model; only the counts-only
+        // summary crosses back out.
+        let doc_summary = match text_opt.as_ref() {
+            Some(text) => jeff_state.document_model.lock().ok().and_then(|mut dm| {
+                let _delta = dm.observe(task_id, text, jeff_state.embeddings.as_ref());
+                dm.state(task_id)
+            }),
+            None => None,
+        };
+
         let mut should_update_awareness = false;
         if let Ok(mut guard) = jeff_state.content_observation.lock() {
             guard.capture_attempt_count += 1;
@@ -874,6 +888,12 @@ async fn spawn_content_observation_poll(handle: tauri::AppHandle) {
                     guard.prior_text = guard.raw_text.take();
                     guard.raw_text = Some(text);
                     guard.observation = Some(observation);
+                    if let Some(summary) = &doc_summary {
+                        guard.document_paragraph_count = summary.paragraph_count;
+                        guard.document_structure_changed = summary.structure_changed;
+                        guard.document_max_churn = summary.max_churn;
+                        guard.document_churn_hotspots = summary.churn_hotspot_count;
+                    }
                     should_update_awareness = true;
                 }
             }

@@ -840,7 +840,7 @@ directional and may be re-scoped when their epoch begins.
 | A3 | Local model runtime (Reflex + embeddings) | A1 | complete; `scripts/apex_a3_check.sh`, no-key local Reflex tests, local embedding smoke tests, `cargo test --quiet`, `npm run lint`, and `npm test` passed |
 | A4 | Cost governor and spend visibility | A1 | complete; `scripts/apex_a4_check.sh`, cost-governor degradation tests, `cargo test --quiet`, `npm run lint`, and `npm test -- --run` passed |
 | A5 | Character eval harness | A1 | complete; `scripts/apex_a5_check.sh`, live OpenAI router-judged character eval 15/15, `cargo test --quiet`, `npm run lint`, and `npm test -- --run` passed |
-| B1 | Semantic document model | A3 | not started |
+| B1 | Semantic document model | A3 | complete; includes step-0 real on-device embedding substrate (curated bge-small-en-v1.5, checksum-verified, mode-aware provider, non-fatal re-embed). `scripts/apex_b1_check.sh`, `cargo test` (b1 churn/structure/perf/re-embed), `phase31_check.sh` raw-text audit, `npm run lint`, and `npm test` passed. Semantic embedding endpoint quality is env-gated (needs a running llama.cpp sidecar), same live-eval posture as A1/A5 |
 | B2 | Goal understanding | A1, A3 | not started |
 | B3 | Episodic memory store | A3 | not started |
 | B4 | Consolidation and memory panel | B3 | not started |

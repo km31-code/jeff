@@ -14,16 +14,36 @@ use sha2::{Digest, Sha256};
 use crate::models::LocalRuntimeStatusDto;
 
 pub const LOCAL_REASONING_MODEL_ID: &str = "local-reflex-llamacpp";
+// lexical fallback embedding id. used when no semantic embedding model is
+// installed and running; embeddings are then a deterministic token hash.
 pub const LOCAL_EMBEDDING_MODEL_ID: &str = "local-hash-embedding-v1";
+// apex b1: semantic embedding id. used when the curated on-device embedding
+// model (bge-small-en-v1.5) is installed and the sidecar is serving it.
+// distinct id so retrieval's lazy migration re-embeds chunks when the user
+// moves from lexical fallback to the semantic model.
+pub const LOCAL_SEMANTIC_EMBEDDING_MODEL_ID: &str = "local-bge-small-en-v1.5-q8_0";
 pub const LOCAL_REASONING_MODEL_FILE: &str = "reflex-instruct.gguf";
 pub const LOCAL_EMBEDDING_MODEL_FILE: &str = "embedding.gguf";
 #[allow(dead_code)]
 pub const LOCAL_RUNTIME_CHOICE: &str = "llama.cpp server";
 
+// apex b1: curated on-device embedding model. bge-small-en-v1.5 (384-dim,
+// q8_0 gguf, ~35 MB) is a real semantic embedder small enough for a one-click
+// download. the checksum is the git-lfs sha-256 of the published artifact and
+// is verified after download in download_model.
+pub const CURATED_EMBEDDING_MODEL_URL: &str =
+    "https://huggingface.co/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-q8_0.gguf";
+pub const CURATED_EMBEDDING_MODEL_SHA256: &str =
+    "ec38e8da142596baa913124ae50550de284b6916bf59577ef2f0cb9660c2f514";
+pub const CURATED_EMBEDDING_MODEL_BYTES: u64 = 36_806_944;
+
 const DEFAULT_PORT: u16 = 17631;
 const STARTUP_TIMEOUT_MS: u64 = 4_000;
 const HEALTH_TIMEOUT_MS: u64 = 250;
 const DOWNLOAD_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
+// how long a semantic-embedding capability probe is cached before re-checking
+// sidecar health. keeps model_id() and embed_text() consistent and cheap.
+const EMBED_CAPABILITY_TTL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalModelKind {
@@ -47,6 +67,9 @@ impl LocalModelKind {
 struct LocalRuntimeInner {
     child: Option<Child>,
     last_error: Option<String>,
+    // cached (semantic_available, checked_at) for the embedding capability
+    // probe. bounds how often health_check runs on the embedding hot path.
+    embed_capability: Option<(bool, Instant)>,
 }
 
 pub struct LocalRuntime {
@@ -69,8 +92,50 @@ impl LocalRuntime {
             inner: Mutex::new(LocalRuntimeInner {
                 child: None,
                 last_error: None,
+                embed_capability: None,
             }),
         }
+    }
+
+    // apex b1: whether real semantic embeddings are available right now. true
+    // only when the curated embedding model file is present and the sidecar is
+    // healthy. cached with a short ttl so it is cheap to consult per embed.
+    pub fn semantic_embedding_available(&self) -> bool {
+        if !self.embedding_model_path().is_file() {
+            return false;
+        }
+        if let Ok(inner) = self.inner.lock() {
+            if let Some((value, at)) = inner.embed_capability {
+                if at.elapsed() < EMBED_CAPABILITY_TTL {
+                    return value;
+                }
+            }
+        }
+        let healthy = self.health_check();
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.embed_capability = Some((healthy, Instant::now()));
+        }
+        healthy
+    }
+
+    // invalidate the cached capability so the next probe re-checks. called when
+    // a sidecar embed fails so model_id() and embed_text() re-agree on lexical
+    // fallback rather than mislabeling a hash vector as semantic.
+    pub fn mark_embedding_capability_stale(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.embed_capability = None;
+        }
+    }
+
+    // apex b1: one-click curated semantic embedding model download. verifies
+    // the published checksum and size.
+    pub fn download_curated_embedding_model(&self) -> Result<LocalRuntimeStatusDto> {
+        self.download_model(
+            LocalModelKind::Embedding,
+            CURATED_EMBEDDING_MODEL_URL,
+            CURATED_EMBEDDING_MODEL_SHA256,
+            Some(CURATED_EMBEDDING_MODEL_BYTES),
+        )
     }
 
     pub fn status(&self) -> LocalRuntimeStatusDto {
@@ -92,6 +157,22 @@ impl LocalRuntime {
         let installed_model_bytes =
             file_len(&reasoning_model_path) + file_len(&embedding_model_path);
         let deterministic_fallback_enabled = true;
+        // semantic embeddings require both the model file and a healthy sidecar;
+        // reuse the health probe already computed above and refresh the cache.
+        let semantic_embedding_available = embedding_model_present && healthy;
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.embed_capability = Some((semantic_embedding_available, Instant::now()));
+        }
+        let embedding_mode = if semantic_embedding_available {
+            "semantic"
+        } else {
+            "lexical_fallback"
+        };
+        let active_embedding_model_id = if semantic_embedding_available {
+            LOCAL_SEMANTIC_EMBEDDING_MODEL_ID
+        } else {
+            LOCAL_EMBEDDING_MODEL_ID
+        };
         let mode = if healthy {
             "sidecar"
         } else if deterministic_fallback_enabled {
@@ -112,9 +193,14 @@ impl LocalRuntime {
             reasoning_model_id: LOCAL_REASONING_MODEL_ID.to_string(),
             reasoning_model_path: reasoning_model_path.display().to_string(),
             reasoning_model_present,
-            embedding_model_id: LOCAL_EMBEDDING_MODEL_ID.to_string(),
+            embedding_model_id: active_embedding_model_id.to_string(),
             embedding_model_path: embedding_model_path.display().to_string(),
             embedding_model_present,
+            embedding_mode: embedding_mode.to_string(),
+            semantic_embedding_available,
+            curated_embedding_url: CURATED_EMBEDDING_MODEL_URL.to_string(),
+            curated_embedding_sha256: CURATED_EMBEDDING_MODEL_SHA256.to_string(),
+            curated_embedding_bytes: CURATED_EMBEDDING_MODEL_BYTES,
             deterministic_fallback_enabled,
             last_error,
             disk_available_bytes: available_disk_bytes(&self.models_dir).ok().flatten(),
@@ -605,6 +691,28 @@ mod tests {
         assert_eq!(status.reasoning_model_id, LOCAL_REASONING_MODEL_ID);
         assert_eq!(status.embedding_model_id, LOCAL_EMBEDDING_MODEL_ID);
         assert!(status.deterministic_fallback_enabled);
+    }
+
+    #[test]
+    fn b1_curated_embedding_catalog_is_wellformed() {
+        assert!(CURATED_EMBEDDING_MODEL_URL.starts_with("https://"));
+        assert!(CURATED_EMBEDDING_MODEL_URL.ends_with(".gguf"));
+        assert_eq!(CURATED_EMBEDDING_MODEL_SHA256.len(), 64);
+        assert!(CURATED_EMBEDDING_MODEL_SHA256
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
+        assert!(CURATED_EMBEDDING_MODEL_BYTES > 0);
+    }
+
+    #[test]
+    fn b1_semantic_embedding_unavailable_without_model_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = LocalRuntime::new(dir.path());
+        assert!(!runtime.semantic_embedding_available());
+        let status = runtime.status();
+        assert_eq!(status.embedding_mode, "lexical_fallback");
+        assert!(!status.semantic_embedding_available);
+        assert_eq!(status.embedding_model_id, LOCAL_EMBEDDING_MODEL_ID);
     }
 
     #[test]

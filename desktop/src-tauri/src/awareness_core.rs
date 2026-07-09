@@ -573,10 +573,25 @@ fn content_observation_summary(state: &JeffState) -> (Option<String>, Option<u32
         DraftState::Mid => "mid-draft",
         DraftState::Late => "late draft",
     };
-    let excerpt = format!(
+    let mut excerpt = format!(
         "~{} words, {}, {}",
         obs.word_count, draft_str, change_phrase
     );
+    // apex b1: enrich with counts-only structural signal from the semantic
+    // document model. no raw document text is included.
+    if guard.document_paragraph_count > 0 {
+        excerpt.push_str(&format!(", {} paragraphs", guard.document_paragraph_count));
+    }
+    if guard.document_structure_changed {
+        excerpt.push_str(", structure changed");
+    }
+    if guard.document_max_churn >= 2 {
+        let hotspots = guard.document_churn_hotspots.max(1);
+        let plural = if hotspots == 1 { "" } else { "s" };
+        excerpt.push_str(&format!(
+            ", rewriting concentrated in {hotspots} paragraph{plural}"
+        ));
+    }
     let idle_secs = obs
         .stable_for_ticks
         .saturating_mul(crate::context_observer::CONTENT_OBSERVATION_POLL_INTERVAL_SECONDS as u32);

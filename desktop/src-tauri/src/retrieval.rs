@@ -156,13 +156,27 @@ pub fn retrieve_relevant_chunks_with_top_k(
     let mut normalized_chunks = Vec::with_capacity(stored_chunks.len());
     for mut chunk in stored_chunks {
         if chunk.embedding_model != active_embedding_model {
-            let refreshed = embeddings
-                .embed_text(&chunk.chunk_text)
-                .with_context(|| format!("failed to re-embed stale chunk id={}", chunk.chunk_id))?;
-            if !refreshed.is_empty() {
-                store.update_chunk_embedding(chunk.chunk_id, &refreshed, active_embedding_model)?;
-                chunk.embedding = refreshed;
-                chunk.embedding_model = active_embedding_model.to_string();
+            // apex b1: re-embedding a stale chunk is best-effort. a transient
+            // embedding failure (e.g. the local sidecar hiccuping) must not
+            // fail the whole retrieval — keep the stale vector, which is still
+            // usable, and re-migrate on a later touch.
+            match embeddings.embed_text(&chunk.chunk_text) {
+                Ok(refreshed) if !refreshed.is_empty() => {
+                    store.update_chunk_embedding(
+                        chunk.chunk_id,
+                        &refreshed,
+                        active_embedding_model,
+                    )?;
+                    chunk.embedding = refreshed;
+                    chunk.embedding_model = active_embedding_model.to_string();
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    eprintln!(
+                        "[jeff] retrieval_reembed_skipped chunk_id={} reason={}",
+                        chunk.chunk_id, err
+                    );
+                }
             }
         }
         normalized_chunks.push(chunk);
@@ -438,6 +452,24 @@ mod tests {
         }
     }
 
+    // apex b1: errors only for chunks whose text contains POISON, embeds
+    // everything else via the keyword provider. reports a new model id so
+    // stored chunks look stale and trigger re-embedding.
+    struct SelectiveFailEmbeddingProvider;
+
+    impl EmbeddingProvider for SelectiveFailEmbeddingProvider {
+        fn embed_text(&self, input: &str) -> Result<Vec<f32>> {
+            if input.contains("POISON") {
+                return Err(anyhow::anyhow!("simulated transient embedding failure"));
+            }
+            KeywordEmbeddingProvider.embed_text(input)
+        }
+
+        fn model_id(&self) -> &'static str {
+            "keyword-embed-v2"
+        }
+    }
+
     fn write_file(path: &Path, body: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("failed to create parent directory");
@@ -629,6 +661,56 @@ mod tests {
         assert!(after
             .iter()
             .all(|chunk| chunk.embedding_model == LOCAL_EMBEDDING_MODEL_ID));
+    }
+
+    #[test]
+    fn b1_reembed_failure_is_nonfatal_and_keeps_stale_chunk() {
+        let temp = tempfile::tempdir().expect("failed to create temp directory");
+        let base_path = temp.path().join("app_local_data");
+        let store = TaskStore::initialize(&base_path).expect("failed to initialize store");
+        let task = store.create_task("Reembed").expect("failed to create task");
+
+        // seed two artifacts under the legacy ("unknown") embedding model.
+        let poison_path = temp.path().join("fixtures").join("poison.md");
+        let good_path = temp.path().join("fixtures").join("good.md");
+        write_file(&poison_path, "POISON structure section requirements notes.");
+        write_file(&good_path, "Good structure section requirements overview.");
+        import_artifact_for_task(
+            &store,
+            &KeywordEmbeddingProvider,
+            task.id,
+            &poison_path.to_string_lossy(),
+        )
+        .expect("failed to import poison");
+        import_artifact_for_task(
+            &store,
+            &KeywordEmbeddingProvider,
+            task.id,
+            &good_path.to_string_lossy(),
+        )
+        .expect("failed to import good");
+
+        // the new provider errors while re-embedding the POISON chunk; the query
+        // itself embeds fine. retrieval must still succeed and keep the stale
+        // chunk rather than failing the whole request.
+        let retrieved = retrieve_relevant_chunks_with_top_k(
+            &store,
+            &SelectiveFailEmbeddingProvider,
+            task.id,
+            "structure section requirements",
+            5,
+        )
+        .expect("retrieval must not fail when one chunk cannot be re-embedded");
+        assert!(!retrieved.is_empty());
+
+        // the good chunk migrated to the new model; the poison chunk stayed stale.
+        let chunks = store
+            .fetch_chunk_embeddings_for_task(task.id)
+            .expect("failed to fetch chunks");
+        assert!(chunks
+            .iter()
+            .any(|c| c.embedding_model == "keyword-embed-v2"));
+        assert!(chunks.iter().any(|c| c.embedding_model == "unknown"));
     }
 
     #[test]

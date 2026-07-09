@@ -128,6 +128,7 @@ import {
   clearContentObservation,
   deleteLocalModel,
   downloadLocalModel,
+  downloadCuratedEmbeddingModel,
   setLlmDailyBudget,
   startLocalRuntime,
   stopLocalRuntime,
@@ -2098,6 +2099,20 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     }
   }
 
+  async function handleDownloadCuratedEmbeddingModel() {
+    setLocalModelBusy(true);
+    try {
+      const status = await downloadCuratedEmbeddingModel();
+      setPrivacyDashboard((current) => current ? { ...current, local_runtime: status } : current);
+      setPrivacyActionMessage("Installed the semantic embedding model.");
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to install semantic embedding model", error);
+    } finally {
+      setLocalModelBusy(false);
+    }
+  }
+
   async function handleSetLlmDailyBudget(budgetKey: string, rawValue: string) {
     const budgetUsd = Number(rawValue.trim());
     if (!Number.isFinite(budgetUsd) || budgetUsd < 0) {
@@ -4027,6 +4042,26 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                             data-testid="local-model-download-embedding"
                           >
                             Install embeddings
+                          </button>
+                        </div>
+                        <p className="task-meta" data-testid="embedding-mode-status">
+                          Embeddings:{" "}
+                          {privacyDashboard.local_runtime.semantic_embedding_available
+                            ? "semantic (on-device bge-small)"
+                            : "lexical fallback (keyword hashing)"}
+                        </p>
+                        <p className="task-meta">
+                          Semantic recall needs a real on-device embedding model.
+                          Install it in one click; it stays on your device.
+                        </p>
+                        <div className="row-actions">
+                          <button
+                            type="button"
+                            onClick={() => void handleDownloadCuratedEmbeddingModel()}
+                            disabled={localModelBusy || privacyDashboard.local_runtime.semantic_embedding_available}
+                            data-testid="local-model-download-semantic-embedding"
+                          >
+                            Download semantic embedding model (~35 MB)
                           </button>
                         </div>
                       </li>

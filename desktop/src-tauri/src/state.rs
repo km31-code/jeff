@@ -44,6 +44,9 @@ pub struct JeffState {
     pub awareness_core: Arc<AwarenessCore>,
     // phase 31: content observation state — raw text never leaves context_observer.
     pub content_observation: Arc<Mutex<ContentObservationState>>,
+    // apex b1: semantic document model — raw paragraph text stays in-memory
+    // inside this model; only structural deltas/summaries are exported.
+    pub document_model: Arc<Mutex<crate::document_model::DocumentModel>>,
 }
 
 impl JeffState {
@@ -76,6 +79,7 @@ impl JeffState {
             watcher: Arc::new(Mutex::new(WatcherState::new())),
             awareness_core: Arc::new(AwarenessCore::new()),
             content_observation: Arc::new(Mutex::new(ContentObservationState::default())),
+            document_model: Arc::new(Mutex::new(crate::document_model::DocumentModel::new())),
         }
     }
 

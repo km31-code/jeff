@@ -371,6 +371,18 @@ pub fn download_local_model(
         .map_err(map_jeff_error)
 }
 
+// apex b1: one-click download of the curated semantic embedding model
+// (bge-small-en-v1.5). url, checksum, and size are baked in and verified.
+#[tauri::command]
+pub fn download_curated_embedding_model(
+    state: State<'_, JeffState>,
+) -> Result<LocalRuntimeStatusDto, String> {
+    state
+        .local_runtime
+        .download_curated_embedding_model()
+        .map_err(map_jeff_error)
+}
+
 #[tauri::command]
 pub fn get_cost_governor_status(
     state: State<'_, JeffState>,

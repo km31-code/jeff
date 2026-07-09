@@ -516,6 +516,13 @@ pub struct LocalRuntimeStatusDto {
     pub embedding_model_id: String,
     pub embedding_model_path: String,
     pub embedding_model_present: bool,
+    // apex b1: "semantic" when the curated embedding model is installed and the
+    // sidecar is healthy; "lexical_fallback" when embeddings are a token hash.
+    pub embedding_mode: String,
+    pub semantic_embedding_available: bool,
+    pub curated_embedding_url: String,
+    pub curated_embedding_sha256: String,
+    pub curated_embedding_bytes: u64,
     pub deterministic_fallback_enabled: bool,
     pub last_error: Option<String>,
     pub disk_available_bytes: Option<u64>,

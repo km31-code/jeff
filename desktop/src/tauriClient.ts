@@ -389,6 +389,11 @@ export interface LocalRuntimeStatusDto {
   embedding_model_id: string;
   embedding_model_path: string;
   embedding_model_present: boolean;
+  embedding_mode: string;
+  semantic_embedding_available: boolean;
+  curated_embedding_url: string;
+  curated_embedding_sha256: string;
+  curated_embedding_bytes: number;
   deterministic_fallback_enabled: boolean;
   last_error: string | null;
   disk_available_bytes: number | null;
@@ -452,6 +457,11 @@ export async function downloadLocalModel(
     sha256,
     expectedBytes: expectedBytes ?? null,
   });
+}
+
+// apex b1: one-click download of the curated semantic embedding model.
+export async function downloadCuratedEmbeddingModel(): Promise<LocalRuntimeStatusDto> {
+  return invoke<LocalRuntimeStatusDto>("download_curated_embedding_model");
 }
 
 export async function getCostGovernorStatus(): Promise<CostGovernorStatusDto> {

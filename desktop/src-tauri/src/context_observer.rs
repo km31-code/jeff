@@ -46,6 +46,12 @@ pub struct ContentObservationState {
     pub last_captured_at: Option<i64>,
     pub capture_attempt_count: u32,
     pub capture_failed_count: u32,
+    // apex b1: counts-only structural signals from the semantic document model.
+    // no raw document text — safe to surface into the snapshot summary.
+    pub document_paragraph_count: usize,
+    pub document_structure_changed: bool,
+    pub document_max_churn: u32,
+    pub document_churn_hotspots: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -523,12 +529,13 @@ pub fn summarize_content_observation(
         DraftState::Mid
     };
 
-    let content_changed = if let Some(p) = prior {
-        let text_prefix: String = text.chars().take(80).collect();
-        let prior_prefix: String = p.chars().take(80).collect();
-        text_prefix != prior_prefix
-    } else {
-        false
+    // apex b1: the first-80-char prefix comparison is retired. change detection
+    // is now full-text equality here (any edit anywhere counts), and the real
+    // structural/churn signal comes from the semantic document model
+    // (document_model.rs), surfaced separately in the snapshot.
+    let content_changed = match prior {
+        Some(p) => text.trim() != p.trim(),
+        None => false,
     };
 
     let change_magnitude = if !content_changed {
@@ -631,8 +638,8 @@ mod tests {
 
     #[test]
     fn summarize_detects_major_change() {
-        // prior has 100 words starting with "aaa "; current has 200 words starting
-        // with "bbb " so the first-80-char prefix differs → content_changed = true.
+        // prior is 100 "aaa" words; current is 200 "bbb" words. the full text
+        // differs, so content_changed = true (b1: full-text equality, no prefix).
         let prior = "aaa ".repeat(100);
         let current = "bbb ".repeat(200);
         let obs = summarize_content_observation(&current, Some(&prior), 100, 0);

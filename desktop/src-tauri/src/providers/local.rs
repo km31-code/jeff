@@ -7,7 +7,9 @@ use std::{
 use anyhow::{anyhow, Result};
 
 use crate::{
-    local_runtime::{LocalRuntime, LOCAL_EMBEDDING_MODEL_ID},
+    local_runtime::{
+        LocalRuntime, LOCAL_EMBEDDING_MODEL_ID, LOCAL_SEMANTIC_EMBEDDING_MODEL_ID,
+    },
     model_router::LlmUsage,
     models::{IntentClassificationDto, IntentLabel, IntentSlotsDto},
     providers::{EmbeddingsProvider, ReasoningModelProvider},
@@ -112,11 +114,19 @@ impl EmbeddingsProvider for LocalEmbeddingProvider {
             return Err(anyhow!("embedding input cannot be empty"));
         }
 
-        if self.runtime.embedding_model_path().is_file() && self.runtime.health_check() {
+        // apex b1: prefer the real semantic model when installed and healthy.
+        // model_id() gates on the same capability, so a vector and its stored
+        // model tag always agree. if a specific sidecar embed fails we mark the
+        // capability stale so subsequent calls (and model_id) fall back to
+        // lexical hashing rather than tagging a hash vector as semantic.
+        if self.runtime.semantic_embedding_available() {
             match self.runtime.embed_text_via_sidecar(trimmed) {
                 Ok(embedding) if !embedding.is_empty() => return Ok(embedding),
-                Ok(_) => {}
-                Err(err) => eprintln!("[jeff] local_embedding_sidecar_failed: {err}"),
+                Ok(_) => self.runtime.mark_embedding_capability_stale(),
+                Err(err) => {
+                    eprintln!("[jeff] local_embedding_sidecar_failed: {err}");
+                    self.runtime.mark_embedding_capability_stale();
+                }
             }
         }
 
@@ -124,7 +134,11 @@ impl EmbeddingsProvider for LocalEmbeddingProvider {
     }
 
     fn model_id(&self) -> &'static str {
-        LOCAL_EMBEDDING_MODEL_ID
+        if self.runtime.semantic_embedding_available() {
+            LOCAL_SEMANTIC_EMBEDDING_MODEL_ID
+        } else {
+            LOCAL_EMBEDDING_MODEL_ID
+        }
     }
 }
 

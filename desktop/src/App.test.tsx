@@ -145,6 +145,11 @@ type LocalRuntimeStatusDto = {
   embedding_model_id: string;
   embedding_model_path: string;
   embedding_model_present: boolean;
+  embedding_mode: string;
+  semantic_embedding_available: boolean;
+  curated_embedding_url: string;
+  curated_embedding_sha256: string;
+  curated_embedding_bytes: number;
   deterministic_fallback_enabled: boolean;
   last_error: string | null;
   disk_available_bytes: number | null;
@@ -346,6 +351,13 @@ function setupInvokeMock(options?: {
     embedding_model_id: "local-hash-embedding-v1",
     embedding_model_path: "/tmp/jeff_data/models/embedding.gguf",
     embedding_model_present: false,
+    embedding_mode: "lexical_fallback",
+    semantic_embedding_available: false,
+    curated_embedding_url:
+      "https://huggingface.co/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-q8_0.gguf",
+    curated_embedding_sha256:
+      "ec38e8da142596baa913124ae50550de284b6916bf59577ef2f0cb9660c2f514",
+    curated_embedding_bytes: 36_806_944,
     deterministic_fallback_enabled: true,
     last_error: null,
     disk_available_bytes: 1_000_000_000,
