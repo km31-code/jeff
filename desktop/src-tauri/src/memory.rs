@@ -186,6 +186,13 @@ pub fn clear_all_episodes(store: &TaskStore) -> Result<()> {
     Ok(())
 }
 
+pub fn delete_episode(store: &TaskStore, id: i64) -> Result<()> {
+    let conn = store.connect()?;
+    conn.execute("DELETE FROM episodes WHERE id = ?1", params![id])
+        .context("failed to delete episode")?;
+    Ok(())
+}
+
 pub fn extract_memory_tags_with_fallback(
     router: &ModelRouter,
     transcript: &[ChatMessageDto],

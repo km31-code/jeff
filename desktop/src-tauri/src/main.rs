@@ -8,6 +8,7 @@ mod chat_streaming;
 mod chunking;
 mod classifier;
 mod commands;
+mod consolidation;
 mod context_observer;
 mod cost_governor;
 mod coworking;
@@ -590,6 +591,15 @@ fn main() {
                 });
             }
 
+            // apex b4: consolidate typed episodes into durable facts on idle
+            // windows or the once-daily 02:00 maintenance window.
+            {
+                let consolidation_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    spawn_memory_consolidation_poll(consolidation_handle).await;
+                });
+            }
+
             // phase 24: background update check — delayed 2 seconds so it
             // does not compete with tray-ready or session-restore on startup.
             {
@@ -744,6 +754,13 @@ fn main() {
             commands::clear_user_profile_memory,
             commands::list_episodes,
             commands::search_episodes,
+            commands::delete_episode,
+            commands::clear_memory_episodes,
+            commands::list_facts,
+            commands::delete_fact,
+            commands::clear_memory_facts,
+            commands::run_memory_consolidation,
+            commands::preview_memory_prompt_context,
             // phase 30
             commands::get_relational_profile,
             commands::delete_stated_goal,
@@ -1051,6 +1068,9 @@ async fn spawn_goal_extraction_poll(handle: tauri::AppHandle) {
 
 const MEMORY_SESSION_SUMMARY_TICK_SECONDS: u64 = 60;
 const MEMORY_SESSION_IDLE_SECONDS: i64 = 30 * 60;
+const MEMORY_CONSOLIDATION_TICK_SECONDS: u64 = 60;
+const MEMORY_CONSOLIDATION_IDLE_SECONDS: i64 = 10 * 60;
+const MEMORY_CONSOLIDATION_LAST_2AM_KEY: &str = "memory_consolidation:last_2am_run";
 
 async fn spawn_memory_session_summary_poll(handle: tauri::AppHandle) {
     if std::env::var("JEFF_DISABLE_MEMORY_SUMMARY").is_ok() {
@@ -1097,6 +1117,94 @@ async fn spawn_memory_session_summary_poll(handle: tauri::AppHandle) {
                 Ok(Err(err)) => eprintln!("[jeff] memory_session_summary_failed: {err}"),
                 Err(err) => eprintln!("[jeff] memory_session_summary_join_failed: {err}"),
             }
+        }
+    }
+}
+
+async fn spawn_memory_consolidation_poll(handle: tauri::AppHandle) {
+    if std::env::var("JEFF_DISABLE_MEMORY_CONSOLIDATION").is_ok() {
+        return;
+    }
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(
+            MEMORY_CONSOLIDATION_TICK_SECONDS,
+        ))
+        .await;
+
+        let Some(jeff_state) = handle.try_state::<state::JeffState>() else {
+            continue;
+        };
+        if !jeff_state
+            .store
+            .get_privacy_user_profile_memory_enabled()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if consolidation::unconsolidated_episode_count(&jeff_state.store).unwrap_or(0) == 0 {
+            continue;
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        let idle_due = jeff_state
+            .store
+            .list_tasks()
+            .unwrap_or_default()
+            .into_iter()
+            .any(|task| {
+                let recent = jeff_state
+                    .store
+                    .list_recent_chat_messages(task.id, 1)
+                    .unwrap_or_default();
+                let Some(message) = recent.last() else {
+                    return true;
+                };
+                let Some(last_at) =
+                    awareness_core::parse_sqlite_datetime_to_unix(&message.created_at)
+                else {
+                    return false;
+                };
+                now.saturating_sub(last_at) >= MEMORY_CONSOLIDATION_IDLE_SECONDS
+            });
+        let local_now = chrono::Local::now();
+        let today = local_now.format("%Y-%m-%d").to_string();
+        let two_am_due = local_now.format("%H").to_string() == "02"
+            && jeff_state
+                .store
+                .get_app_setting(MEMORY_CONSOLIDATION_LAST_2AM_KEY)
+                .ok()
+                .flatten()
+                .as_deref()
+                != Some(today.as_str());
+
+        if !idle_due && !two_am_due {
+            continue;
+        }
+
+        let store = jeff_state.store.clone();
+        let embeddings = jeff_state.embeddings.clone();
+        let router = jeff_state.model_router.clone();
+        match tokio::task::spawn_blocking(move || {
+            consolidation::run_consolidation(&store, embeddings.as_ref(), &router)
+        })
+        .await
+        {
+            Ok(Ok(report)) => {
+                eprintln!(
+                    "[jeff] memory_consolidation_complete processed={} upserted={} merged={} dropped={}",
+                    report.processed_episode_count,
+                    report.upserted_fact_count,
+                    report.merged_fact_count,
+                    report.dropped_fact_count
+                );
+                if two_am_due {
+                    let _ = jeff_state
+                        .store
+                        .set_app_setting(MEMORY_CONSOLIDATION_LAST_2AM_KEY, &today);
+                }
+            }
+            Ok(Err(err)) => eprintln!("[jeff] memory_consolidation_failed: {err}"),
+            Err(err) => eprintln!("[jeff] memory_consolidation_join_failed: {err}"),
         }
     }
 }

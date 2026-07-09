@@ -266,6 +266,7 @@ pub fn mark_latest_active_goal_status(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn record_struggle(store: &TaskStore, task_id: i64, description: &str) -> Result<()> {
     let clean = description.trim();
     if clean.is_empty() {
@@ -342,6 +343,7 @@ pub fn record_struggle(store: &TaskStore, task_id: i64, description: &str) -> Re
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn maybe_record_drift_struggle(store: &TaskStore, task_id: i64) -> Result<()> {
     let conn = store.connect()?;
     let count: i64 = conn
@@ -710,6 +712,7 @@ fn struggle_pattern_from_row(row: &Row<'_>) -> rusqlite::Result<StrugglePattern>
     })
 }
 
+#[allow(dead_code)]
 fn parse_task_ids(raw: &str) -> Vec<i64> {
     serde_json::from_str::<Vec<i64>>(raw).unwrap_or_default()
 }
@@ -761,6 +764,7 @@ fn cap_words(value: &str, max_words: usize) -> String {
     format!("{}...", words[..max_words].join(" "))
 }
 
+#[allow(dead_code)]
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

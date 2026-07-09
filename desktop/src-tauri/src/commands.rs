@@ -16,18 +16,19 @@ use crate::{
     models::{
         ActiveWindowContextDto, ApiKeyValidationDto, ArtifactContentDto, ArtifactDto,
         ArtifactVersionDto, BrowserSelectionCaptureRequestDto, CalendarEventDto, ChatMessageDto,
-        CostGovernorStatusDto, CoworkingStatusDto, DataClearResultDto, DriftFlagDto, EpisodeDto,
-        EpisodeSearchResultDto, EventLogEntryDto, FileWriteProposalDto, IntentClassificationDto,
-        IntentLabel, IntentSlotsDto, LiveEditReceiptDto, LocalRuntimeStatusDto,
-        OnboardingStatusDto, OpenResourceDto, PendingLiveEditDto, PrivacyCenterDashboardDto,
-        ProactiveAuditEntryDto, ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto,
-        RetrievedChunkDto, RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto,
-        RevisionTargetDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
-        SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
-        SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto,
-        SuggestionEvaluationDto, SynthesisLogEntryDto, TaskContextPackDto, TaskDto, TaskSummaryDto,
-        TranscriptionResultDto, UserProfileSignalDto, WatcherStatusDto, WorkloadSummaryDto,
-        WorkspaceInfoDto, WriteAuditEntryDto,
+        ConsolidationReportDto, CostGovernorStatusDto, CoworkingStatusDto, DataClearResultDto,
+        DriftFlagDto, EpisodeDto, EpisodeSearchResultDto, EventLogEntryDto, FactDto,
+        FileWriteProposalDto, IntentClassificationDto, IntentLabel, IntentSlotsDto,
+        LiveEditReceiptDto, LocalRuntimeStatusDto, MemoryPromptPreviewDto, OnboardingStatusDto,
+        OpenResourceDto, PendingLiveEditDto, PrivacyCenterDashboardDto, ProactiveAuditEntryDto,
+        ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto,
+        RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto, RevisionTargetDto,
+        SelectionBridgeStatusDto, SelectionCaptureIndicatorDto, SendMessageResponseDto,
+        SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto, SubTaskDto, SubTaskStepDto,
+        SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto, SuggestionEvaluationDto,
+        SynthesisLogEntryDto, TaskContextPackDto, TaskDto, TaskSummaryDto, TranscriptionResultDto,
+        UserProfileSignalDto, WatcherStatusDto, WorkloadSummaryDto, WorkspaceInfoDto,
+        WriteAuditEntryDto,
     },
     relational_model::{self, RelationalProfile},
     retrieval::{
@@ -2176,6 +2177,90 @@ pub fn search_episodes(
     .map_err(map_jeff_error)
 }
 
+#[tauri::command]
+pub fn delete_episode(state: State<'_, JeffState>, id: i64) -> Result<(), String> {
+    if !user_profile_memory_enabled(state.inner()) {
+        return Ok(());
+    }
+    crate::memory::delete_episode(&state.store, id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn clear_memory_episodes(state: State<'_, JeffState>) -> Result<(), String> {
+    if !user_profile_memory_enabled(state.inner()) {
+        return Ok(());
+    }
+    crate::memory::clear_all_episodes(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_facts(
+    state: State<'_, JeffState>,
+    limit: Option<usize>,
+) -> Result<Vec<FactDto>, String> {
+    if !user_profile_memory_enabled(state.inner()) {
+        return Ok(Vec::new());
+    }
+    crate::consolidation::list_facts(&state.store, limit.unwrap_or(100).min(500))
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn delete_fact(state: State<'_, JeffState>, id: i64) -> Result<(), String> {
+    if !user_profile_memory_enabled(state.inner()) {
+        return Ok(());
+    }
+    crate::consolidation::delete_fact(&state.store, id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn clear_memory_facts(state: State<'_, JeffState>) -> Result<(), String> {
+    if !user_profile_memory_enabled(state.inner()) {
+        return Ok(());
+    }
+    crate::consolidation::clear_facts(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub async fn run_memory_consolidation(
+    state: State<'_, JeffState>,
+) -> Result<ConsolidationReportDto, String> {
+    if !user_profile_memory_enabled(state.inner()) {
+        return Ok(ConsolidationReportDto {
+            processed_episode_count: 0,
+            upserted_fact_count: 0,
+            merged_fact_count: 0,
+            decayed_fact_count: 0,
+            dropped_fact_count: 0,
+            marked_episode_count: 0,
+        });
+    }
+    let store = state.store.clone();
+    let embeddings = state.embeddings.clone();
+    let router = state.model_router.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::consolidation::run_consolidation(&store, embeddings.as_ref(), &router)
+    })
+    .await
+    .map_err(|err| format!("memory consolidation task failed: {err}"))?
+    .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn preview_memory_prompt_context(
+    state: State<'_, JeffState>,
+) -> Result<MemoryPromptPreviewDto, String> {
+    if !user_profile_memory_enabled(state.inner()) {
+        return Ok(MemoryPromptPreviewDto {
+            prompt_context: None,
+        });
+    }
+    Ok(MemoryPromptPreviewDto {
+        prompt_context: crate::consolidation::build_memory_prompt_context(&state.store, 12)
+            .map_err(map_jeff_error)?,
+    })
+}
+
 fn build_privacy_center_dashboard(
     state: &JeffState,
     ambient: &ambient::AmbientState,
@@ -2416,6 +2501,7 @@ pub fn clear_user_profile_memory(
     state.store.clear_user_profile().map_err(map_jeff_error)?;
     relational_model::clear_relational_profile(&state.store).map_err(map_jeff_error)?;
     crate::memory::clear_all_episodes(&state.store).map_err(map_jeff_error)?;
+    crate::consolidation::clear_facts(&state.store).map_err(map_jeff_error)?;
     build_privacy_center_dashboard(state.inner(), &ambient)
 }
 

@@ -154,6 +154,7 @@ pub struct ModelRequest {
     pub timeout_ms: Option<u64>,
     #[allow(dead_code)]
     pub purpose: Option<String>,
+    pub budget_key: Option<String>,
 }
 
 impl ModelRequest {
@@ -171,6 +172,7 @@ impl ModelRequest {
             temperature: 0.0,
             timeout_ms: None,
             purpose: None,
+            budget_key: None,
         }
     }
 
@@ -181,6 +183,12 @@ impl ModelRequest {
         if options.json_object {
             self.json_schema = Some(serde_json::json!({ "type": "json_object" }));
         }
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_budget_key(mut self, budget_key: impl Into<String>) -> Self {
+        self.budget_key = Some(budget_key.into());
         self
     }
 
@@ -199,6 +207,7 @@ impl ModelRequest {
             temperature: 0.0,
             timeout_ms: None,
             purpose: None,
+            budget_key: None,
         }
     }
 }
@@ -431,10 +440,25 @@ impl ModelRouter {
     }
 
     fn log_usage(&self, tier: Tier, cfg: &TierConfig, usage: &LlmUsage, purpose: &str) {
+        self.log_usage_for_budget_key(
+            crate::cost_governor::budget_key_for_tier(tier),
+            cfg,
+            usage,
+            purpose,
+        );
+    }
+
+    fn log_usage_for_budget_key(
+        &self,
+        budget_key: &str,
+        cfg: &TierConfig,
+        usage: &LlmUsage,
+        purpose: &str,
+    ) {
         let cumulative = crate::latency::record_llm_usage(*usage);
-        let est_cost_usd = crate::cost_governor::record_usage(
+        let est_cost_usd = crate::cost_governor::record_usage_for_budget_key(
             self.store.as_ref(),
-            tier,
+            budget_key,
             cfg.provider,
             &cfg.model,
             purpose,
@@ -446,7 +470,7 @@ impl ModelRouter {
         });
         eprintln!(
             "[jeff] llm_usage tier={} provider={} model={} purpose={} input={} output={} cached={} est_cost_usd={:.6} cached_ratio={:.3} cumulative_cached_ratio={:.3}",
-            tier.as_str(),
+            budget_key,
             cfg.provider.as_str(),
             cfg.model,
             crate::cost_governor::normalize_purpose(purpose),
@@ -549,15 +573,26 @@ impl ModelRouter {
             .purpose
             .clone()
             .unwrap_or_else(|| "default".to_string());
-        let budget_decision =
-            crate::cost_governor::preflight(self.store.as_ref(), request.tier, &purpose);
+        let budget_key = request
+            .budget_key
+            .clone()
+            .unwrap_or_else(|| crate::cost_governor::budget_key_for_tier(request.tier).to_string());
+        let budget_decision = crate::cost_governor::preflight_for_budget_key(
+            self.store.as_ref(),
+            request.tier,
+            &budget_key,
+            &purpose,
+        );
         if budget_decision.degraded {
             eprintln!(
                 "[jeff] model_router_budget_degraded from={} to={} purpose={} notice={}",
                 budget_decision.requested_tier.as_str(),
                 budget_decision.effective_tier.as_str(),
                 crate::cost_governor::normalize_purpose(&purpose),
-                budget_decision.notice.as_deref().unwrap_or("<already-sent>")
+                budget_decision
+                    .notice
+                    .as_deref()
+                    .unwrap_or("<already-sent>")
             );
             request.tier = budget_decision.effective_tier;
         }
@@ -614,7 +649,7 @@ impl ModelRouter {
                 }
             }
         };
-        self.log_usage(request.tier, &effective_cfg, &usage, &purpose);
+        self.log_usage_for_budget_key(&budget_key, &effective_cfg, &usage, &purpose);
         Ok(ModelResponse {
             text,
             usage,
@@ -1068,6 +1103,7 @@ mod tests {
             temperature: 0.0,
             timeout_ms: None,
             purpose: Some("test".to_string()),
+            budget_key: None,
         };
 
         assert_eq!(

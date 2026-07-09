@@ -59,6 +59,20 @@ pub fn set_daily_budget_usd(store: &TaskStore, budget_key: &str, value: f64) -> 
 }
 
 pub fn preflight(store: Option<&TaskStore>, requested_tier: Tier, purpose: &str) -> BudgetDecision {
+    preflight_for_budget_key(
+        store,
+        requested_tier,
+        budget_key_for_tier(requested_tier),
+        purpose,
+    )
+}
+
+pub fn preflight_for_budget_key(
+    store: Option<&TaskStore>,
+    requested_tier: Tier,
+    budget_key: &str,
+    purpose: &str,
+) -> BudgetDecision {
     let Some(store) = store else {
         return BudgetDecision {
             requested_tier,
@@ -69,8 +83,13 @@ pub fn preflight(store: Option<&TaskStore>, requested_tier: Tier, purpose: &str)
     };
 
     let mut effective = requested_tier;
+    let uses_named_budget = budget_key != budget_key_for_tier(requested_tier);
     for candidate in degradation_chain(requested_tier) {
-        let key = budget_key_for_tier(candidate);
+        let key = if uses_named_budget {
+            budget_key
+        } else {
+            budget_key_for_tier(candidate)
+        };
         let spent = store.sum_llm_usage_today(Some(key)).unwrap_or(0.0);
         let budget =
             get_daily_budget_usd(store, key).unwrap_or_else(|_| default_daily_budget_usd(key));
@@ -97,9 +116,28 @@ pub fn preflight(store: Option<&TaskStore>, requested_tier: Tier, purpose: &str)
     }
 }
 
+#[allow(dead_code)]
 pub fn record_usage(
     store: Option<&TaskStore>,
     tier: Tier,
+    provider: ProviderKind,
+    model: &str,
+    purpose: &str,
+    usage: LlmUsage,
+) -> Result<f64> {
+    record_usage_for_budget_key(
+        store,
+        budget_key_for_tier(tier),
+        provider,
+        model,
+        purpose,
+        usage,
+    )
+}
+
+pub fn record_usage_for_budget_key(
+    store: Option<&TaskStore>,
+    budget_key: &str,
     provider: ProviderKind,
     model: &str,
     purpose: &str,
@@ -110,7 +148,7 @@ pub fn record_usage(
     };
     let est_cost_usd = estimate_cost_usd(provider, model, usage);
     store.append_llm_usage_log(&LlmUsageLogInput {
-        tier: tier.as_str().to_string(),
+        tier: budget_key.to_string(),
         model: model.to_string(),
         purpose: normalize_purpose(purpose).to_string(),
         input_tokens: usage.input_tokens,
@@ -132,7 +170,7 @@ pub fn status(store: &TaskStore) -> Result<CostGovernorStatusDto> {
             .unwrap_or(0.0)
     };
 
-    let tiers = [
+    let mut tiers = [
         Tier::Reflex,
         Tier::Conversation,
         Tier::Judgment,
@@ -154,6 +192,20 @@ pub fn status(store: &TaskStore) -> Result<CostGovernorStatusDto> {
         }
     })
     .collect::<Vec<_>>();
+
+    for key in [SPECULATION_BUDGET_KEY, CONSOLIDATION_BUDGET_KEY] {
+        let budget =
+            get_daily_budget_usd(store, key).unwrap_or_else(|_| default_daily_budget_usd(key));
+        let spent = spent_for(key);
+        tiers.push(CostTierSpendDto {
+            tier: key.to_string(),
+            budget_key: key.to_string(),
+            budget_usd: budget,
+            spent_usd: spent,
+            over_budget: spent > budget,
+            degrade_to: None,
+        });
+    }
 
     let history = store
         .llm_usage_history(7)?

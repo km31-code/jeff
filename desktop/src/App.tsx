@@ -23,14 +23,17 @@ import {
   cancelSubtask,
   cancelInteraction,
   ChatMessageDto,
+  ConsolidationReportDto,
   convertSubtaskToRevision,
   CoworkingStatusDto,
   createTask,
   dismissSuggestion,
   EventLogEntryDto,
+  EpisodeDto,
   evaluateProactiveNudge,
   evaluateNextSuggestions,
   explainSuggestion,
+  FactDto,
   getActiveArtifactSelection,
   refineSubtask,
   getActiveTask,
@@ -45,6 +48,8 @@ import {
   importArtifact,
   listArtifacts,
   listArtifactVersions,
+  listEpisodes,
+  listFacts,
   listMessages,
   listOpenResources,
   listPendingRevisions,
@@ -124,6 +129,10 @@ import {
   dismissSelectionCapture,
   setTtsVoice,
   clearUserProfileMemory,
+  deleteEpisode,
+  deleteFact,
+  runMemoryConsolidation,
+  previewMemoryPromptContext,
   setContentObservationEnabled,
   clearContentObservation,
   deleteLocalModel,
@@ -260,6 +269,19 @@ function budgetProgressValue(spent: number, budget: number): number {
   return Math.min(spent / budget, 1);
 }
 
+function formatMemoryKind(kind: string): string {
+  return kind.replace(/_/g, " ");
+}
+
+function evidenceCount(raw: string): number {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
 function App({ onCloseWorkspace }: AppProps = {}) {
   // when opened as a workspace window, start directly in workspace mode
   // with full panels visible — no home screen needed.
@@ -367,6 +389,10 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [privacyDashboard, setPrivacyDashboard] = useState<PrivacyCenterDashboardDto | null>(null);
   const [proactiveAuditLog, setProactiveAuditLog] = useState<ProactiveAuditEntryDto[]>([]);
   const [synthesisLog, setSynthesisLog] = useState<SynthesisLogEntryDto[]>([]);
+  const [memoryFacts, setMemoryFacts] = useState<FactDto[]>([]);
+  const [memoryEpisodes, setMemoryEpisodes] = useState<EpisodeDto[]>([]);
+  const [memoryPromptPreview, setMemoryPromptPreview] = useState<string | null>(null);
+  const [memoryConsolidationBusy, setMemoryConsolidationBusy] = useState(false);
   const [privacyActionMessage, setPrivacyActionMessage] = useState<string | null>(null);
   const [clearAllConfirmation, setClearAllConfirmation] = useState("");
   const [localModelUrl, setLocalModelUrl] = useState("");
@@ -393,7 +419,11 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     [relationalProfile]
   );
   const rememberedSignalCount =
-    userProfileSignals.length + activeStatedGoals.length + strugglePatterns.length;
+    userProfileSignals.length +
+    activeStatedGoals.length +
+    strugglePatterns.length +
+    memoryFacts.length +
+    memoryEpisodes.length;
 
   // phase 23: workload section
   const [workloadSummary, setWorkloadSummary] = useState<WorkloadSummaryDto | null>(null);
@@ -1103,23 +1133,36 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       if (!dashboard.user_profile_memory_enabled) {
         setUserProfileSignals([]);
         setRelationalProfile(null);
+        setMemoryFacts([]);
+        setMemoryEpisodes([]);
+        setMemoryPromptPreview(null);
+      } else {
+        const [facts, preview] = await Promise.all([
+          listFacts(100),
+          previewMemoryPromptContext()
+        ]);
+        setMemoryFacts(facts);
+        setMemoryPromptPreview(preview.prompt_context);
       }
       if (!dashboard.calendar_context_enabled) {
         setCalendarEvent(null);
       }
       if (dashboard.active_task_id !== null) {
-        const [triggerLog, writeLog, synthesisEntries] = await Promise.all([
+        const [triggerLog, writeLog, synthesisEntries, episodes] = await Promise.all([
           listProactiveTriggerAuditLog(dashboard.active_task_id),
           listWriteAuditLog(dashboard.active_task_id),
-          getSynthesisLog(dashboard.active_task_id)
+          getSynthesisLog(dashboard.active_task_id),
+          dashboard.user_profile_memory_enabled ? listEpisodes(dashboard.active_task_id, 50) : Promise.resolve([])
         ]);
         setProactiveAuditLog(triggerLog);
         setWriteAuditLog(writeLog);
         setSynthesisLog(synthesisEntries);
+        setMemoryEpisodes(episodes);
       } else {
         setProactiveAuditLog([]);
         setWriteAuditLog([]);
         setSynthesisLog([]);
+        setMemoryEpisodes([]);
       }
     } catch (error) {
       setOperationError("Failed to refresh Privacy Center", error);
@@ -2143,9 +2186,48 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setPrivacyDashboard(dashboard);
       setUserProfileSignals([]);
       setRelationalProfile(await getRelationalProfile());
+      setMemoryFacts([]);
+      setMemoryEpisodes([]);
+      setMemoryPromptPreview(null);
       setPrivacyActionMessage("User profile memory cleared.");
     } catch (error) {
       setOperationError("Failed to clear user profile memory", error);
+    }
+  }
+
+  async function handleRunMemoryConsolidation() {
+    if (memoryConsolidationBusy) {
+      return;
+    }
+    setMemoryConsolidationBusy(true);
+    try {
+      const report: ConsolidationReportDto = await runMemoryConsolidation();
+      setPrivacyActionMessage(
+        `Consolidated ${report.processed_episode_count} episodes; ${report.upserted_fact_count} facts added, ${report.merged_fact_count} merged.`
+      );
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to consolidate memory", error);
+    } finally {
+      setMemoryConsolidationBusy(false);
+    }
+  }
+
+  async function handleDeleteFact(id: number) {
+    try {
+      await deleteFact(id);
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to delete memory fact", error);
+    }
+  }
+
+  async function handleDeleteEpisode(id: number) {
+    try {
+      await deleteEpisode(id);
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to delete memory episode", error);
     }
   }
 
@@ -3943,6 +4025,83 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                         </button>
                       </li>
 
+                      <li data-testid="privacy-surface-memory-panel">
+                        <label className="toggle-row">
+                          <span>Memory</span>
+                        </label>
+                        <p className="task-meta">
+                          {memoryFacts.length} facts; {memoryEpisodes.length} recent episodes.
+                        </p>
+                        <div className="row-actions">
+                          <button
+                            type="button"
+                            onClick={() => void handleRunMemoryConsolidation()}
+                            disabled={memoryConsolidationBusy || !privacyDashboard.user_profile_memory_enabled}
+                            data-testid="memory-consolidate-now"
+                          >
+                            Consolidate
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void refreshPrivacyCenter()}
+                            data-testid="memory-refresh"
+                          >
+                            Refresh
+                          </button>
+                        </div>
+
+                        <p className="task-meta">Facts</p>
+                        {memoryFacts.length === 0 ? (
+                          <p data-testid="memory-facts-empty">No consolidated memory facts.</p>
+                        ) : (
+                          <ul className="compact-list" data-testid="memory-facts-list">
+                            {memoryFacts.map((fact) => (
+                              <li key={`memory-fact-${fact.id}`} data-testid="memory-fact">
+                                <span>
+                                  {formatMemoryKind(fact.kind)}: {fact.text}
+                                  {` (${evidenceCount(fact.evidence_ids_json)} evidence)`}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteFact(fact.id)}
+                                  data-testid="memory-delete-fact"
+                                >
+                                  Remove
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+
+                        <p className="task-meta">Episodes</p>
+                        {memoryEpisodes.length === 0 ? (
+                          <p data-testid="memory-episodes-empty">No recent memory episodes for this task.</p>
+                        ) : (
+                          <ul className="compact-list" data-testid="memory-episodes-list">
+                            {memoryEpisodes.slice(0, 8).map((episode) => (
+                              <li key={`memory-episode-${episode.id}`} data-testid="memory-episode">
+                                <span>
+                                  {formatMemoryKind(episode.kind)}: {episode.text}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteEpisode(episode.id)}
+                                  data-testid="memory-delete-episode"
+                                >
+                                  Remove
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+
+                        {memoryPromptPreview ? (
+                          <pre className="privacy-memory-preview" data-testid="memory-prompt-preview">
+                            {memoryPromptPreview}
+                          </pre>
+                        ) : null}
+                      </li>
+
                       <li data-testid="privacy-surface-local-runtime">
                         <label className="toggle-row">
                           <span>Local model runtime</span>
@@ -4418,10 +4577,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                       data-testid="jeff-remembers-clear-all"
                       onClick={() => {
                         void clearUserProfileMemory()
-                          .then(() => Promise.all([
-                            getUserProfileSignals().then(setUserProfileSignals),
-                            getRelationalProfile().then(setRelationalProfile),
-                          ]))
+                          .then(() => refreshPrivacyCenter())
                           .then(() => setJeffRemembersOpen(false))
                           .catch(() => undefined);
                       }}

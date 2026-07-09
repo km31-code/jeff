@@ -2,6 +2,7 @@
 // only modules needed by tests are declared here.
 pub mod character;
 pub mod classifier;
+pub mod consolidation;
 pub mod context_observer;
 pub mod cost_governor;
 pub mod embedding;

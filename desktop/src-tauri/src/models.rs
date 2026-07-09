@@ -108,6 +108,33 @@ pub struct EpisodeSearchResultDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactDto {
+    pub id: i64,
+    pub text: String,
+    pub kind: String,
+    pub confidence: f32,
+    pub evidence_ids_json: String,
+    pub salience: f32,
+    pub last_reinforced: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConsolidationReportDto {
+    pub processed_episode_count: usize,
+    pub upserted_fact_count: usize,
+    pub merged_fact_count: usize,
+    pub decayed_fact_count: usize,
+    pub dropped_fact_count: usize,
+    pub marked_episode_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryPromptPreviewDto {
+    pub prompt_context: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SendMessageResponseDto {
     pub assistant_response: String,
     pub retrieved_chunks: Vec<RetrievedChunkDto>,

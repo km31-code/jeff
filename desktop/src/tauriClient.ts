@@ -109,6 +109,30 @@ export interface EpisodeSearchResultDto {
   similarity_score: number;
 }
 
+export interface FactDto {
+  id: number;
+  text: string;
+  kind: string;
+  confidence: number;
+  evidence_ids_json: string;
+  salience: number;
+  last_reinforced: string;
+  created_at: string;
+}
+
+export interface ConsolidationReportDto {
+  processed_episode_count: number;
+  upserted_fact_count: number;
+  merged_fact_count: number;
+  decayed_fact_count: number;
+  dropped_fact_count: number;
+  marked_episode_count: number;
+}
+
+export interface MemoryPromptPreviewDto {
+  prompt_context: string | null;
+}
+
 export interface SendMessageResponseDto {
   assistant_response: string;
   retrieved_chunks: RetrievedChunkDto[];
@@ -571,6 +595,34 @@ export async function searchEpisodes(
   limit = 10
 ): Promise<EpisodeSearchResultDto[]> {
   return invoke<EpisodeSearchResultDto[]>("search_episodes", { taskId, query, limit });
+}
+
+export async function deleteEpisode(id: number): Promise<void> {
+  return invoke<void>("delete_episode", { id });
+}
+
+export async function clearMemoryEpisodes(): Promise<void> {
+  return invoke<void>("clear_memory_episodes");
+}
+
+export async function listFacts(limit = 100): Promise<FactDto[]> {
+  return invoke<FactDto[]>("list_facts", { limit });
+}
+
+export async function deleteFact(id: number): Promise<void> {
+  return invoke<void>("delete_fact", { id });
+}
+
+export async function clearMemoryFacts(): Promise<void> {
+  return invoke<void>("clear_memory_facts");
+}
+
+export async function runMemoryConsolidation(): Promise<ConsolidationReportDto> {
+  return invoke<ConsolidationReportDto>("run_memory_consolidation");
+}
+
+export async function previewMemoryPromptContext(): Promise<MemoryPromptPreviewDto> {
+  return invoke<MemoryPromptPreviewDto>("preview_memory_prompt_context");
 }
 
 export async function sendMessage(

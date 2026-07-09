@@ -677,6 +677,32 @@ impl TaskStore {
         ))
         .context("failed to create apex b3 episode tables")?;
 
+        // apex b4: durable consolidated memory facts. embeddings are local-only
+        // merge aids; prompt surfaces use the plain-language fact text.
+        conn.execute_batch(&format!(
+            "
+            CREATE TABLE IF NOT EXISTS facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_model TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL,
+                evidence_ids_json TEXT NOT NULL,
+                salience REAL NOT NULL,
+                last_reinforced TEXT NOT NULL DEFAULT ({now}),
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_facts_kind_salience
+                ON facts(kind, salience DESC, last_reinforced DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced
+                ON facts(last_reinforced ASC);
+            ",
+            now = SQLITE_NOW_EXPR,
+        ))
+        .context("failed to create apex b4 fact tables")?;
+
         Ok(())
     }
 
@@ -4004,6 +4030,10 @@ impl TaskStore {
             tx.execute("DELETE FROM episodes", [])
                 .context("failed to clear episodes")?;
         }
+        if Self::table_exists_tx(&tx, "facts")? {
+            tx.execute("DELETE FROM facts", [])
+                .context("failed to clear facts")?;
+        }
         let _ = tx.execute("DELETE FROM sqlite_sequence", []);
 
         tx.commit()
@@ -4619,7 +4649,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(count, 31, "expected 31 application tables after apex a4");
+        assert_eq!(
+            count, 33,
+            "expected 33 application tables after apex b4"
+        );
     }
 
     #[test]

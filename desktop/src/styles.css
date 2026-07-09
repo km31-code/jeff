@@ -415,6 +415,19 @@ pre {
   border-bottom: 0;
 }
 
+.privacy-memory-preview {
+  max-height: 9rem;
+  overflow: auto;
+  margin: 0.25rem 0 0;
+  padding: 0.45rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  font-size: 0.78rem;
+}
+
 .memory-section {
   display: grid;
   gap: 0.3rem;
