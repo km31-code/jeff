@@ -3,6 +3,7 @@
 pub mod character;
 pub mod classifier;
 pub mod context_observer;
+pub mod cost_governor;
 pub mod errors;
 pub mod latency;
 pub mod local_runtime;

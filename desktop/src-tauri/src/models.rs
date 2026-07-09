@@ -468,7 +468,7 @@ pub struct ActiveWindowContextDto {
 
 // phase 21: privacy and trust control center
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PrivacyCenterDashboardDto {
     pub active_task_id: Option<i64>,
     pub active_task_title: Option<String>,
@@ -496,6 +496,8 @@ pub struct PrivacyCenterDashboardDto {
     pub content_observation_failed_app: Option<String>,
     // apex a3: local model runtime status.
     pub local_runtime: LocalRuntimeStatusDto,
+    // apex a4: spend metering and budget status.
+    pub cost_governor: CostGovernorStatusDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -518,6 +520,30 @@ pub struct LocalRuntimeStatusDto {
     pub last_error: Option<String>,
     pub disk_available_bytes: Option<u64>,
     pub installed_model_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CostGovernorStatusDto {
+    pub today_total_usd: f64,
+    pub tiers: Vec<CostTierSpendDto>,
+    pub history: Vec<CostHistoryEntryDto>,
+    pub last_notice: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CostTierSpendDto {
+    pub tier: String,
+    pub budget_key: String,
+    pub budget_usd: f64,
+    pub spent_usd: f64,
+    pub over_budget: bool,
+    pub degrade_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CostHistoryEntryDto {
+    pub date: String,
+    pub total_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -128,6 +128,7 @@ import {
   clearContentObservation,
   deleteLocalModel,
   downloadLocalModel,
+  setLlmDailyBudget,
   startLocalRuntime,
   stopLocalRuntime,
   listProactiveTriggerAuditLog,
@@ -237,6 +238,26 @@ interface AppProps {
 }
 
 const DEBUG_PANELS_STORAGE_KEY = "jeff_show_debug_panels";
+
+function formatSpendUsd(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "$0.00";
+  }
+  if (value > 0 && value < 0.01) {
+    return `$${value.toFixed(4)}`;
+  }
+  return `$${value.toFixed(2)}`;
+}
+
+function budgetProgressValue(spent: number, budget: number): number {
+  if (!Number.isFinite(spent) || spent <= 0) {
+    return 0;
+  }
+  if (!Number.isFinite(budget) || budget <= 0) {
+    return 1;
+  }
+  return Math.min(spent / budget, 1);
+}
 
 function App({ onCloseWorkspace }: AppProps = {}) {
   // when opened as a workspace window, start directly in workspace mode
@@ -2074,6 +2095,21 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setOperationError("Failed to install local model", error);
     } finally {
       setLocalModelBusy(false);
+    }
+  }
+
+  async function handleSetLlmDailyBudget(budgetKey: string, rawValue: string) {
+    const budgetUsd = Number(rawValue.trim());
+    if (!Number.isFinite(budgetUsd) || budgetUsd < 0) {
+      setPrivacyActionMessage("Daily budget must be a non-negative dollar amount.");
+      return;
+    }
+    try {
+      const status = await setLlmDailyBudget(budgetKey, budgetUsd);
+      setPrivacyDashboard((current) => current ? { ...current, cost_governor: status } : current);
+      setPrivacyActionMessage(`Updated ${budgetKey} daily budget.`);
+    } catch (error) {
+      setOperationError("Failed to update LLM budget", error);
     }
   }
 
@@ -3992,6 +4028,73 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                           >
                             Install embeddings
                           </button>
+                        </div>
+                      </li>
+
+                      <li data-testid="privacy-surface-spend">
+                        <label className="toggle-row">
+                          <span>Spend</span>
+                        </label>
+                        <p className="task-meta" data-testid="cost-governor-today">
+                          Today: {formatSpendUsd(privacyDashboard.cost_governor.today_total_usd)}
+                        </p>
+                        {privacyDashboard.cost_governor.last_notice ? (
+                          <p className="task-meta" data-testid="cost-governor-notice">
+                            {privacyDashboard.cost_governor.last_notice}
+                          </p>
+                        ) : null}
+                        <div className="cost-tier-list" data-testid="cost-tier-list">
+                          {privacyDashboard.cost_governor.tiers.map((tier) => (
+                            <div
+                              className={tier.over_budget ? "cost-tier-row cost-tier-row-over" : "cost-tier-row"}
+                              data-testid={`cost-tier-${tier.tier}`}
+                              key={tier.budget_key}
+                            >
+                              <div className="cost-tier-header">
+                                <span>{tier.tier}</span>
+                                <span>
+                                  {formatSpendUsd(tier.spent_usd)} / {formatSpendUsd(tier.budget_usd)}
+                                </span>
+                              </div>
+                              <progress
+                                aria-label={`${tier.tier} spend`}
+                                max={1}
+                                value={budgetProgressValue(tier.spent_usd, tier.budget_usd)}
+                              />
+                              <div className="row-actions">
+                                <input
+                                  className="inline-input cost-budget-input"
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  defaultValue={tier.budget_usd.toFixed(2)}
+                                  onBlur={(event) =>
+                                    void handleSetLlmDailyBudget(tier.budget_key, event.currentTarget.value)
+                                  }
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      event.currentTarget.blur();
+                                    }
+                                  }}
+                                  data-testid={`cost-budget-${tier.tier}`}
+                                />
+                                {tier.degrade_to ? (
+                                  <span className="task-meta">Degrades to {tier.degrade_to}</span>
+                                ) : null}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="cost-history-list" data-testid="cost-history-list">
+                          {privacyDashboard.cost_governor.history.length > 0 ? (
+                            privacyDashboard.cost_governor.history.map((entry) => (
+                              <span key={entry.date}>
+                                {entry.date}: {formatSpendUsd(entry.total_usd)}
+                              </span>
+                            ))
+                          ) : (
+                            <span>No spend in the last 7 days.</span>
+                          )}
                         </div>
                       </li>
 

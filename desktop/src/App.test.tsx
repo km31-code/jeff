@@ -127,6 +127,7 @@ type PrivacyCenterDashboardDto = {
   tts_voice: string;
   available_tts_voices: string[];
   local_runtime: LocalRuntimeStatusDto;
+  cost_governor: CostGovernorStatusDto;
 };
 
 type LocalRuntimeStatusDto = {
@@ -148,6 +149,22 @@ type LocalRuntimeStatusDto = {
   last_error: string | null;
   disk_available_bytes: number | null;
   installed_model_bytes: number;
+};
+
+type CostGovernorStatusDto = {
+  today_total_usd: number;
+  tiers: CostTierSpendDto[];
+  history: Array<{ date: string; total_usd: number }>;
+  last_notice: string | null;
+};
+
+type CostTierSpendDto = {
+  tier: string;
+  budget_key: string;
+  budget_usd: number;
+  spent_usd: number;
+  over_budget: boolean;
+  degrade_to: string | null;
 };
 
 type RelationalProfileDto = {
@@ -334,6 +351,48 @@ function setupInvokeMock(options?: {
     disk_available_bytes: 1_000_000_000,
     installed_model_bytes: 0
   };
+  const costGovernorStatus: CostGovernorStatusDto = {
+    today_total_usd: 0.13,
+    tiers: [
+      {
+        tier: "reflex",
+        budget_key: "reflex",
+        budget_usd: 2,
+        spent_usd: 0,
+        over_budget: false,
+        degrade_to: null
+      },
+      {
+        tier: "conversation",
+        budget_key: "conversation",
+        budget_usd: 5,
+        spent_usd: 0.03,
+        over_budget: false,
+        degrade_to: null
+      },
+      {
+        tier: "judgment",
+        budget_key: "judgment",
+        budget_usd: 10,
+        spent_usd: 0,
+        over_budget: false,
+        degrade_to: "conversation"
+      },
+      {
+        tier: "craft",
+        budget_key: "craft",
+        budget_usd: 20,
+        spent_usd: 0.1,
+        over_budget: false,
+        degrade_to: "judgment"
+      }
+    ],
+    history: [
+      { date: "2026-07-08", total_usd: 0.13 },
+      { date: "2026-07-07", total_usd: 0.04 }
+    ],
+    last_notice: "Cost governor moved craft work to judgment for today (runaway)"
+  };
   let privacyDashboard: PrivacyCenterDashboardDto = {
     active_task_id: 1,
     active_task_title: "history storymap",
@@ -354,7 +413,8 @@ function setupInvokeMock(options?: {
     typing_activity_enabled: true,
     tts_voice: "alloy",
     available_tts_voices: ["alloy", "nova", "shimmer"],
-    local_runtime: localRuntimeStatus
+    local_runtime: localRuntimeStatus,
+    cost_governor: costGovernorStatus
   };
   let relationalProfile: RelationalProfileDto = {
     stated_goals: [],
@@ -598,6 +658,27 @@ function setupInvokeMock(options?: {
 
     if (command === "get_local_runtime_status") {
       return { ...privacyDashboard.local_runtime };
+    }
+
+    if (command === "get_cost_governor_status") {
+      return { ...privacyDashboard.cost_governor };
+    }
+
+    if (command === "set_llm_daily_budget") {
+      const budgetKey = String(args?.budgetKey ?? "");
+      const budgetUsd = Number(args?.budgetUsd ?? 0);
+      privacyDashboard = {
+        ...privacyDashboard,
+        cost_governor: {
+          ...privacyDashboard.cost_governor,
+          tiers: privacyDashboard.cost_governor.tiers.map((tier) =>
+            tier.budget_key === budgetKey
+              ? { ...tier, budget_usd: budgetUsd, over_budget: tier.spent_usd > budgetUsd }
+              : tier
+          )
+        }
+      };
+      return { ...privacyDashboard.cost_governor };
     }
 
     if (command === "start_local_runtime") {
@@ -2385,6 +2466,36 @@ describe("App", () => {
       expect(invokeMock).toHaveBeenCalledWith("set_privacy_surface_enabled", {
         surface: "active_window_context",
         enabled: false
+      })
+    );
+  });
+
+  it("shows spend status and edits tier budgets from Privacy Center", async () => {
+    setupInvokeMock();
+
+    render(<App />);
+
+    await screen.findByTestId("home-resume-screen");
+    await userEvent.click(screen.getByTestId("continue-task-button"));
+    await screen.findByTestId("workspace-screen");
+
+    await userEvent.click(screen.getByTestId("privacy-center-open"));
+    expect(await screen.findByTestId("privacy-surface-spend")).toHaveTextContent("Today: $0.13");
+    expect(screen.getByTestId("cost-tier-craft")).toHaveTextContent("$0.10 / $20.00");
+    expect(screen.getByTestId("cost-governor-notice")).toHaveTextContent(
+      "Cost governor moved craft work to judgment"
+    );
+    expect(screen.getByTestId("cost-history-list")).toHaveTextContent("2026-07-08: $0.13");
+
+    const craftBudgetInput = screen.getByTestId("cost-budget-craft");
+    await userEvent.clear(craftBudgetInput);
+    await userEvent.type(craftBudgetInput, "0.05");
+    await userEvent.tab();
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("set_llm_daily_budget", {
+        budgetKey: "craft",
+        budgetUsd: 0.05
       })
     );
   });

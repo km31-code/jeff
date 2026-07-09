@@ -395,6 +395,27 @@ export interface LocalRuntimeStatusDto {
   installed_model_bytes: number;
 }
 
+export interface CostGovernorStatusDto {
+  today_total_usd: number;
+  tiers: CostTierSpendDto[];
+  history: CostHistoryEntryDto[];
+  last_notice: string | null;
+}
+
+export interface CostTierSpendDto {
+  tier: string;
+  budget_key: string;
+  budget_usd: number;
+  spent_usd: number;
+  over_budget: boolean;
+  degrade_to: string | null;
+}
+
+export interface CostHistoryEntryDto {
+  date: string;
+  total_usd: number;
+}
+
 export async function getTierModelMap(): Promise<RouterConfigDto> {
   return invoke<RouterConfigDto>("get_tier_model_map");
 }
@@ -431,6 +452,17 @@ export async function downloadLocalModel(
     sha256,
     expectedBytes: expectedBytes ?? null,
   });
+}
+
+export async function getCostGovernorStatus(): Promise<CostGovernorStatusDto> {
+  return invoke<CostGovernorStatusDto>("get_cost_governor_status");
+}
+
+export async function setLlmDailyBudget(
+  budgetKey: string,
+  budgetUsd: number
+): Promise<CostGovernorStatusDto> {
+  return invoke<CostGovernorStatusDto>("set_llm_daily_budget", { budgetKey, budgetUsd });
 }
 
 export async function completeOnboarding(): Promise<void> {
@@ -1030,6 +1062,7 @@ export interface PrivacyCenterDashboardDto {
   content_observation_capture_failed: boolean;
   content_observation_failed_app: string | null;
   local_runtime: LocalRuntimeStatusDto;
+  cost_governor: CostGovernorStatusDto;
 }
 
 export type SelectionCaptureStatus = "captured" | "failed";

@@ -81,6 +81,29 @@ pub struct StoredChunkEmbedding {
 }
 
 #[derive(Debug, Clone)]
+pub struct LlmUsageLogInput {
+    pub tier: String,
+    pub model: String,
+    pub purpose: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub est_cost_usd: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmSpendByTier {
+    pub tier: String,
+    pub est_cost_usd: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmSpendHistoryRow {
+    pub date: String,
+    pub est_cost_usd: f64,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewRevisionProposalInput {
     pub task_id: i64,
     pub artifact_id: i64,
@@ -356,6 +379,23 @@ impl TaskStore {
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT ({now})
             );
+
+            CREATE TABLE IF NOT EXISTS llm_usage_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tier TEXT NOT NULL,
+                model TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                cached_tokens INTEGER NOT NULL,
+                est_cost_usd REAL NOT NULL,
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_log_created_at
+                ON llm_usage_log(created_at);
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_log_tier_created_at
+                ON llm_usage_log(tier, created_at);
 
             CREATE TABLE IF NOT EXISTS event_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2741,6 +2781,98 @@ impl TaskStore {
         }))
     }
 
+    pub fn append_llm_usage_log(&self, input: &LlmUsageLogInput) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO llm_usage_log
+                 (tier, model, purpose, input_tokens, output_tokens, cached_tokens, est_cost_usd, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ({now}))",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                input.tier.trim(),
+                input.model.trim(),
+                input.purpose.trim(),
+                input.input_tokens as i64,
+                input.output_tokens as i64,
+                input.cached_tokens as i64,
+                input.est_cost_usd,
+            ],
+        )
+        .context("failed to append llm usage log")?;
+        Ok(())
+    }
+
+    pub fn sum_llm_usage_today(&self, tier: Option<&str>) -> Result<f64> {
+        let conn = self.connect()?;
+        let sql = match tier {
+            Some(_) => {
+                "SELECT COALESCE(SUM(est_cost_usd), 0.0)
+                 FROM llm_usage_log
+                 WHERE tier = ?1 AND date(created_at) = date('now')"
+            }
+            None => {
+                "SELECT COALESCE(SUM(est_cost_usd), 0.0)
+                 FROM llm_usage_log
+                 WHERE date(created_at) = date('now')"
+            }
+        };
+        let total = match tier {
+            Some(tier) => conn.query_row(sql, params![tier], |row| row.get::<_, f64>(0)),
+            None => conn.query_row(sql, [], |row| row.get::<_, f64>(0)),
+        }
+        .context("failed to sum today's llm usage")?;
+        Ok(total)
+    }
+
+    pub fn sum_llm_usage_today_by_tier(&self) -> Result<Vec<LlmSpendByTier>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT tier, COALESCE(SUM(est_cost_usd), 0.0)
+                 FROM llm_usage_log
+                 WHERE date(created_at) = date('now')
+                 GROUP BY tier
+                 ORDER BY tier ASC",
+            )
+            .context("failed to prepare llm usage by tier query")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(LlmSpendByTier {
+                    tier: row.get(0)?,
+                    est_cost_usd: row.get(1)?,
+                })
+            })
+            .context("failed to query llm usage by tier")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to decode llm usage by tier")
+    }
+
+    pub fn llm_usage_history(&self, days: usize) -> Result<Vec<LlmSpendHistoryRow>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT date(created_at) AS usage_date, COALESCE(SUM(est_cost_usd), 0.0)
+                 FROM llm_usage_log
+                 WHERE date(created_at) >= date('now', ?1)
+                 GROUP BY usage_date
+                 ORDER BY usage_date ASC",
+            )
+            .context("failed to prepare llm usage history query")?;
+        let since = format!("-{} days", days.saturating_sub(1));
+        let rows = stmt
+            .query_map(params![since], |row| {
+                Ok(LlmSpendHistoryRow {
+                    date: row.get(0)?,
+                    est_cost_usd: row.get(1)?,
+                })
+            })
+            .context("failed to query llm usage history")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to decode llm usage history")
+    }
+
     pub fn get_onboarding_complete(&self) -> Result<bool> {
         Ok(self
             .get_app_setting_bool(APP_SETTING_ONBOARDING_COMPLETE)?
@@ -4451,7 +4583,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(count, 30, "expected 30 application tables after phase 30");
+        assert_eq!(count, 31, "expected 31 application tables after apex a4");
     }
 
     #[test]

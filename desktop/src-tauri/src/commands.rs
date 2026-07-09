@@ -16,10 +16,10 @@ use crate::{
     models::{
         ActiveWindowContextDto, ApiKeyValidationDto, ArtifactContentDto, ArtifactDto,
         ArtifactVersionDto, BrowserSelectionCaptureRequestDto, CalendarEventDto, ChatMessageDto,
-        CoworkingStatusDto, DataClearResultDto, DriftFlagDto, EventLogEntryDto,
-        FileWriteProposalDto, IntentClassificationDto, IntentLabel, IntentSlotsDto,
-        LiveEditReceiptDto, LocalRuntimeStatusDto, OnboardingStatusDto, OpenResourceDto,
-        PendingLiveEditDto, PrivacyCenterDashboardDto, ProactiveAuditEntryDto,
+        CostGovernorStatusDto, CoworkingStatusDto, DataClearResultDto, DriftFlagDto,
+        EventLogEntryDto, FileWriteProposalDto, IntentClassificationDto, IntentLabel,
+        IntentSlotsDto, LiveEditReceiptDto, LocalRuntimeStatusDto, OnboardingStatusDto,
+        OpenResourceDto, PendingLiveEditDto, PrivacyCenterDashboardDto, ProactiveAuditEntryDto,
         ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto,
         RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto, RevisionTargetDto,
         SelectionBridgeStatusDto, SelectionCaptureIndicatorDto, SendMessageResponseDto,
@@ -369,6 +369,24 @@ pub fn download_local_model(
         .local_runtime
         .download_model(kind, &url, &sha256, expected_bytes)
         .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn get_cost_governor_status(
+    state: State<'_, JeffState>,
+) -> Result<CostGovernorStatusDto, String> {
+    crate::cost_governor::status(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn set_llm_daily_budget(
+    state: State<'_, JeffState>,
+    budget_key: String,
+    budget_usd: f64,
+) -> Result<CostGovernorStatusDto, String> {
+    crate::cost_governor::set_daily_budget_usd(&state.store, &budget_key, budget_usd)
+        .map_err(map_jeff_error)?;
+    crate::cost_governor::status(&state.store).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -2124,6 +2142,7 @@ fn build_privacy_center_dashboard(
             .unwrap_or(false),
         content_observation_failed_app: None,
         local_runtime: state.local_runtime.status(),
+        cost_governor: crate::cost_governor::status(&state.store).map_err(map_jeff_error)?,
     })
 }
 

@@ -316,20 +316,37 @@ pub struct GenerateOptions {
 pub struct ModelRouter {
     config: RwLock<RouterConfig>,
     local_runtime: Option<Arc<LocalRuntime>>,
+    store: Option<TaskStore>,
 }
 
 impl ModelRouter {
+    #[allow(dead_code)]
     pub fn new(config: RouterConfig) -> Self {
         Self {
             config: RwLock::new(config),
             local_runtime: None,
+            store: None,
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_local_runtime(config: RouterConfig, local_runtime: Arc<LocalRuntime>) -> Self {
         Self {
             config: RwLock::new(config),
             local_runtime: Some(local_runtime),
+            store: None,
+        }
+    }
+
+    pub fn with_local_runtime_and_store(
+        config: RouterConfig,
+        local_runtime: Arc<LocalRuntime>,
+        store: TaskStore,
+    ) -> Self {
+        Self {
+            config: RwLock::new(config),
+            local_runtime: Some(local_runtime),
+            store: Some(store),
         }
     }
 
@@ -355,8 +372,12 @@ impl ModelRouter {
             _ => RouterConfig::default(),
         };
         match local_runtime {
-            Some(local_runtime) => Self::with_local_runtime(config, local_runtime),
-            None => Self::new(config),
+            Some(local_runtime) => Self::with_local_runtime_and_store(config, local_runtime, store.clone()),
+            None => Self {
+                config: RwLock::new(config),
+                local_runtime: None,
+                store: Some(store.clone()),
+            },
         }
     }
 
@@ -409,16 +430,30 @@ impl ModelRouter {
         }
     }
 
-    fn log_usage(&self, tier: Tier, cfg: &TierConfig, usage: &LlmUsage) {
+    fn log_usage(&self, tier: Tier, cfg: &TierConfig, usage: &LlmUsage, purpose: &str) {
         let cumulative = crate::latency::record_llm_usage(*usage);
+        let est_cost_usd = crate::cost_governor::record_usage(
+            self.store.as_ref(),
+            tier,
+            cfg.provider,
+            &cfg.model,
+            purpose,
+            *usage,
+        )
+        .unwrap_or_else(|err| {
+            eprintln!("[jeff] llm_usage_log_failed: {err}");
+            crate::cost_governor::estimate_cost_usd(cfg.provider, &cfg.model, *usage)
+        });
         eprintln!(
-            "[jeff] llm_usage tier={} provider={} model={} input={} output={} cached={} cached_ratio={:.3} cumulative_cached_ratio={:.3}",
+            "[jeff] llm_usage tier={} provider={} model={} purpose={} input={} output={} cached={} est_cost_usd={:.6} cached_ratio={:.3} cumulative_cached_ratio={:.3}",
             tier.as_str(),
             cfg.provider.as_str(),
             cfg.model,
+            crate::cost_governor::normalize_purpose(purpose),
             usage.input_tokens,
             usage.output_tokens,
             usage.cached_tokens,
+            est_cost_usd,
             usage.cached_ratio(),
             cumulative.cached_ratio
         );
@@ -505,9 +540,26 @@ impl ModelRouter {
         }
     }
 
-    pub fn route(&self, request: ModelRequest) -> Result<ModelResponse> {
+    pub fn route(&self, mut request: ModelRequest) -> Result<ModelResponse> {
         if request.stream {
             return Err(anyhow!("streaming model requests must use route_streaming"));
+        }
+
+        let purpose = request
+            .purpose
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        let budget_decision =
+            crate::cost_governor::preflight(self.store.as_ref(), request.tier, &purpose);
+        if budget_decision.degraded {
+            eprintln!(
+                "[jeff] model_router_budget_degraded from={} to={} purpose={} notice={}",
+                budget_decision.requested_tier.as_str(),
+                budget_decision.effective_tier.as_str(),
+                crate::cost_governor::normalize_purpose(&purpose),
+                budget_decision.notice.as_deref().unwrap_or("<already-sent>")
+            );
+            request.tier = budget_decision.effective_tier;
         }
 
         let system = join_system_blocks(&request.system_blocks);
@@ -562,7 +614,7 @@ impl ModelRouter {
                 }
             }
         };
-        self.log_usage(request.tier, &effective_cfg, &usage);
+        self.log_usage(request.tier, &effective_cfg, &usage, &purpose);
         Ok(ModelResponse {
             text,
             usage,
@@ -639,7 +691,19 @@ impl ModelRouter {
         user: &str,
         options: GenerateOptions,
     ) -> Result<String> {
-        let cfg = self.resolve(tier);
+        let purpose = "async_generation";
+        let budget_decision = crate::cost_governor::preflight(self.store.as_ref(), tier, purpose);
+        if budget_decision.degraded {
+            eprintln!(
+                "[jeff] model_router_budget_degraded from={} to={} purpose={} notice={}",
+                budget_decision.requested_tier.as_str(),
+                budget_decision.effective_tier.as_str(),
+                purpose,
+                budget_decision.notice.as_deref().unwrap_or("<already-sent>")
+            );
+        }
+        let effective_tier = budget_decision.effective_tier;
+        let cfg = self.resolve(effective_tier);
         let (text, usage) = match cfg.provider {
             ProviderKind::Local => {
                 let system = join_system_blocks(&system_blocks);
@@ -678,7 +742,7 @@ impl ModelRouter {
                 .await?
             }
         };
-        self.log_usage(tier, &cfg, &usage);
+        self.log_usage(effective_tier, &cfg, &usage, purpose);
         Ok(text)
     }
 
@@ -710,15 +774,27 @@ impl ModelRouter {
         user: &str,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<mpsc::Receiver<Result<String>>> {
-        let cfg = self.resolve(tier);
+        let purpose = "streaming";
+        let budget_decision = crate::cost_governor::preflight(self.store.as_ref(), tier, purpose);
+        if budget_decision.degraded {
+            eprintln!(
+                "[jeff] model_router_budget_degraded from={} to={} purpose={} notice={}",
+                budget_decision.requested_tier.as_str(),
+                budget_decision.effective_tier.as_str(),
+                purpose,
+                budget_decision.notice.as_deref().unwrap_or("<already-sent>")
+            );
+        }
+        let effective_tier = budget_decision.effective_tier;
+        let cfg = self.resolve(effective_tier);
         eprintln!(
             "[jeff] llm_stream_open tier={} provider={} model={}",
-            tier.as_str(),
+            effective_tier.as_str(),
             cfg.provider.as_str(),
             cfg.model
         );
         let system = join_system_blocks(&system_blocks);
-        match cfg.provider {
+        let receiver = match cfg.provider {
             ProviderKind::Local => Err(anyhow!("local provider does not support streaming")),
             ProviderKind::OpenAi => {
                 crate::reasoning::OpenAiStreamingReasoningProvider::with_model(cfg.model.clone())
@@ -727,7 +803,9 @@ impl ModelRouter {
             ProviderKind::Anthropic => {
                 anthropic::stream(cfg.model.clone(), system_blocks, user.to_string(), cancel)
             }
-        }
+        }?;
+        self.log_usage(effective_tier, &cfg, &LlmUsage::default(), purpose);
+        Ok(receiver)
     }
 
     // reflex-tier intent classification. resolves keys internally and honors
@@ -753,7 +831,7 @@ impl ModelRouter {
                     true,
                 ) {
                     Ok((raw, usage)) => {
-                        self.log_usage(Tier::Reflex, &cfg, &usage);
+                        self.log_usage(Tier::Reflex, &cfg, &usage, "intent_classification");
                         let parsed = crate::classifier::parse_classification(&raw)?;
                         eprintln!(
                             "[jeff] local_reflex_classify mode=local elapsed_ms={} intent={:?}",
@@ -813,7 +891,7 @@ impl ModelRouter {
         let user = Self::request_user_text(&request)?;
         let (raw, usage) =
             Self::generate_blocking_with_config(cfg, &request, &system, &user, true)?;
-        self.log_usage(Tier::Reflex, cfg, &usage);
+        self.log_usage(Tier::Reflex, cfg, &usage, "intent_classification");
         Ok(raw)
     }
 

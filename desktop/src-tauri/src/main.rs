@@ -9,6 +9,7 @@ mod chunking;
 mod classifier;
 mod commands;
 mod context_observer;
+mod cost_governor;
 mod coworking;
 mod embedding;
 mod errors;
@@ -618,6 +619,8 @@ fn main() {
             commands::stop_local_runtime,
             commands::download_local_model,
             commands::delete_local_model,
+            commands::get_cost_governor_status,
+            commands::set_llm_daily_budget,
             commands::get_workspace_prompt_dismissed,
             commands::set_workspace_prompt_dismissed,
             commands::get_task_workspace,
