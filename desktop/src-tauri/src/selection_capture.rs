@@ -11,8 +11,11 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{
-    context_observer::ActiveWindowContext,
+    context_observer::{ActiveWindowContext, ContentObservation, ContentObservationState},
+    document_model::{DocumentModel, DocumentStateSummary},
+    embedding::EmbeddingProvider,
     models::{
+        BrowserContentObservationProvenanceDto, BrowserContentObservationRequestDto,
         BrowserSelectionCaptureRequestDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
         SelectionCaptureStatus,
     },
@@ -23,6 +26,8 @@ use crate::{
 pub const SELECTION_CAPTURE_HOTKEY: &str = "CmdOrCtrl+Shift+V";
 pub const SELECTION_BRIDGE_PORT: u16 = 47832;
 pub const MAX_SELECTION_CHARS: usize = 12_000;
+pub const MAX_BROWSER_CONTENT_OBSERVATION_CHARS: usize = 50_000;
+pub const BROWSER_CONTENT_OBSERVATION_ALLOWED_ORIGINS: &[&str] = &["https://docs.google.com"];
 pub const EVENT_SELECTION_CAPTURED: &str = "selection://captured";
 pub const EVENT_SELECTION_FAILED: &str = "selection://capture-failed";
 pub const EVENT_SELECTION_CLEARED: &str = "selection://cleared";
@@ -302,6 +307,143 @@ pub fn capture_browser_selection_request<R: Runtime>(
     Ok(indicator)
 }
 
+pub fn capture_browser_content_observation_request<R: Runtime>(
+    app: &AppHandle<R>,
+    request: BrowserContentObservationRequestDto,
+) -> Result<ContentObservation, String> {
+    let selection_state = app
+        .try_state::<SelectionCaptureState>()
+        .ok_or_else(|| "selection capture state is not available".to_string())?;
+
+    if !selection_state.token_matches(&request.token) {
+        return Err("invalid browser content-observation bridge token".to_string());
+    }
+    if !is_browser_content_origin_allowed(&request.provenance.origin) {
+        return Err("browser content observation origin is not allowlisted".to_string());
+    }
+
+    let jeff_state = app
+        .try_state::<JeffState>()
+        .ok_or_else(|| "jeff state is not available".to_string())?;
+    let task_id = jeff_state
+        .store
+        .get_active_task()
+        .map_err(|err| err.to_string())?
+        .map(|task| task.id)
+        .ok_or_else(|| "no active task for content observation".to_string())?;
+    if !jeff_state
+        .store
+        .get_content_observation_enabled(task_id)
+        .map_err(|err| err.to_string())?
+    {
+        return Err("Content observation is off in Privacy Center.".to_string());
+    }
+
+    let text = normalize_browser_content_observation_text(&request.text);
+    let doc_summary = {
+        let mut doc_model = jeff_state
+            .document_model
+            .lock()
+            .map_err(|_| "document model lock poisoned".to_string())?;
+        observe_browser_document_model(
+            &mut doc_model,
+            jeff_state.embeddings.as_ref(),
+            task_id,
+            &text,
+        )
+    };
+
+    let observation = {
+        let mut guard = jeff_state
+            .content_observation
+            .lock()
+            .map_err(|_| "content observation lock poisoned".to_string())?;
+        apply_browser_content_observation_state(
+            &mut guard,
+            text,
+            doc_summary.as_ref(),
+            &request.provenance,
+        )
+    };
+
+    crate::awareness_core::spawn_awareness_update(
+        app,
+        crate::awareness_core::SnapshotTrigger::ContentObservation,
+        task_id,
+    );
+    Ok(observation)
+}
+
+pub fn is_browser_content_origin_allowed(origin: &str) -> bool {
+    let normalized = origin.trim().trim_end_matches('/');
+    BROWSER_CONTENT_OBSERVATION_ALLOWED_ORIGINS
+        .iter()
+        .any(|allowed| *allowed == normalized)
+}
+
+pub fn normalize_browser_content_observation_text(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized.chars().count() > MAX_BROWSER_CONTENT_OBSERVATION_CHARS {
+        normalized
+            .chars()
+            .take(MAX_BROWSER_CONTENT_OBSERVATION_CHARS)
+            .collect()
+    } else {
+        normalized
+    }
+}
+
+pub fn observe_browser_document_model(
+    document_model: &mut DocumentModel,
+    embeddings: &dyn EmbeddingProvider,
+    task_id: i64,
+    text: &str,
+) -> Option<DocumentStateSummary> {
+    let _delta = document_model.observe(task_id, text, embeddings);
+    document_model.state(task_id)
+}
+
+pub fn apply_browser_content_observation_state(
+    state: &mut ContentObservationState,
+    text: String,
+    doc_summary: Option<&DocumentStateSummary>,
+    provenance: &BrowserContentObservationProvenanceDto,
+) -> ContentObservation {
+    state.capture_attempt_count += 1;
+    state.capture_failed_count = 0;
+    let prior_wc = state
+        .observation
+        .as_ref()
+        .map(|observation| observation.word_count)
+        .unwrap_or(0);
+    let prior_stable = state
+        .observation
+        .as_ref()
+        .map(|observation| observation.stable_for_ticks)
+        .unwrap_or(0);
+    let prior_text_ref = state.raw_text.clone();
+    let mut observation = crate::context_observer::summarize_content_observation(
+        &text,
+        prior_text_ref.as_deref(),
+        prior_wc,
+        prior_stable,
+    );
+    observation.captured_at = provenance.captured_at.max(0);
+    state.last_captured_at = Some(observation.captured_at);
+    state.prior_text = state.raw_text.take();
+    state.raw_text = Some(text);
+    state.observation = Some(observation.clone());
+    state.source_origin = Some(provenance.origin.trim().to_string());
+    state.source_title = Some(provenance.title.trim().to_string());
+    if let Some(summary) = doc_summary {
+        state.document_paragraph_count = summary.paragraph_count;
+        state.document_structure_changed = summary.structure_changed;
+        state.document_max_churn = summary.max_churn;
+        state.document_churn_hotspots = summary.churn_hotspot_count;
+    }
+    observation
+}
+
 pub fn start_browser_bridge<R: Runtime + 'static>(app: AppHandle<R>) {
     let _ = std::thread::Builder::new()
         .name("jeff-selection-bridge".to_string())
@@ -370,6 +512,36 @@ fn handle_bridge_stream<R: Runtime>(app: &AppHandle<R>, mut stream: TcpStream) {
                         &mut stream,
                         200,
                         &serde_json::json!({ "ok": true, "indicator": indicator }),
+                    );
+                }
+                Err(err) => {
+                    let _ = write_http_response(
+                        &mut stream,
+                        403,
+                        &serde_json::json!({ "ok": false, "error": err }),
+                    );
+                }
+            }
+        }
+        ("POST", "/content-observation") => {
+            let parsed: BrowserContentObservationRequestDto =
+                match serde_json::from_slice(&request.body) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        let _ = write_http_response(
+                            &mut stream,
+                            400,
+                            &serde_json::json!({ "ok": false, "error": err.to_string() }),
+                        );
+                        return;
+                    }
+                };
+            match capture_browser_content_observation_request(app, parsed) {
+                Ok(observation) => {
+                    let _ = write_http_response(
+                        &mut stream,
+                        200,
+                        &serde_json::json!({ "ok": true, "observation": observation }),
                     );
                 }
                 Err(err) => {
@@ -1125,6 +1297,15 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
+
+    struct TestEmbeddingProvider;
+
+    impl EmbeddingProvider for TestEmbeddingProvider {
+        fn embed_text(&self, input: &str) -> Result<Vec<f32>> {
+            Ok(crate::providers::local::hash_embedding(input))
+        }
+    }
 
     #[test]
     fn captured_selection_normalizes_limits_and_indicates_without_text_leak() {
@@ -1195,5 +1376,81 @@ mod tests {
             first.chars().all(|c| c.is_ascii_hexdigit()),
             "token should be lowercase hex"
         );
+    }
+
+    #[test]
+    fn b6_content_observation_origin_is_allowlisted() {
+        assert!(is_browser_content_origin_allowed("https://docs.google.com"));
+        assert!(is_browser_content_origin_allowed("https://docs.google.com/"));
+        assert!(!is_browser_content_origin_allowed("https://mail.google.com"));
+        assert!(!is_browser_content_origin_allowed("https://evil.example"));
+    }
+
+    #[test]
+    fn b6_browser_content_text_is_line_normalized_and_limited() {
+        let raw = format!(
+            "{}\r\n{}",
+            "a".repeat(MAX_BROWSER_CONTENT_OBSERVATION_CHARS),
+            "tail"
+        );
+        let normalized = normalize_browser_content_observation_text(&raw);
+        assert_eq!(
+            normalized.chars().count(),
+            MAX_BROWSER_CONTENT_OBSERVATION_CHARS
+        );
+        assert!(!normalized.contains("\r\n"));
+    }
+
+    #[test]
+    fn b6_browser_docs_observation_matches_ax_document_model_churn() {
+        let provider = TestEmbeddingProvider;
+        let task_id = 7;
+        let first = "# Thesis\n\nThe draft argues that citizenship changed through local pressure.";
+        let second =
+            "# Thesis\n\nThe draft argues that citizenship changed through local organizing pressure.";
+
+        let mut ax_model = DocumentModel::new();
+        ax_model.observe(task_id, first, &provider);
+        ax_model.observe(task_id, second, &provider);
+        let ax_summary = ax_model.state(task_id).unwrap();
+
+        let mut browser_model = DocumentModel::new();
+        let mut state = ContentObservationState::default();
+        let provenance = BrowserContentObservationProvenanceDto {
+            origin: "https://docs.google.com".to_string(),
+            title: "Argument draft".to_string(),
+            captured_at: 1234,
+        };
+        let doc_summary =
+            observe_browser_document_model(&mut browser_model, &provider, task_id, first);
+        apply_browser_content_observation_state(
+            &mut state,
+            first.to_string(),
+            doc_summary.as_ref(),
+            &provenance,
+        );
+        let doc_summary =
+            observe_browser_document_model(&mut browser_model, &provider, task_id, second);
+        let observation = apply_browser_content_observation_state(
+            &mut state,
+            second.to_string(),
+            doc_summary.as_ref(),
+            &provenance,
+        );
+        let browser_summary = browser_model.state(task_id).unwrap();
+
+        assert_eq!(browser_summary.rewritten_last, ax_summary.rewritten_last);
+        assert_eq!(browser_summary.max_churn, ax_summary.max_churn);
+        assert_eq!(
+            state.document_paragraph_count,
+            browser_summary.paragraph_count
+        );
+        assert!(observation.content_changed);
+        assert_eq!(observation.captured_at, 1234);
+        assert_eq!(
+            state.source_origin.as_deref(),
+            Some("https://docs.google.com")
+        );
+        assert_eq!(state.source_title.as_deref(), Some("Argument draft"));
     }
 }

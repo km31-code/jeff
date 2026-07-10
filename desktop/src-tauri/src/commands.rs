@@ -2376,6 +2376,16 @@ fn build_privacy_center_dashboard(
             .map(|g| g.capture_failed_count >= 3)
             .unwrap_or(false),
         content_observation_failed_app: None,
+        content_observation_source_origin: state
+            .content_observation
+            .lock()
+            .ok()
+            .and_then(|g| g.source_origin.clone()),
+        content_observation_document_title: state
+            .content_observation
+            .lock()
+            .ok()
+            .and_then(|g| g.source_title.clone()),
         local_runtime: state.local_runtime.status(),
         cost_governor: crate::cost_governor::status(&state.store).map_err(map_jeff_error)?,
     })
@@ -2538,6 +2548,8 @@ pub fn clear_content_observation(state: State<'_, JeffState>) -> Result<(), Stri
     if let Ok(mut guard) = state.content_observation.lock() {
         guard.raw_text = None;
         guard.prior_text = None;
+        guard.source_origin = None;
+        guard.source_title = None;
     }
     Ok(())
 }

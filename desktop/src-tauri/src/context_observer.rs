@@ -6,7 +6,9 @@
 //
 // phase 31: adds content observation polling — reads active document text
 // via AXUIElement to compute a deterministic ContentObservation summary.
-// raw text never leaves this module; only the summary crosses the boundary.
+// Browser-extension observations enter through selection_capture.rs. In both
+// paths raw text stays in perception modules/in-memory state; only summaries
+// cross into prompts, storage, or model payloads.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -52,6 +54,10 @@ pub struct ContentObservationState {
     pub document_structure_changed: bool,
     pub document_max_churn: u32,
     pub document_churn_hotspots: usize,
+    // apex b6: browser-origin provenance for the latest observation. metadata
+    // only; raw browser text follows the same in-memory boundary as AX text.
+    pub source_origin: Option<String>,
+    pub source_title: Option<String>,
 }
 
 #[derive(Debug, Clone)]

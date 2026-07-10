@@ -60,6 +60,43 @@ async function captureFromActiveTab() {
   }
 }
 
+function originFromUrl(url) {
+  try {
+    return new URL(url || "").origin;
+  } catch (_) {
+    return "";
+  }
+}
+
+function isContentObservationOriginAllowed(origin) {
+  return origin === "https://docs.google.com";
+}
+
+async function getActiveSiteObservationStatus() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const origin = originFromUrl(tab?.url || "");
+  const stored = await chrome.storage.local.get(["jeffContentObservationSites"]);
+  const sites = stored.jeffContentObservationSites || {};
+  return {
+    origin,
+    title: tab?.title || "",
+    supported: isContentObservationOriginAllowed(origin),
+    enabled: Boolean(sites[origin])
+  };
+}
+
+async function setActiveSiteObservationEnabled(enabled) {
+  const status = await getActiveSiteObservationStatus();
+  if (!status.supported) {
+    return { ...status, enabled: false };
+  }
+  const stored = await chrome.storage.local.get(["jeffContentObservationSites"]);
+  const sites = stored.jeffContentObservationSites || {};
+  sites[status.origin] = Boolean(enabled);
+  await chrome.storage.local.set({ jeffContentObservationSites: sites });
+  return { ...status, enabled: Boolean(enabled) };
+}
+
 // phase 23: poll for approval of a pending live edit and dispatch to the
 // active content script when approved. falls back to guided apply on rejection
 // or anchor mismatch.
@@ -151,8 +188,32 @@ chrome.commands.onCommand.addListener((command) => {
 });
 
 // phase 23: listen for live edit proposals from content scripts
-chrome.runtime.onMessage.addListener((message, sender) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message) return false;
+  if (message.type === "JEFF_CAPTURE_ACTIVE_SELECTION") {
+    captureFromActiveTab().catch((error) => {
+      console.warn("[jeff-selection-capture]", error);
+    });
+    return false;
+  }
+  if (message.type === "JEFF_GET_SITE_OBSERVATION_STATUS") {
+    getActiveSiteObservationStatus()
+      .then((status) => sendResponse({ ok: true, status }))
+      .catch((error) => {
+        console.warn("[jeff-content-observation]", error);
+        sendResponse({ ok: false, error: error.message || String(error) });
+      });
+    return true;
+  }
+  if (message.type === "JEFF_SET_SITE_OBSERVATION_ENABLED") {
+    setActiveSiteObservationEnabled(Boolean(message.enabled))
+      .then((status) => sendResponse({ ok: true, status }))
+      .catch((error) => {
+        console.warn("[jeff-content-observation]", error);
+        sendResponse({ ok: false, error: error.message || String(error) });
+      });
+    return true;
+  }
   if (message.type === "JEFF_PROPOSE_LIVE_EDIT") {
     handleLiveEditProposal({
       ...message,

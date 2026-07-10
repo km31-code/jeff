@@ -539,6 +539,8 @@ pub struct PrivacyCenterDashboardDto {
     pub content_observation_last_captured_at: Option<String>,
     pub content_observation_capture_failed: bool,
     pub content_observation_failed_app: Option<String>,
+    pub content_observation_source_origin: Option<String>,
+    pub content_observation_document_title: Option<String>,
     // apex a3: local model runtime status.
     pub local_runtime: LocalRuntimeStatusDto,
     // apex a4: spend metering and budget status.
@@ -654,6 +656,20 @@ pub struct BrowserSelectionCaptureRequestDto {
     pub document_title: Option<String>,
     pub source_url: Option<String>,
     pub captured_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserContentObservationProvenanceDto {
+    pub origin: String,
+    pub title: String,
+    pub captured_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserContentObservationRequestDto {
+    pub token: String,
+    pub text: String,
+    pub provenance: BrowserContentObservationProvenanceDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -14,6 +14,9 @@ use crate::{
     user_model,
 };
 
+// phase 22 voice addendum is enforced by character::base_character_prompt and
+// CHAT_BEHAVIOR_PROMPT: Be concise. One to three sentences unless the user asks for more. No filler phrases.
+
 pub fn send_message_for_task(
     store: &TaskStore,
     embeddings: &dyn EmbeddingProvider,

@@ -4337,15 +4337,23 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                             Active document reading
                           </label>
                           <p className="task-meta">
-                            Jeff will periodically read the text in your active document window to give
-                            you better feedback. This text never leaves your device.
+                            Jeff will periodically read the text in your active document window or
+                            an enabled Google Docs tab to give you better feedback. This text never leaves your device.
+                            Google Docs also requires the extension's per-site toggle.
                           </p>
                           {privacyDashboard.content_observation_enabled ? (
                             <p className="task-meta" data-testid="content-observation-status">
                               {privacyDashboard.content_observation_capture_failed
                                 ? `Could not read text — this app may restrict accessibility access.`
                                 : privacyDashboard.content_observation_last_captured_at
-                                ? `Last read: ${new Date(Number(privacyDashboard.content_observation_last_captured_at) * 1000).toLocaleTimeString()}`
+                                ? `Last read: ${new Date(Number(privacyDashboard.content_observation_last_captured_at) * 1000).toLocaleTimeString()}${
+                                    privacyDashboard.content_observation_source_origin
+                                      ? ` from ${
+                                          privacyDashboard.content_observation_document_title ||
+                                          privacyDashboard.content_observation_source_origin
+                                        }`
+                                      : ""
+                                  }`
                                 : "Not yet captured"}
                             </p>
                           ) : null}

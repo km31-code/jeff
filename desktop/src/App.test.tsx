@@ -126,6 +126,12 @@ type PrivacyCenterDashboardDto = {
   typing_activity_enabled: boolean;
   tts_voice: string;
   available_tts_voices: string[];
+  content_observation_enabled: boolean;
+  content_observation_last_captured_at: string | null;
+  content_observation_capture_failed: boolean;
+  content_observation_failed_app: string | null;
+  content_observation_source_origin: string | null;
+  content_observation_document_title: string | null;
   local_runtime: LocalRuntimeStatusDto;
   cost_governor: CostGovernorStatusDto;
 };
@@ -425,6 +431,12 @@ function setupInvokeMock(options?: {
     typing_activity_enabled: true,
     tts_voice: "alloy",
     available_tts_voices: ["alloy", "nova", "shimmer"],
+    content_observation_enabled: false,
+    content_observation_last_captured_at: null,
+    content_observation_capture_failed: false,
+    content_observation_failed_app: null,
+    content_observation_source_origin: null,
+    content_observation_document_title: null,
     local_runtime: localRuntimeStatus,
     cost_governor: costGovernorStatus
   };

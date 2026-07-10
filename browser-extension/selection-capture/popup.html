@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jeff Browser Bridge</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 14px;
+        min-width: 260px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 12px 0;
+      }
+      button {
+        font: inherit;
+        padding: 8px 10px;
+        width: 100%;
+      }
+      #site {
+        color: #555;
+        font-size: 12px;
+        margin: 6px 0 0;
+        word-break: break-word;
+      }
+      #status {
+        min-height: 18px;
+        color: #555;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <strong>Jeff Browser Bridge</strong>
+    <p id="site"></p>
+    <label class="row">
+      <span>Read this Google Docs tab</span>
+      <input id="docs-toggle" type="checkbox" />
+    </label>
+    <button id="capture-selection" type="button">Capture selected text</button>
+    <p id="status"></p>
+    <script src="popup.js"></script>
+  </body>
+</html>

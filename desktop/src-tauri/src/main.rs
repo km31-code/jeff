@@ -929,6 +929,8 @@ async fn spawn_content_observation_poll(handle: tauri::AppHandle) {
                     guard.prior_text = guard.raw_text.take();
                     guard.raw_text = Some(text);
                     guard.observation = Some(observation);
+                    guard.source_origin = Some("native_accessibility".to_string());
+                    guard.source_title = None;
                     if let Some(summary) = &doc_summary {
                         guard.document_paragraph_count = summary.paragraph_count;
                         guard.document_structure_changed = summary.structure_changed;

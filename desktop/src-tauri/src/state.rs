@@ -42,7 +42,8 @@ pub struct JeffState {
     // phase 13: filesystem watcher state per task.
     pub watcher: Arc<Mutex<WatcherState>>,
     pub awareness_core: Arc<AwarenessCore>,
-    // phase 31: content observation state — raw text never leaves context_observer.
+    // phase 31 / apex b6: content observation state. raw text is in-memory
+    // only and enters through context_observer or the browser bridge.
     pub content_observation: Arc<Mutex<ContentObservationState>>,
     // apex b1: semantic document model — raw paragraph text stays in-memory
     // inside this model; only structural deltas/summaries are exported.

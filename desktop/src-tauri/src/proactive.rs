@@ -34,6 +34,10 @@ pub const EVENT_PROACTIVE_MESSAGE_INSERTED: &str = "proactive://message_inserted
 const DRIFT_SYSTEM_PROMPT: &str =
     "You are Jeff's drift detector. Given the task goal and current text, determine if the current text diverges from the stated task goal. Return strict JSON only: {\"is_drifting\": bool, \"reason\": string, \"confidence\": number}";
 
+// phase 22 voice rule for reorientation: No filler phrases. The shared
+// character prompt carries the instruction and strip_filler_phrases cleans the
+// generated summary before storage.
+
 #[derive(Debug, Deserialize)]
 struct DriftJson {
     is_drifting: bool,

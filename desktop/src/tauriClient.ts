@@ -1151,6 +1151,8 @@ export interface PrivacyCenterDashboardDto {
   content_observation_last_captured_at: string | null;
   content_observation_capture_failed: boolean;
   content_observation_failed_app: string | null;
+  content_observation_source_origin: string | null;
+  content_observation_document_title: string | null;
   local_runtime: LocalRuntimeStatusDto;
   cost_governor: CostGovernorStatusDto;
 }
