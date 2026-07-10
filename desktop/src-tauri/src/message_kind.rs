@@ -19,6 +19,9 @@ pub enum MessageKind {
     AssistantProactiveBlocker,
     AssistantProactiveDeadline,
     AssistantProactiveSpeculativeSubtask,
+    // apex c3: daily judgment rituals delivered as conversation-shaped bubbles.
+    AssistantProactiveBriefing,
+    AssistantProactiveDebrief,
 }
 
 impl MessageKind {
@@ -38,6 +41,8 @@ impl MessageKind {
             Self::AssistantProactiveBlocker => "proactive_blocker",
             Self::AssistantProactiveDeadline => "proactive_deadline",
             Self::AssistantProactiveSpeculativeSubtask => "proactive_speculative_subtask",
+            Self::AssistantProactiveBriefing => "proactive_briefing",
+            Self::AssistantProactiveDebrief => "proactive_debrief",
         }
     }
 
@@ -58,6 +63,8 @@ impl MessageKind {
             "proactive_blocker" => Self::AssistantProactiveBlocker,
             "proactive_deadline" => Self::AssistantProactiveDeadline,
             "proactive_speculative_subtask" => Self::AssistantProactiveSpeculativeSubtask,
+            "proactive_briefing" => Self::AssistantProactiveBriefing,
+            "proactive_debrief" => Self::AssistantProactiveDebrief,
             _ => Self::UserStatement,
         }
     }
@@ -69,6 +76,8 @@ impl MessageKind {
             "proactive_blocker" => Some(Self::AssistantProactiveBlocker),
             "proactive_deadline" => Some(Self::AssistantProactiveDeadline),
             "proactive_speculative_subtask" => Some(Self::AssistantProactiveSpeculativeSubtask),
+            "proactive_briefing" => Some(Self::AssistantProactiveBriefing),
+            "proactive_debrief" => Some(Self::AssistantProactiveDebrief),
             _ => None,
         }
     }
@@ -138,6 +147,8 @@ mod tests {
             "proactive_blocker",
             "proactive_deadline",
             "proactive_speculative_subtask",
+            "proactive_briefing",
+            "proactive_debrief",
         ] {
             assert_eq!(MessageKind::from_db(kind).as_str(), kind);
         }

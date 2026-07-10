@@ -125,6 +125,8 @@ import {
   getPrivacyCenterDashboard,
   getInterruptionAudit,
   type InterruptionAuditDto,
+  getDebriefEnabled,
+  setDebriefEnabled,
   setPrivacySurfaceEnabled,
   getSelectionCaptureIndicator,
   getSelectionBridgeStatus,
@@ -390,6 +392,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [privacyCenterOpen, setPrivacyCenterOpen] = useState(false);
   const [privacyDashboard, setPrivacyDashboard] = useState<PrivacyCenterDashboardDto | null>(null);
   const [interruptionAudit, setInterruptionAudit] = useState<InterruptionAuditDto | null>(null);
+  const [debriefEnabled, setDebriefEnabledState] = useState(false);
   const [proactiveAuditLog, setProactiveAuditLog] = useState<ProactiveAuditEntryDto[]>([]);
   const [synthesisLog, setSynthesisLog] = useState<SynthesisLogEntryDto[]>([]);
   const [memoryFacts, setMemoryFacts] = useState<FactDto[]>([]);
@@ -1122,16 +1125,18 @@ function App({ onCloseWorkspace }: AppProps = {}) {
 
   async function refreshPrivacyCenter() {
     try {
-      const [dashboard, bridgeStatus, profile, audit] = await Promise.all([
+      const [dashboard, bridgeStatus, profile, audit, debrief] = await Promise.all([
         getPrivacyCenterDashboard(),
         getSelectionBridgeStatus(),
         getRelationalProfile(),
-        getInterruptionAudit().catch(() => null)
+        getInterruptionAudit().catch(() => null),
+        getDebriefEnabled().catch(() => false)
       ]);
       setPrivacyDashboard(dashboard);
       setSelectionBridgeStatus(bridgeStatus);
       setRelationalProfile(profile);
       setInterruptionAudit(audit);
+      setDebriefEnabledState(debrief);
       setClipboardCaptureEnabled(dashboard.clipboard_capture_enabled);
       setAccessibilityPermissionGranted(dashboard.accessibility_permission_status === "granted");
       setQuietModeState(!dashboard.proactive_triggers_enabled);
@@ -2144,6 +2149,16 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setOperationError("Failed to install local model", error);
     } finally {
       setLocalModelBusy(false);
+    }
+  }
+
+  async function handleToggleDebrief(next: boolean) {
+    try {
+      await setDebriefEnabled(next);
+      setDebriefEnabledState(next);
+      setPrivacyActionMessage(next ? "End-of-day debrief enabled." : "End-of-day debrief disabled.");
+    } catch (error) {
+      setOperationError("Failed to update debrief setting", error);
     }
   }
 
@@ -4242,6 +4257,19 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                                 interruptionAudit.engaged
                               }.`
                             : "No interjections recorded yet."}
+                        </p>
+                        <label className="toggle-row">
+                          <span>End-of-day debrief</span>
+                          <input
+                            type="checkbox"
+                            data-testid="privacy-toggle-debrief"
+                            checked={debriefEnabled}
+                            onChange={(event) => void handleToggleDebrief(event.target.checked)}
+                          />
+                        </label>
+                        <p className="task-meta">
+                          When on, Jeff closes the day with a short debrief. The morning briefing
+                          rides your existing proactive setting.
                         </p>
                       </li>
 

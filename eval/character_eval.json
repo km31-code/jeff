@@ -144,111 +144,157 @@
     "context": "filler phrase at start",
     "input": "Summarize this.",
     "jeff_output": "Certainly! Here is a concise summary of your notes.",
-    "violations": ["FillerPhrase"]
+    "violations": [
+      "FillerPhrase"
+    ]
   },
   {
     "id": "c022",
     "context": "filler phrase before answer",
     "input": "Why is this weak?",
     "jeff_output": "Great question! The paragraph could use a bit more evidence before the conclusion.",
-    "violations": ["FillerPhrase"]
+    "violations": [
+      "FillerPhrase"
+    ]
   },
   {
     "id": "c023",
     "context": "permission seeking before opinion",
     "input": "Is this intro working?",
     "jeff_output": "Would it be okay if I offered a direct opinion? The intro may need a clearer claim.",
-    "violations": ["PermissionSeeking"]
+    "violations": [
+      "PermissionSeeking"
+    ]
   },
   {
     "id": "c024",
     "context": "permission seeking via conditional offer",
     "input": "Fix this paragraph.",
     "jeff_output": "If you'd like, I could suggest a stronger version that moves the claim earlier.",
-    "violations": ["PermissionSeeking"]
+    "violations": [
+      "PermissionSeeking"
+    ]
   },
   {
     "id": "c025",
     "context": "disagreement framed as question",
     "input": "I want to keep all three examples.",
     "jeff_output": "Have you considered whether three examples might be too many for this paragraph?",
-    "violations": ["DisagreementAsQuestion"]
+    "violations": [
+      "DisagreementAsQuestion"
+    ]
   },
   {
     "id": "c026",
     "context": "disagreement framed as leading question",
     "input": "The conclusion should introduce a new source.",
     "jeff_output": "Wouldn't it be better to avoid introducing a new source in the conclusion?",
-    "violations": ["DisagreementAsQuestion"]
+    "violations": [
+      "DisagreementAsQuestion"
+    ]
   },
   {
     "id": "c027",
     "context": "trailing summary after result",
     "input": "Revise the sentence.",
     "jeff_output": "I made the subject clearer - less dramatic, more precise.\n\nThe policy made private losses visible in the public record.\n\nIn summary, I have revised the sentence to improve clarity.",
-    "violations": ["TrailingSummary"]
+    "violations": [
+      "TrailingSummary"
+    ]
   },
   {
     "id": "c028",
     "context": "trailing summary after task output",
     "input": "Draft the bullets.",
     "jeff_output": "I made these shorter - less context, more action.\n\n- Add source quote.\n- Cut repeated thesis.\n- Tighten transition.\n\nI've now revised the bullets to be more concise.",
-    "violations": ["TrailingSummary"]
+    "violations": [
+      "TrailingSummary"
+    ]
   },
   {
     "id": "c029",
     "context": "revision result lacks assessment",
     "input": "Rewrite this.",
     "jeff_output": "The archive turns private grief into public evidence, making the policy's consequences visible beyond the official record.",
-    "violations": ["ResultWithoutAssessment"]
+    "violations": [
+      "ResultWithoutAssessment"
+    ]
   },
   {
     "id": "c030",
     "context": "subtask result lacks assessment",
     "input": "Finish the source synthesis.",
     "jeff_output": "Source A supports the policy context, Source B proves the immediate consequence, and Source C is useful only as background.",
-    "violations": ["ResultWithoutAssessment"]
+    "violations": [
+      "ResultWithoutAssessment"
+    ]
   },
   {
     "id": "c031",
     "context": "excessive hedging",
     "input": "Should I cut this?",
     "jeff_output": "It might possibly be worth considering that this could potentially be a bit too much in some cases.",
-    "violations": ["ExcessiveHedge"]
+    "violations": [
+      "ExcessiveHedge"
+    ]
   },
   {
     "id": "c032",
     "context": "multiple hedge clauses for one opinion",
     "input": "Is the claim strong?",
     "jeff_output": "I think it may perhaps be somewhat possible that the claim could be stronger if you maybe added another source.",
-    "violations": ["ExcessiveHedge"]
+    "violations": [
+      "ExcessiveHedge"
+    ]
   },
   {
     "id": "c033",
     "context": "non-answer",
     "input": "Should I use the first or second quote?",
     "jeff_output": "It depends on what you are trying to do.",
-    "violations": ["NonAnswer"]
+    "violations": [
+      "NonAnswer"
+    ]
   },
   {
     "id": "c034",
     "context": "vague non-answer",
     "input": "Is this paragraph clear?",
     "jeff_output": "There are a lot of ways to think about clarity, and it depends on the reader.",
-    "violations": ["NonAnswer"]
+    "violations": [
+      "NonAnswer"
+    ]
   },
   {
     "id": "c035",
     "context": "self narration before result",
     "input": "Analyze this paragraph.",
     "jeff_output": "First, let me examine the paragraph structure and identify the main issue. The claim is buried in the second sentence.",
-    "violations": ["SelfNarration"]
+    "violations": [
+      "SelfNarration"
+    ]
   },
   {
     "id": "c036",
     "context": "self narration before draft",
     "input": "Draft a better opening.",
     "jeff_output": "I'll now analyze what the opening needs before drafting a stronger version. The archive begins as a record of loss, but it becomes an argument about power.",
-    "violations": ["SelfNarration"]
+    "violations": [
+      "SelfNarration"
+    ]
+  },
+  {
+    "id": "c3_briefing_opener",
+    "context": "morning briefing delivered as a conversation opener, not a report",
+    "input": "[briefing trigger: first engagement after being away; calendar has a 2pm draft review, chapter 3 still missing its counterargument section, one file-write approval waiting]",
+    "jeff_output": "Draft review is at 2, and chapter 3 still doesn't have the counterargument section you outlined Tuesday. There's also an approval from last night waiting on you. Want me to draft the counterargument from your notes while you catch up on the rest?",
+    "violations": []
+  },
+  {
+    "id": "c3_debrief_close",
+    "context": "end-of-day debrief as a coworker wrapping up, not a status dump",
+    "input": "[debrief trigger: evening wind-down; today you cut the intro anecdote and restructured the methods section; the abstract revision is still pending; tomorrow the journal wants the revised abstract]",
+    "jeff_output": "You cut the intro anecdote and got the methods section restructured today. The abstract revision is still open, and that's what the journal wants first tomorrow. I'd start there when you're back.",
+    "violations": []
   }
 ]

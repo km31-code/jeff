@@ -50,6 +50,10 @@ pub fn send_message_for_task(
         let _ = relational_model::record_message_signals(store, task_id, clean_message);
         // apex c2: a reply is a reaction to any recent interjection.
         crate::synthesis::record_interruption_reaction_for_reply(store, task_id, clean_message);
+        // apex c3: an end-of-day cue arms the debrief for the next ritual tick.
+        if crate::briefing::is_wrapping_up(clean_message) {
+            crate::briefing::note_wrapping_up(store, chrono::Utc::now().timestamp());
+        }
     }
     store.append_chat_message(
         task_id,

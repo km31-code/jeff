@@ -458,6 +458,15 @@ export async function getInterruptionAudit(): Promise<InterruptionAuditDto> {
   return invoke<InterruptionAuditDto>("get_interruption_audit");
 }
 
+// apex c3: end-of-day debrief opt-in.
+export async function getDebriefEnabled(): Promise<boolean> {
+  return invoke<boolean>("get_debrief_enabled");
+}
+
+export async function setDebriefEnabled(enabled: boolean): Promise<void> {
+  return invoke<void>("set_debrief_enabled", { enabled });
+}
+
 export interface CostTierSpendDto {
   tier: string;
   budget_key: string;

@@ -410,6 +410,28 @@ pub fn get_cost_governor_status(
     crate::cost_governor::status(&state.store).map_err(map_jeff_error)
 }
 
+// apex c3: end-of-day debrief opt-in (default off).
+#[tauri::command]
+pub fn get_debrief_enabled(state: State<'_, JeffState>) -> Result<bool, String> {
+    Ok(state
+        .store
+        .get_app_setting(crate::briefing::DEBRIEF_ENABLED_KEY)
+        .map_err(map_jeff_error)?
+        .map(|value| value == "true" || value == "1")
+        .unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn set_debrief_enabled(state: State<'_, JeffState>, enabled: bool) -> Result<(), String> {
+    state
+        .store
+        .set_app_setting(
+            crate::briefing::DEBRIEF_ENABLED_KEY,
+            if enabled { "true" } else { "false" },
+        )
+        .map_err(map_jeff_error)
+}
+
 // apex c2: weekly interruption self-audit — how often Jeff spoke and how often
 // the user engaged, computed from the interruption ledger.
 #[tauri::command]

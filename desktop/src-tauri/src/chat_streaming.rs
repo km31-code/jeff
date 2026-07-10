@@ -169,6 +169,10 @@ pub async fn start_streaming_turn(
     // apex c2: a reply is a reaction to any recent interjection (independent of
     // profile-memory: this records Jeff's own delivery outcomes, not user facts).
     crate::synthesis::record_interruption_reaction_for_reply(&state.store, task_id, &clean);
+    // apex c3: an end-of-day cue arms the debrief for the next ritual tick.
+    if crate::briefing::is_wrapping_up(&clean) {
+        crate::briefing::note_wrapping_up(&state.store, chrono::Utc::now().timestamp());
+    }
     state
         .store
         .append_chat_message(task_id, "user", &message_source, user_kind, &clean)?;

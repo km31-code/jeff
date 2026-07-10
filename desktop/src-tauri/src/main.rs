@@ -1,6 +1,7 @@
 mod ambient;
 mod artifact_parser;
 mod awareness_core;
+mod briefing;
 mod calendar;
 mod character;
 mod chat;
@@ -656,6 +657,8 @@ fn main() {
             commands::delete_local_model,
             commands::get_cost_governor_status,
             commands::get_interruption_audit,
+            commands::get_debrief_enabled,
+            commands::set_debrief_enabled,
             commands::set_llm_daily_budget,
             commands::get_workspace_prompt_dismissed,
             commands::set_workspace_prompt_dismissed,
