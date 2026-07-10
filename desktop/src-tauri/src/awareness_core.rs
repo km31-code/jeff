@@ -14,6 +14,7 @@ use crate::{
     models::CalendarEventDto,
     state::{CalendarState, ContextState, JeffState},
     store::TaskStore,
+    work_understanding::WorkUnderstanding,
 };
 
 const PROACTIVE_COOLDOWN_SECONDS: i64 = 600;
@@ -36,6 +37,8 @@ pub struct SituationalSnapshot {
     // phase 31: content observation fields
     pub active_document_excerpt: Option<String>,
     pub content_idle_seconds: Option<u32>,
+    // apex b7: latest structured comprehension pass, no raw document text.
+    pub work_understanding: Option<WorkUnderstanding>,
 }
 
 impl Default for SituationalSnapshot {
@@ -54,6 +57,7 @@ impl Default for SituationalSnapshot {
             trigger: "initial".to_string(),
             active_document_excerpt: None,
             content_idle_seconds: None,
+            work_understanding: None,
         }
     }
 }
@@ -315,6 +319,15 @@ pub fn snapshot_summary(snapshot: &SituationalSnapshot) -> String {
         let short: String = excerpt.chars().take(60).collect();
         lines.push(format!("active document: {short}"));
     }
+    if let Some(understanding) = snapshot.work_understanding.as_ref() {
+        lines.push(format!(
+            "work understanding: {}",
+            truncate_chars(&understanding.argument_summary, 90)
+        ));
+        if let Some(weak) = understanding.weak_points.first() {
+            lines.push(format!("weakest point: {}", truncate_chars(weak, 120)));
+        }
+    }
 
     truncate_chars(&lines.join("\n"), 600)
 }
@@ -544,6 +557,12 @@ fn assemble_snapshot(
     if active_document_excerpt.is_some() {
         snapshot_confidence += 0.10;
     }
+    let work_understanding = crate::work_understanding::latest_from_store(&state.store, task_id)
+        .ok()
+        .flatten();
+    if work_understanding.is_some() {
+        snapshot_confidence += 0.10;
+    }
 
     SituationalSnapshot {
         current_goal: current_goal.map(|value| truncate_chars(value.trim(), 240)),
@@ -559,6 +578,7 @@ fn assemble_snapshot(
         trigger: trigger.as_str().to_string(),
         active_document_excerpt,
         content_idle_seconds,
+        work_understanding,
     }
 }
 
@@ -897,8 +917,29 @@ mod tests {
                 "~840 words, mid-draft, content changed recently".to_string(),
             ),
             content_idle_seconds: Some(0),
+            work_understanding: None,
         };
         assert!(snapshot_summary(&snapshot).chars().count() <= 600);
+    }
+
+    #[test]
+    fn b7_snapshot_summary_includes_work_understanding_weakest_point() {
+        let mut snapshot = SituationalSnapshot::default();
+        snapshot.snapshot_confidence = 0.8;
+        snapshot.attention_state = AttentionState::Focused;
+        snapshot.work_understanding = Some(WorkUnderstanding {
+            argument_summary: "The draft argues that citizenship policy needs clearer evidence."
+                .to_string(),
+            weak_points: vec![
+                "Section 2: the causal link is asserted without evidence.".to_string(),
+            ],
+            stuck_signal: None,
+            candidate_observation: Some("Ask for evidence in section 2.".to_string()),
+        });
+        let summary = snapshot_summary(&snapshot);
+        assert!(summary.contains("work understanding"));
+        assert!(summary.contains("weakest point"));
+        assert!(summary.contains("Section 2"));
     }
 
     #[test]
@@ -940,6 +981,7 @@ mod tests {
             trigger: "test".to_string(),
             active_document_excerpt: None,
             content_idle_seconds: None,
+            work_understanding: None,
         }
     }
 

@@ -93,8 +93,11 @@ grep_check "user_model acceptance updates relational model" \
 grep_check "user_model rewrite updates relational model" \
     "record_opinion_pushback" "$SRC/user_model.rs"
 
-grep_check "ambient monitor records recurring drift struggle" \
-    "maybe_record_drift_struggle" "$SRC/proactive.rs"
+# apex b4 retired the drift-count struggle heuristic from the ambient monitor:
+# recurring stuck/churn is now promoted to a consolidation "pattern" fact.
+# struggle recording (record_struggle) is retained; the trigger moved.
+grep_check "recurring struggle detection is consolidation-driven (b4 retirement)" \
+    "FACT_KIND_PATTERN" "$SRC/consolidation.rs"
 
 grep_check "build_relational_context implemented" \
     "pub fn build_relational_context" "$SRC/relational_model.rs"

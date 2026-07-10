@@ -44,6 +44,7 @@ mod user_model;
 mod voice;
 mod voice_naturalness;
 mod watcher;
+mod work_understanding;
 mod workload;
 mod workspace;
 
@@ -900,6 +901,7 @@ async fn spawn_content_observation_poll(handle: tauri::AppHandle) {
         };
 
         let mut should_update_awareness = false;
+        let mut work_understanding_text: Option<String> = None;
         if let Ok(mut guard) = jeff_state.content_observation.lock() {
             guard.capture_attempt_count += 1;
             match text_opt {
@@ -925,6 +927,9 @@ async fn spawn_content_observation_poll(handle: tauri::AppHandle) {
                         prior_wc,
                         prior_stable,
                     );
+                    if observation.content_changed {
+                        work_understanding_text = Some(text.clone());
+                    }
                     guard.last_captured_at = Some(observation.captured_at);
                     guard.prior_text = guard.raw_text.take();
                     guard.raw_text = Some(text);
@@ -948,6 +953,9 @@ async fn spawn_content_observation_poll(handle: tauri::AppHandle) {
                 awareness_core::SnapshotTrigger::ContentObservation,
                 task_id,
             );
+        }
+        if let Some(text) = work_understanding_text {
+            work_understanding::maybe_spawn_work_understanding(&handle, task_id, text);
         }
     }
 }

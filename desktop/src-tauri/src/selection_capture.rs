@@ -340,6 +340,7 @@ pub fn capture_browser_content_observation_request<R: Runtime>(
     }
 
     let text = normalize_browser_content_observation_text(&request.text);
+    let text_for_understanding = text.clone();
     let doc_summary = {
         let mut doc_model = jeff_state
             .document_model
@@ -371,6 +372,13 @@ pub fn capture_browser_content_observation_request<R: Runtime>(
         crate::awareness_core::SnapshotTrigger::ContentObservation,
         task_id,
     );
+    if observation.content_changed {
+        crate::work_understanding::maybe_spawn_work_understanding(
+            app,
+            task_id,
+            text_for_understanding,
+        );
+    }
     Ok(observation)
 }
 

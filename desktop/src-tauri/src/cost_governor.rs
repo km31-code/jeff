@@ -12,6 +12,7 @@ pub const DEFAULT_JUDGMENT_DAILY_BUDGET_USD: f64 = 10.0;
 pub const DEFAULT_CRAFT_DAILY_BUDGET_USD: f64 = 20.0;
 pub const SPECULATION_BUDGET_KEY: &str = "speculation";
 pub const CONSOLIDATION_BUDGET_KEY: &str = "consolidation";
+pub const WORK_UNDERSTANDING_BUDGET_KEY: &str = "work_understanding";
 pub const LATEST_NOTICE_KEY: &str = "llm_cost_notice_latest";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +39,7 @@ pub fn default_daily_budget_usd(budget_key: &str) -> f64 {
         "craft" => DEFAULT_CRAFT_DAILY_BUDGET_USD,
         SPECULATION_BUDGET_KEY => 3.0,
         CONSOLIDATION_BUDGET_KEY => 3.0,
+        WORK_UNDERSTANDING_BUDGET_KEY => 3.0,
         _ => DEFAULT_CONVERSATION_DAILY_BUDGET_USD,
     }
 }
@@ -193,7 +195,11 @@ pub fn status(store: &TaskStore) -> Result<CostGovernorStatusDto> {
     })
     .collect::<Vec<_>>();
 
-    for key in [SPECULATION_BUDGET_KEY, CONSOLIDATION_BUDGET_KEY] {
+    for key in [
+        SPECULATION_BUDGET_KEY,
+        CONSOLIDATION_BUDGET_KEY,
+        WORK_UNDERSTANDING_BUDGET_KEY,
+    ] {
         let budget =
             get_daily_budget_usd(store, key).unwrap_or_else(|_| default_daily_budget_usd(key));
         let spent = spent_for(key);

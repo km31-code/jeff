@@ -4339,7 +4339,8 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                           <p className="task-meta">
                             Jeff will periodically read the text in your active document window or
                             an enabled Google Docs tab to give you better feedback. This text never leaves your device.
-                            Google Docs also requires the extension's per-site toggle.
+                            Google Docs also requires the extension's per-site toggle. Comprehension
+                            passes are recorded as memory episodes in this audit.
                           </p>
                           {privacyDashboard.content_observation_enabled ? (
                             <p className="task-meta" data-testid="content-observation-status">
