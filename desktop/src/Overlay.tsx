@@ -73,8 +73,12 @@ import {
   storeAnthropicApiKey,
   storeOpenAiApiKey,
   transcribeAudio,
-  validateOpenAiApiKey
+  validateOpenAiApiKey,
+  startVoiceSession,
+  persistVoiceTranscript,
+  handleVoiceToolCall
 } from "./tauriClient";
+import { connectRealtimeVoice, type RealtimeConnection } from "./voiceRealtime";
 
 function extractStreamErrorMessage(reason: string): string | null {
   if (!reason || reason === "user_barge_in" || reason === "jeff_barge_in" || reason === "explicit") {
@@ -330,6 +334,10 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
+  // apex c4: realtime voice session state (idle/connecting/live/fallback/closed).
+  const [voiceState, setVoiceState] = useState<"idle" | "connecting" | "live" | "fallback" | "closed">("idle");
+  const [voiceMuted, setVoiceMuted] = useState(false);
+  const voiceConnRef = useRef<RealtimeConnection | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoNotice, setInfoNotice] = useState<string | null>(null);
 
@@ -1857,6 +1865,77 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     }
   }, []);
 
+  // apex c4: end an active realtime voice session.
+  const handleEndVoiceSession = useCallback(() => {
+    voiceConnRef.current?.close();
+    voiceConnRef.current = null;
+    setVoiceMuted(false);
+    setVoiceState("closed");
+  }, []);
+
+  // apex c4: start (or toggle off) a realtime voice session. mints an ephemeral
+  // session in the backend, then opens the WebRTC audio in the browser. falls
+  // back to the STT/TTS pipeline when realtime is off or unavailable.
+  const handleStartVoiceSession = useCallback(async () => {
+    if (voiceConnRef.current) {
+      handleEndVoiceSession();
+      return;
+    }
+    setVoiceState("connecting");
+    try {
+      const session = await startVoiceSession();
+      if (session.fallback || !session.client_secret) {
+        setVoiceState("fallback");
+        setInfoNotice(session.notice ?? "Using the voice pipeline.");
+        return;
+      }
+      const conn = await connectRealtimeVoice(session.client_secret, session.model, {
+        onTranscript: (role, text) => {
+          if (activeTask) {
+            void persistVoiceTranscript(activeTask.id, role, text).catch(() => undefined);
+          }
+        },
+        onToolCall: (name, args) => {
+          if (activeTask) {
+            void handleVoiceToolCall(activeTask.id, name, args).catch(() => undefined);
+          }
+        },
+        onStateChange: (next) => {
+          setVoiceState(next === "live" ? "live" : next === "error" ? "fallback" : next);
+        }
+      });
+      if (!conn) {
+        setVoiceState("fallback");
+        setInfoNotice("Realtime voice unavailable; using the voice pipeline.");
+        return;
+      }
+      voiceConnRef.current = conn;
+      setVoiceState("live");
+    } catch {
+      setVoiceState("fallback");
+    }
+  }, [activeTask, handleEndVoiceSession]);
+
+  const handleToggleVoiceMute = useCallback(() => {
+    setVoiceMuted((prev) => {
+      const next = !prev;
+      voiceConnRef.current?.setMuted(next);
+      return next;
+    });
+  }, []);
+
+  // apex c4: push-to-talk — Cmd/Ctrl+Shift+V opens (or closes) a voice session.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        void handleStartVoiceSession();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [handleStartVoiceSession]);
+
   // d3: mic shortcut listener — placed after voice handlers so they are in scope.
   useEffect(() => {
     const unsub = listen("ambient://mic-shortcut", () => {
@@ -2549,6 +2628,29 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                   jeff is speaking — type to interrupt
                 </div>
               ) : null}
+
+              <div className="overlay-voice-control" data-testid="voice-session-control">
+                <button
+                  type="button"
+                  data-testid="voice-session-toggle"
+                  onClick={() => void handleStartVoiceSession()}
+                  title="Talk to Jeff (Cmd/Ctrl+Shift+V)"
+                >
+                  {voiceState === "live" ? "End voice" : "Talk to Jeff"}
+                </button>
+                {voiceState === "live" ? (
+                  <button
+                    type="button"
+                    data-testid="voice-session-mute"
+                    onClick={handleToggleVoiceMute}
+                  >
+                    {voiceMuted ? "Unmute" : "Mute"}
+                  </button>
+                ) : null}
+                <span className="overlay-voice-state" data-testid="voice-session-state">
+                  {voiceState === "idle" ? "" : `voice: ${voiceState}`}
+                </span>
+              </div>
 
               <form className="overlay-input-row" onSubmit={handleSubmit}>
                 <input

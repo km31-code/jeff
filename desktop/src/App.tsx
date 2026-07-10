@@ -127,6 +127,8 @@ import {
   type InterruptionAuditDto,
   getDebriefEnabled,
   setDebriefEnabled,
+  getVoiceConfig,
+  setVoiceConfig,
   setPrivacySurfaceEnabled,
   getSelectionCaptureIndicator,
   getSelectionBridgeStatus,
@@ -393,6 +395,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [privacyDashboard, setPrivacyDashboard] = useState<PrivacyCenterDashboardDto | null>(null);
   const [interruptionAudit, setInterruptionAudit] = useState<InterruptionAuditDto | null>(null);
   const [debriefEnabled, setDebriefEnabledState] = useState(false);
+  const [voiceEnabled, setVoiceEnabledState] = useState(false);
   const [proactiveAuditLog, setProactiveAuditLog] = useState<ProactiveAuditEntryDto[]>([]);
   const [synthesisLog, setSynthesisLog] = useState<SynthesisLogEntryDto[]>([]);
   const [memoryFacts, setMemoryFacts] = useState<FactDto[]>([]);
@@ -1125,18 +1128,20 @@ function App({ onCloseWorkspace }: AppProps = {}) {
 
   async function refreshPrivacyCenter() {
     try {
-      const [dashboard, bridgeStatus, profile, audit, debrief] = await Promise.all([
+      const [dashboard, bridgeStatus, profile, audit, debrief, voiceConfig] = await Promise.all([
         getPrivacyCenterDashboard(),
         getSelectionBridgeStatus(),
         getRelationalProfile(),
         getInterruptionAudit().catch(() => null),
-        getDebriefEnabled().catch(() => false)
+        getDebriefEnabled().catch(() => false),
+        getVoiceConfig().catch(() => null)
       ]);
       setPrivacyDashboard(dashboard);
       setSelectionBridgeStatus(bridgeStatus);
       setRelationalProfile(profile);
       setInterruptionAudit(audit);
       setDebriefEnabledState(debrief);
+      setVoiceEnabledState(voiceConfig?.enabled ?? false);
       setClipboardCaptureEnabled(dashboard.clipboard_capture_enabled);
       setAccessibilityPermissionGranted(dashboard.accessibility_permission_status === "granted");
       setQuietModeState(!dashboard.proactive_triggers_enabled);
@@ -2159,6 +2164,18 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setPrivacyActionMessage(next ? "End-of-day debrief enabled." : "End-of-day debrief disabled.");
     } catch (error) {
       setOperationError("Failed to update debrief setting", error);
+    }
+  }
+
+  async function handleToggleVoice(next: boolean) {
+    try {
+      const config = await setVoiceConfig(next, "");
+      setVoiceEnabledState(config.enabled);
+      setPrivacyActionMessage(
+        next ? "Realtime voice enabled." : "Realtime voice disabled (STT/TTS pipeline)."
+      );
+    } catch (error) {
+      setOperationError("Failed to update voice setting", error);
     }
   }
 
@@ -4270,6 +4287,19 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                         <p className="task-meta">
                           When on, Jeff closes the day with a short debrief. The morning briefing
                           rides your existing proactive setting.
+                        </p>
+                        <label className="toggle-row">
+                          <span>Realtime voice</span>
+                          <input
+                            type="checkbox"
+                            data-testid="privacy-toggle-voice"
+                            checked={voiceEnabled}
+                            onChange={(event) => void handleToggleVoice(event.target.checked)}
+                          />
+                        </label>
+                        <p className="task-meta">
+                          When on, talking to Jeff uses a full-duplex realtime voice session; off
+                          uses the standard speech pipeline.
                         </p>
                       </li>
 

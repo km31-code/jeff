@@ -9,6 +9,7 @@ use crate::models::{IntentClassificationDto, SpeechSynthesisDto, TranscriptionRe
 // apex a1: anthropic messages api adapter, dispatched to by the model router.
 pub mod anthropic;
 pub mod local;
+pub mod realtime;
 
 // tts model constant lives here so no call site outside providers/ names a
 // model string (apex a1 grep gate). replaced by the voice session work in c4.

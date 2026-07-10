@@ -679,6 +679,55 @@ export async function transcribeAudio(audioBase64: string, mimeType: string): Pr
   return invoke<TranscriptionResultDto>("transcribe_audio", { audioBase64, mimeType });
 }
 
+// apex c4: realtime voice sessions.
+export interface VoiceConfigDto {
+  enabled: boolean;
+  voice: string;
+  model: string;
+}
+
+export interface VoiceSessionStartDto {
+  state: string;
+  client_secret: string | null;
+  model: string;
+  expires_at: number;
+  fallback: boolean;
+  notice: string | null;
+}
+
+export interface VoiceToolResultDto {
+  action: string;
+  text: string | null;
+}
+
+export async function getVoiceConfig(): Promise<VoiceConfigDto> {
+  return invoke<VoiceConfigDto>("get_voice_config");
+}
+
+export async function setVoiceConfig(enabled: boolean, voice: string): Promise<VoiceConfigDto> {
+  return invoke<VoiceConfigDto>("set_voice_config", { enabled, voice });
+}
+
+export async function startVoiceSession(): Promise<VoiceSessionStartDto> {
+  return invoke<VoiceSessionStartDto>("start_voice_session");
+}
+
+export async function persistVoiceTranscript(
+  taskId: number,
+  role: "user" | "assistant",
+  text: string
+): Promise<number> {
+  return invoke<number>("persist_voice_transcript", { taskId, role, text });
+}
+
+export async function handleVoiceToolCall(
+  taskId: number,
+  name: string,
+  args: Record<string, unknown>
+): Promise<VoiceToolResultDto> {
+  return invoke<VoiceToolResultDto>("handle_voice_tool_call", { taskId, name, arguments: args });
+}
+
 export async function synthesizeSpeech(text: string): Promise<SpeechSynthesisDto> {
   return invoke<SpeechSynthesisDto>("synthesize_speech", { text });
 }

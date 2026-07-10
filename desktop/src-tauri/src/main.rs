@@ -44,6 +44,7 @@ mod typing_activity;
 mod user_model;
 mod voice;
 mod voice_naturalness;
+mod voice_session;
 mod watcher;
 mod work_understanding;
 mod workload;
@@ -659,6 +660,11 @@ fn main() {
             commands::get_interruption_audit,
             commands::get_debrief_enabled,
             commands::set_debrief_enabled,
+            commands::get_voice_config,
+            commands::set_voice_config,
+            commands::start_voice_session,
+            commands::persist_voice_transcript,
+            commands::handle_voice_tool_call,
             commands::set_llm_daily_budget,
             commands::get_workspace_prompt_dismissed,
             commands::set_workspace_prompt_dismissed,

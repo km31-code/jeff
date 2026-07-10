@@ -410,6 +410,152 @@ pub fn get_cost_governor_status(
     crate::cost_governor::status(&state.store).map_err(map_jeff_error)
 }
 
+// apex c4: realtime voice session config + lifecycle.
+#[tauri::command]
+pub fn get_voice_config(
+    state: State<'_, JeffState>,
+) -> Result<crate::voice_session::VoiceConfigDto, String> {
+    Ok(crate::voice_session::load_voice_config(&state.store))
+}
+
+#[tauri::command]
+pub fn set_voice_config(
+    state: State<'_, JeffState>,
+    enabled: bool,
+    voice: String,
+) -> Result<crate::voice_session::VoiceConfigDto, String> {
+    state
+        .store
+        .set_app_setting(
+            crate::voice_session::VOICE_ENABLED_KEY,
+            if enabled { "true" } else { "false" },
+        )
+        .map_err(map_jeff_error)?;
+    let clean_voice = voice.trim();
+    if !clean_voice.is_empty() {
+        state
+            .store
+            .set_app_setting(crate::voice_session::VOICE_NAME_KEY, clean_voice)
+            .map_err(map_jeff_error)?;
+    }
+    Ok(crate::voice_session::load_voice_config(&state.store))
+}
+
+// mint a realtime session with the current character + situational context. on
+// failure (voice off, no key, mint error) returns a fallback result so the
+// frontend uses the existing STT/TTS pipeline.
+#[tauri::command]
+pub fn start_voice_session(
+    state: State<'_, JeffState>,
+) -> Result<crate::models::VoiceSessionStartDto, String> {
+    use crate::voice_session::{self, RealtimeVoiceSession, VoiceSession};
+
+    let config = voice_session::load_voice_config(&state.store);
+    let has_key = crate::secrets::resolve_openai_api_key().api_key.is_some();
+    if !voice_session::should_use_realtime(config.enabled, has_key) {
+        return Ok(crate::models::VoiceSessionStartDto {
+            state: "fallback".to_string(),
+            client_secret: None,
+            model: config.model,
+            expires_at: 0,
+            fallback: true,
+            notice: Some("Realtime voice is off or unavailable; using the voice pipeline.".to_string()),
+        });
+    }
+
+    let snapshot = state.awareness_core.snapshot_immediate();
+    let snapshot_summary = crate::awareness_core::snapshot_summary(&snapshot);
+    let relational = if state
+        .store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        crate::relational_model::build_relational_context(&state.store)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let recall = {
+        let query = crate::memory::build_recall_query(
+            snapshot.current_goal.as_deref(),
+            snapshot.active_document_excerpt.as_deref(),
+            None,
+        );
+        if query.trim().is_empty() {
+            None
+        } else {
+            crate::memory::build_recall_block(&state.store, state.embeddings.as_ref(), &query, 4)
+        }
+    };
+    let instructions = voice_session::build_session_instructions(
+        crate::character::base_character_prompt(),
+        Some(&snapshot_summary),
+        relational.as_deref(),
+        recall.as_deref(),
+    );
+
+    let session = RealtimeVoiceSession::new(config.voice.clone());
+    match session.open(&instructions) {
+        Ok(credentials) => Ok(crate::models::VoiceSessionStartDto {
+            state: "live".to_string(),
+            client_secret: Some(credentials.client_secret),
+            model: credentials.model,
+            expires_at: credentials.expires_at,
+            fallback: false,
+            notice: None,
+        }),
+        Err(err) => {
+            eprintln!("[jeff] voice_session_fallback reason={err}");
+            Ok(crate::models::VoiceSessionStartDto {
+                state: "fallback".to_string(),
+                client_secret: None,
+                model: config.model,
+                expires_at: 0,
+                fallback: true,
+                notice: Some("Realtime voice unavailable; using the voice pipeline.".to_string()),
+            })
+        }
+    }
+}
+
+// persist one finalized voice transcript turn (user or assistant) as a normal
+// chat message so memory, episodes, and evals see the voice session.
+#[tauri::command]
+pub fn persist_voice_transcript(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    role: String,
+    text: String,
+) -> Result<i64, String> {
+    crate::voice_session::persist_voice_turn(&state.store, task_id, role.trim(), &text)
+        .map_err(map_jeff_error)
+}
+
+// route a spoken tool-call back through the text command surface: "fix it"
+// spoken becomes "fix it" typed. persists the request as a user voice turn.
+#[tauri::command]
+pub fn handle_voice_tool_call(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    name: String,
+    arguments: serde_json::Value,
+) -> Result<crate::models::VoiceToolResultDto, String> {
+    match crate::voice_session::route_voice_tool_call(&name, &arguments) {
+        crate::voice_session::VoiceAction::RouteAsText(text) => {
+            let _ = crate::voice_session::persist_voice_turn(&state.store, task_id, "user", &text);
+            Ok(crate::models::VoiceToolResultDto {
+                action: "route_as_text".to_string(),
+                text: Some(text),
+            })
+        }
+        crate::voice_session::VoiceAction::None => Ok(crate::models::VoiceToolResultDto {
+            action: "none".to_string(),
+            text: None,
+        }),
+    }
+}
+
 // apex c3: end-of-day debrief opt-in (default off).
 #[tauri::command]
 pub fn get_debrief_enabled(state: State<'_, JeffState>) -> Result<bool, String> {

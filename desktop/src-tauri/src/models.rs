@@ -576,6 +576,26 @@ pub struct LocalRuntimeStatusDto {
     pub installed_model_bytes: u64,
 }
 
+// apex c4: result of minting a realtime voice session. client_secret is the
+// ephemeral token the frontend uses to open the WebRTC audio connection; when
+// fallback is true the frontend uses the STT/TTS pipeline instead.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VoiceSessionStartDto {
+    pub state: String,
+    pub client_secret: Option<String>,
+    pub model: String,
+    pub expires_at: i64,
+    pub fallback: bool,
+    pub notice: Option<String>,
+}
+
+// apex c4: how a spoken tool-call was routed back to the text command surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VoiceToolResultDto {
+    pub action: String,
+    pub text: Option<String>,
+}
+
 // apex c2: weekly interruption self-audit (delivered vs engaged) from the ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InterruptionAuditDto {
