@@ -584,6 +584,13 @@ impl TaskStore {
             crate::providers::OPENAI_EMBEDDING_MODEL_ID
         ));
 
+        // apex c1: two-stage judgment. the stage 2 decision (speak/hold/drop),
+        // chosen channel, and its reason are recorded alongside the stage 1 log.
+        let _ = conn
+            .execute_batch("ALTER TABLE synthesis_log ADD COLUMN stage2_decision TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE synthesis_log ADD COLUMN stage2_channel TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE synthesis_log ADD COLUMN stage2_reason TEXT;");
+
         // phase 30: relational understanding.
         conn.execute_batch(&format!(
             "
@@ -3613,6 +3620,52 @@ impl TaskStore {
             ],
         )
         .context("failed to log synthesis decision")?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    // apex c1: log a decision that carries the stage 2 verdict, channel, and
+    // reason. speak/hold/drop are all recorded; only "speak" that reaches the
+    // user sets delivered = 1.
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_synthesis_decision_staged(
+        &self,
+        task_id: Option<i64>,
+        reason_type: &str,
+        reason_detail: Option<&str>,
+        snapshot_confidence: f32,
+        snapshot_attention_state: &str,
+        message: Option<&str>,
+        delivered: bool,
+        stage2_decision: Option<&str>,
+        stage2_channel: Option<&str>,
+        stage2_reason: Option<&str>,
+    ) -> Result<i64> {
+        let conn = self.connect()?;
+        conn.execute(
+            &format!(
+                "INSERT INTO synthesis_log
+                 (task_id, reason_type, reason_detail, snapshot_confidence,
+                  snapshot_attention_state, message, delivered, delivered_at, created_at,
+                  stage2_decision, stage2_channel, stage2_reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                         CASE WHEN ?7 = 1 THEN ({now}) ELSE NULL END,
+                         ({now}), ?8, ?9, ?10)",
+                now = SQLITE_NOW_EXPR,
+            ),
+            params![
+                task_id,
+                reason_type.trim(),
+                reason_detail,
+                snapshot_confidence,
+                snapshot_attention_state.trim(),
+                message,
+                if delivered { 1 } else { 0 },
+                stage2_decision,
+                stage2_channel,
+                stage2_reason,
+            ],
+        )
+        .context("failed to log staged synthesis decision")?;
         Ok(conn.last_insert_rowid())
     }
 

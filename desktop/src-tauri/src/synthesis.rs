@@ -5,8 +5,11 @@ use tauri::{AppHandle, Manager, Runtime};
 use crate::{
     ambient::{AmbientState, NotificationPayload, OVERLAY_WINDOW_LABEL},
     awareness_core::{
-        self, ProactiveSpeechReason, SituationalSnapshot, SnapshotTrigger, UserProfile,
+        self, snapshot_summary, ProactiveSpeechReason, SituationalSnapshot, SnapshotTrigger,
+        UserProfile,
     },
+    memory,
+    model_router::{GenerateOptions, Tier},
     state::{CalendarState, ContextState, JeffState},
 };
 
@@ -67,7 +70,8 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
         UserProfile::default()
     };
     let last_synthesis_at = jeff.store.get_last_synthesis_at(task.id).unwrap_or(None);
-    let reason = awareness_core::should_speak_proactively(
+    // stage 1: deterministic candidate generation (every tick).
+    let reason = awareness_core::generate_proactive_candidate(
         &snapshot,
         &profile,
         last_synthesis_at,
@@ -80,7 +84,7 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
             task.id,
             None,
             &snapshot,
-            Some("no_reason"),
+            Some("no_candidate"),
             None,
             false,
         );
@@ -113,48 +117,31 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
         return;
     }
 
-    let message =
-        match awareness_core::synthesize_proactive_message(&reason, &snapshot, &jeff.model_router)
-            .await
-        {
-            Ok(message) => message.trim().to_string(),
-            Err(error) => {
-                log_synthesis_decision(
-                    &jeff,
-                    task.id,
-                    Some(&reason),
-                    &snapshot,
-                    Some(&format!("synthesis_failed={error}")),
-                    None,
-                    false,
-                );
-                return;
-            }
-        };
+    // stage 2: one judgment-tier decision owns whether/when/how/with-what-words.
+    let decision = decide_proactive_stage2(&jeff, task.id, &snapshot, &reason).await;
 
-    if message.is_empty() {
-        log_synthesis_decision(
-            &jeff,
-            task.id,
-            Some(&reason),
-            &snapshot,
-            Some("empty_synthesis"),
-            None,
-            false,
-        );
-        return;
+    match decision.verdict {
+        Stage2Verdict::Speak if !decision.message.trim().is_empty() => {
+            let delivered =
+                deliver_by_channel(handle, &jeff, task.id, &reason, &decision).await;
+            log_stage2(&jeff, task.id, &reason, &snapshot, &decision, None, delivered);
+        }
+        Stage2Verdict::Speak => {
+            // model chose speak but produced no message; record as a drop.
+            log_stage2(
+                &jeff,
+                task.id,
+                &reason,
+                &snapshot,
+                &decision,
+                Some("empty_message"),
+                false,
+            );
+        }
+        Stage2Verdict::Hold | Stage2Verdict::Drop => {
+            log_stage2(&jeff, task.id, &reason, &snapshot, &decision, None, false);
+        }
     }
-
-    let delivered = deliver_synthesis_message(handle, &jeff, task.id, &reason, &message).await;
-    log_synthesis_decision(
-        &jeff,
-        task.id,
-        Some(&reason),
-        &snapshot,
-        None,
-        Some(&message),
-        delivered,
-    );
 }
 
 fn active_window_context<R: Runtime>(handle: &AppHandle<R>, jeff: &JeffState) -> Option<String> {
@@ -194,14 +181,220 @@ fn calendar_context<R: Runtime>(
         .and_then(|calendar: tauri::State<'_, CalendarState>| calendar.current())
 }
 
-async fn deliver_synthesis_message<R: Runtime>(
+// ---- apex c1: stage 2 (judgment-tier interruption decision) -----------------
+
+const STAGE2_TIMEOUT_MS: u64 = 4000;
+
+pub const STAGE2_SYSTEM_PROMPT: &str = "You are Jeff's interruption-economics judgment. \
+A deterministic stage 1 produced one candidate reason to speak. You decide, like a considerate senior colleague, \
+whether interrupting is worth it right now, through which channel, and with what words. \
+Weigh what it costs the user to be interrupted (deep focus, mid-thought) against what it is worth to them to know. \
+Return strict JSON only: \
+{\"decision\":\"speak|hold|drop\",\"channel\":\"voice|bubble|notification|silent_card\",\"message\":\"1-2 sentences, <=40 words, specific, conversational, not a notification\",\"reason\":\"one short clause\"}. \
+Use \"hold\" to wait for a natural boundary, \"drop\" to discard a candidate that is not worth it. \
+message may be empty only when decision is hold or drop.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage2Verdict {
+    Speak,
+    Hold,
+    Drop,
+}
+
+impl Stage2Verdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Stage2Verdict::Speak => "speak",
+            Stage2Verdict::Hold => "hold",
+            Stage2Verdict::Drop => "drop",
+        }
+    }
+
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "hold" => Stage2Verdict::Hold,
+            "drop" => Stage2Verdict::Drop,
+            _ => Stage2Verdict::Speak,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage2Channel {
+    Voice,
+    Bubble,
+    Notification,
+    SilentCard,
+}
+
+impl Stage2Channel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Stage2Channel::Voice => "voice",
+            Stage2Channel::Bubble => "bubble",
+            Stage2Channel::Notification => "notification",
+            Stage2Channel::SilentCard => "silent_card",
+        }
+    }
+
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "voice" => Stage2Channel::Voice,
+            "notification" => Stage2Channel::Notification,
+            "silent_card" | "silent" | "card" => Stage2Channel::SilentCard,
+            _ => Stage2Channel::Bubble,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Stage2Decision {
+    pub verdict: Stage2Verdict,
+    pub channel: Stage2Channel,
+    pub message: String,
+    pub reason: String,
+}
+
+pub fn parse_stage2_json(raw: &str) -> Option<Stage2Decision> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&raw[start..=end]).ok()?;
+    Some(Stage2Decision {
+        verdict: Stage2Verdict::parse(value["decision"].as_str().unwrap_or("speak")),
+        channel: Stage2Channel::parse(value["channel"].as_str().unwrap_or("bubble")),
+        message: value["message"].as_str().unwrap_or("").trim().to_string(),
+        reason: value["reason"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+    })
+}
+
+async fn decide_proactive_stage2(
+    jeff: &JeffState,
+    task_id: i64,
+    snapshot: &SituationalSnapshot,
+    reason: &ProactiveSpeechReason,
+) -> Stage2Decision {
+    let recall_block = build_stage2_recall(jeff, task_id, snapshot);
+    let ledger_summary = "not yet available (C2)";
+    let user_prompt = build_stage2_prompt(reason, snapshot, recall_block.as_deref(), ledger_summary);
+
+    match jeff
+        .model_router
+        .generate_async(
+            Tier::Judgment,
+            STAGE2_SYSTEM_PROMPT,
+            &user_prompt,
+            GenerateOptions {
+                temperature: 0.0,
+                max_tokens: Some(400),
+                json_object: true,
+                timeout_ms: Some(STAGE2_TIMEOUT_MS),
+            },
+        )
+        .await
+        .ok()
+        .and_then(|raw| parse_stage2_json(&raw))
+    {
+        Some(decision) => decision,
+        None => fallback_stage2(jeff, snapshot, reason).await,
+    }
+}
+
+// deterministic fallback when the stage 2 model call fails. keeps the phase 27
+// wording path for the message so we never regress to silence, and holds during
+// deep focus rather than interrupting.
+async fn fallback_stage2(
+    jeff: &JeffState,
+    snapshot: &SituationalSnapshot,
+    reason: &ProactiveSpeechReason,
+) -> Stage2Decision {
+    let verdict = if is_deep_focus(snapshot) {
+        Stage2Verdict::Hold
+    } else {
+        Stage2Verdict::Speak
+    };
+    let message = awareness_core::synthesize_proactive_message(reason, snapshot, &jeff.model_router)
+        .await
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+    Stage2Decision {
+        verdict,
+        channel: Stage2Channel::Bubble,
+        message,
+        reason: "stage2_fallback".to_string(),
+    }
+}
+
+// deep focus: actively engaged (focused, content changing) — a high bar for
+// interruption. a stand-in for the C2 focus-depth model.
+fn is_deep_focus(snapshot: &SituationalSnapshot) -> bool {
+    snapshot.attention_state == crate::awareness_core::AttentionState::Focused
+        && snapshot.content_idle_seconds.map(|s| s < 30).unwrap_or(false)
+}
+
+fn build_stage2_recall(
+    jeff: &JeffState,
+    _task_id: i64,
+    snapshot: &SituationalSnapshot,
+) -> Option<String> {
+    let query = memory::build_recall_query(
+        snapshot.current_goal.as_deref(),
+        snapshot.active_document_excerpt.as_deref(),
+        None,
+    );
+    if query.trim().is_empty() {
+        return None;
+    }
+    memory::build_recall_block(&jeff.store, jeff.embeddings.as_ref(), &query, 4)
+}
+
+fn build_stage2_prompt(
+    reason: &ProactiveSpeechReason,
+    snapshot: &SituationalSnapshot,
+    recall_block: Option<&str>,
+    ledger_summary: &str,
+) -> String {
+    format!(
+        "Candidate reason: {}\nDetail: {}\n\nSituation:\n{}\n\nMemory recall:\n{}\n\nInterruption ledger:\n{}\n\nDecide now.",
+        reason.reason_type(),
+        reason.detail(),
+        snapshot_summary(snapshot),
+        recall_block.unwrap_or("<none>"),
+        ledger_summary,
+    )
+}
+
+async fn deliver_by_channel<R: Runtime>(
     handle: &AppHandle<R>,
     jeff: &JeffState,
     task_id: i64,
     reason: &ProactiveSpeechReason,
-    message: &str,
+    decision: &Stage2Decision,
 ) -> bool {
     let kind = proactive_message_kind_for_reason(reason);
+    let message = decision.message.as_str();
+
+    // notification channel: a system notification, no chat bubble.
+    if decision.channel == Stage2Channel::Notification {
+        return crate::ambient::dispatch_notification(
+            handle,
+            NotificationPayload {
+                title: "jeff".to_string(),
+                body: message.to_string(),
+                context_kind: Some(kind.to_string()),
+                context_id: Some(task_id),
+            },
+        )
+        .is_ok();
+    }
+
+    // voice (until C4), bubble, and silent_card all render as a chat bubble.
     if crate::proactive::deliver_proactive_as_chat_message(
         &jeff.store,
         handle,
@@ -215,11 +408,16 @@ async fn deliver_synthesis_message<R: Runtime>(
         return false;
     }
 
+    // silent_card is intentionally non-notifying; bubble/voice raise a
+    // notification only when the overlay is hidden.
+    if decision.channel == Stage2Channel::SilentCard {
+        return true;
+    }
+
     let overlay_visible = handle
         .get_webview_window(OVERLAY_WINDOW_LABEL)
         .and_then(|window| window.is_visible().ok())
         .unwrap_or(false);
-
     if !overlay_visible {
         return crate::ambient::dispatch_notification(
             handle,
@@ -232,8 +430,39 @@ async fn deliver_synthesis_message<R: Runtime>(
         )
         .is_ok();
     }
-
     true
+}
+
+fn log_stage2(
+    jeff: &JeffState,
+    task_id: i64,
+    reason: &ProactiveSpeechReason,
+    snapshot: &SituationalSnapshot,
+    decision: &Stage2Decision,
+    suppression: Option<&str>,
+    delivered: bool,
+) {
+    let detail = match suppression {
+        Some(suppression) => format!("{}; note={suppression}", reason.detail()),
+        None => reason.detail(),
+    };
+    let stage2_reason = if decision.reason.is_empty() {
+        None
+    } else {
+        Some(decision.reason.as_str())
+    };
+    let _ = jeff.store.log_synthesis_decision_staged(
+        Some(task_id),
+        reason.reason_type(),
+        Some(detail.as_str()),
+        snapshot.snapshot_confidence,
+        snapshot.attention_state.as_str(),
+        (!decision.message.is_empty()).then_some(decision.message.as_str()),
+        delivered,
+        Some(decision.verdict.as_str()),
+        Some(decision.channel.as_str()),
+        stage2_reason,
+    );
 }
 
 fn proactive_message_kind_for_reason(reason: &ProactiveSpeechReason) -> &'static str {
@@ -242,6 +471,8 @@ fn proactive_message_kind_for_reason(reason: &ProactiveSpeechReason) -> &'static
         ProactiveSpeechReason::DeadlinePressure { .. } => "proactive_deadline",
         ProactiveSpeechReason::BlockerDetected { .. } => "proactive_blocker",
         ProactiveSpeechReason::WorkQualityObservation { .. } => "proactive_drift",
+        ProactiveSpeechReason::ComprehensionObservation { .. } => "proactive_drift",
+        ProactiveSpeechReason::PendingApprovalAging { .. } => "proactive_reorientation",
     }
 }
 
@@ -295,6 +526,63 @@ fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::TaskStore;
+
+    #[test]
+    fn c1_parse_stage2_json_reads_decision_channel_message() {
+        let hold = parse_stage2_json(
+            r#"{"decision":"hold","channel":"silent_card","message":"","reason":"deep focus"}"#,
+        )
+        .unwrap();
+        assert_eq!(hold.verdict, Stage2Verdict::Hold);
+        assert_eq!(hold.channel, Stage2Channel::SilentCard);
+        assert_eq!(hold.reason, "deep focus");
+
+        let speak = parse_stage2_json(
+            "here you go {\"decision\":\"speak\",\"channel\":\"bubble\",\"message\":\"Paragraph two makes this point already.\",\"reason\":\"at a pause\"} thanks",
+        )
+        .unwrap();
+        assert_eq!(speak.verdict, Stage2Verdict::Speak);
+        assert_eq!(speak.channel, Stage2Channel::Bubble);
+        assert_eq!(speak.message, "Paragraph two makes this point already.");
+
+        let drop = parse_stage2_json(r#"{"decision":"drop","channel":"bubble"}"#).unwrap();
+        assert_eq!(drop.verdict, Stage2Verdict::Drop);
+    }
+
+    #[test]
+    fn c1_staged_log_records_hold_decision_with_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        let task = store.create_task("stage2").unwrap();
+        store
+            .log_synthesis_decision_staged(
+                Some(task.id),
+                "task_return",
+                Some("idle_minutes=8"),
+                0.7,
+                "returning",
+                None,
+                false,
+                Some("hold"),
+                Some("bubble"),
+                Some("deep focus, wait for a boundary"),
+            )
+            .unwrap();
+        let conn = store.connect().unwrap();
+        let (decision, channel, reason, delivered): (String, String, String, i64) = conn
+            .query_row(
+                "SELECT stage2_decision, stage2_channel, stage2_reason, delivered
+                 FROM synthesis_log WHERE task_id = ?1",
+                [task.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(decision, "hold");
+        assert_eq!(channel, "bubble");
+        assert_eq!(reason, "deep focus, wait for a boundary");
+        assert_eq!(delivered, 0);
+    }
 
     #[test]
     fn reason_fields_records_suppressed_none() {

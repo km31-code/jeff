@@ -17,7 +17,13 @@ use crate::{
     work_understanding::WorkUnderstanding,
 };
 
-const PROACTIVE_COOLDOWN_SECONDS: i64 = 600;
+// apex c1: the fixed 600s proactive cooldown is retired. stage 1 enforces only
+// a soft minimum gap between deliveries; c2 replaces this with the interruption
+// ledger (spacing becomes the model's job, informed by reactions).
+const PROACTIVE_MIN_DELIVERY_GAP_SECONDS: i64 = 300;
+// a pending approval must sit unreviewed at least this long before it becomes a
+// stage 1 candidate.
+const PENDING_APPROVAL_AGING_MINUTES: i64 = 20;
 const DEFAULT_RETURN_IDLE_THRESHOLD_SECONDS: i64 = 300;
 const DOWNWEIGHTED_RETURN_IDLE_THRESHOLD_SECONDS: i64 = 600;
 
@@ -104,6 +110,9 @@ pub enum ProactiveSpeechReason {
     DeadlinePressure { event: String, minutes_until: i64 },
     BlockerDetected { blocker: String },
     WorkQualityObservation { observation: String },
+    // apex c1: new stage 1 candidate sources.
+    ComprehensionObservation { observation: String },
+    PendingApprovalAging { pending: usize, oldest_minutes: i64 },
 }
 
 impl ProactiveSpeechReason {
@@ -113,6 +122,8 @@ impl ProactiveSpeechReason {
             Self::DeadlinePressure { .. } => "deadline_pressure",
             Self::BlockerDetected { .. } => "blocker",
             Self::WorkQualityObservation { .. } => "work_quality_observation",
+            Self::ComprehensionObservation { .. } => "comprehension_observation",
+            Self::PendingApprovalAging { .. } => "pending_approval_aging",
         }
     }
 
@@ -127,6 +138,11 @@ impl ProactiveSpeechReason {
             }
             Self::BlockerDetected { blocker } => blocker.clone(),
             Self::WorkQualityObservation { observation } => observation.clone(),
+            Self::ComprehensionObservation { observation } => observation.clone(),
+            Self::PendingApprovalAging {
+                pending,
+                oldest_minutes,
+            } => format!("{pending} pending, oldest {oldest_minutes}m"),
         }
     }
 }
@@ -332,6 +348,76 @@ pub fn snapshot_summary(snapshot: &SituationalSnapshot) -> String {
     truncate_chars(&lines.join("\n"), 600)
 }
 
+fn within_delivery_gap(last_delivered_at: Option<i64>, now: i64) -> bool {
+    last_delivered_at
+        .map(|last| now.saturating_sub(last) < PROACTIVE_MIN_DELIVERY_GAP_SECONDS)
+        .unwrap_or(false)
+}
+
+// apex c1 stage 1: deterministic candidate generation. the existing reason
+// checks plus new candidates (comprehension observation and churn from the b7
+// pass, pending-approval aging). returns exactly one candidate so a multi-signal
+// situation still yields a single integrated message. stage 2 (judgment tier)
+// decides speak/hold/drop, channel, and wording.
+pub fn generate_proactive_candidate(
+    snapshot: &SituationalSnapshot,
+    profile: &UserProfile,
+    last_delivered_at: Option<i64>,
+    now: i64,
+) -> Option<ProactiveSpeechReason> {
+    if snapshot.snapshot_confidence < 0.3 {
+        return None;
+    }
+    if within_delivery_gap(last_delivered_at, now) {
+        return None;
+    }
+    if let Some(reason) = select_base_reason(snapshot, profile, now) {
+        return Some(reason);
+    }
+    if let Some(understanding) = snapshot.work_understanding.as_ref() {
+        if let Some(observation) = understanding
+            .candidate_observation
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            return Some(ProactiveSpeechReason::ComprehensionObservation {
+                observation: observation.to_string(),
+            });
+        }
+        if let Some(stuck) = understanding
+            .stuck_signal
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            return Some(ProactiveSpeechReason::WorkQualityObservation {
+                observation: stuck.to_string(),
+            });
+        }
+    }
+    if let Some((pending, oldest_minutes)) = pending_approval_aging(&snapshot.pending_work, now) {
+        return Some(ProactiveSpeechReason::PendingApprovalAging {
+            pending,
+            oldest_minutes,
+        });
+    }
+    None
+}
+
+fn pending_approval_aging(pending: &[PendingItem], now: i64) -> Option<(usize, i64)> {
+    let oldest = pending
+        .iter()
+        .map(|item| item.created_at)
+        .filter(|created| *created > 0)
+        .min()?;
+    let age_minutes = now.saturating_sub(oldest) / 60;
+    (age_minutes >= PENDING_APPROVAL_AGING_MINUTES).then_some((pending.len(), age_minutes))
+}
+
+// legacy single-stage entry retained for the phase 27/28 checks and their
+// tests. the live path uses generate_proactive_candidate + stage 2.
+#[allow(dead_code)]
 pub fn should_speak_proactively(
     snapshot: &SituationalSnapshot,
     profile: &UserProfile,
@@ -341,14 +427,17 @@ pub fn should_speak_proactively(
     if snapshot.snapshot_confidence < 0.3 {
         return None;
     }
-
-    if last_proactive_at
-        .map(|last| now.saturating_sub(last) < PROACTIVE_COOLDOWN_SECONDS)
-        .unwrap_or(false)
-    {
+    if within_delivery_gap(last_proactive_at, now) {
         return None;
     }
+    select_base_reason(snapshot, profile, now)
+}
 
+fn select_base_reason(
+    snapshot: &SituationalSnapshot,
+    profile: &UserProfile,
+    now: i64,
+) -> Option<ProactiveSpeechReason> {
     // use the most recent of last_focus_at or last_meaningful_turn as "last active" time
     // so idle_seconds reflects actual disengagement, not just conversational silence.
     let last_active_at = [snapshot.last_focus_at, snapshot.last_meaningful_turn]
@@ -1009,13 +1098,95 @@ mod tests {
     }
 
     #[test]
-    fn should_speak_returns_none_within_cooldown() {
+    fn should_speak_returns_none_within_delivery_gap() {
         let now = 10_000;
         let snapshot = speech_test_snapshot(now);
 
+        // within the 300s soft minimum between deliveries → suppressed.
         assert_eq!(
-            should_speak_proactively(&snapshot, &UserProfile::default(), Some(now - 300), now),
+            should_speak_proactively(&snapshot, &UserProfile::default(), Some(now - 200), now),
             None
+        );
+        // past the gap → the base reason is generated again.
+        assert_eq!(
+            should_speak_proactively(&snapshot, &UserProfile::default(), Some(now - 400), now),
+            Some(ProactiveSpeechReason::TaskReturn { idle_minutes: 6 })
+        );
+    }
+
+    #[test]
+    fn c1_multi_signal_situation_yields_single_candidate() {
+        let now = 10_000;
+        // returning + idle (base TaskReturn) AND a deadline AND an aged pending
+        // approval all hold at once; stage 1 must still return exactly one.
+        let mut snapshot = speech_test_snapshot(now);
+        snapshot.time_pressure = Some(TimePressure {
+            source: "calendar".to_string(),
+            description: "review".to_string(),
+            minutes_until: Some(30),
+        });
+        snapshot.pending_work = vec![PendingItem {
+            item_type: "file_write_proposal".to_string(),
+            description: "proposal".to_string(),
+            created_at: now - 3600,
+        }];
+        let candidate =
+            generate_proactive_candidate(&snapshot, &UserProfile::default(), None, now);
+        // Option is inherently a single candidate; the highest-priority base
+        // reason (task return) wins over the later sources.
+        assert_eq!(
+            candidate,
+            Some(ProactiveSpeechReason::TaskReturn { idle_minutes: 6 })
+        );
+    }
+
+    #[test]
+    fn c1_comprehension_observation_becomes_candidate() {
+        let now = 10_000;
+        let mut snapshot = SituationalSnapshot::default();
+        snapshot.snapshot_confidence = 0.8;
+        snapshot.attention_state = AttentionState::Focused;
+        snapshot.work_understanding = Some(WorkUnderstanding {
+            argument_summary: "argues x".to_string(),
+            weak_points: vec![],
+            stuck_signal: None,
+            candidate_observation: Some("Paragraph 2 undercuts the thesis.".to_string()),
+        });
+        assert!(matches!(
+            generate_proactive_candidate(&snapshot, &UserProfile::default(), None, now),
+            Some(ProactiveSpeechReason::ComprehensionObservation { .. })
+        ));
+    }
+
+    #[test]
+    fn c1_pending_approval_aging_becomes_candidate() {
+        let now = 10_000;
+        let mut snapshot = SituationalSnapshot::default();
+        snapshot.snapshot_confidence = 0.8;
+        snapshot.attention_state = AttentionState::Focused;
+        snapshot.pending_work = vec![PendingItem {
+            item_type: "file_write_proposal".to_string(),
+            description: "proposal".to_string(),
+            created_at: now - 40 * 60,
+        }];
+        assert!(matches!(
+            generate_proactive_candidate(&snapshot, &UserProfile::default(), None, now),
+            Some(ProactiveSpeechReason::PendingApprovalAging { .. })
+        ));
+        // a fresh pending approval is not yet a candidate.
+        snapshot.pending_work[0].created_at = now - 60;
+        assert!(
+            generate_proactive_candidate(&snapshot, &UserProfile::default(), None, now).is_none()
+        );
+    }
+
+    #[test]
+    fn c1_within_delivery_gap_yields_no_candidate() {
+        let now = 10_000;
+        let snapshot = speech_test_snapshot(now);
+        assert!(
+            generate_proactive_candidate(&snapshot, &UserProfile::default(), Some(now - 100), now)
+                .is_none()
         );
     }
 

@@ -55,7 +55,8 @@ grep_check "WorkQualityObservation reserved reason present" "WorkQualityObservat
 grep_check "UserProfile reads reorientation weight" "trigger_weight_reorientation" "$SRC/awareness_core.rs"
 grep_check "should_speak_proactively function present" "pub fn should_speak_proactively" "$SRC/awareness_core.rs"
 grep_check "synthesize_proactive_message function present" "pub async fn synthesize_proactive_message" "$SRC/awareness_core.rs"
-grep_check "synthesis uses character reorientation prompt" "build_reorientation_system_prompt" "$SRC/awareness_core.rs"
+# apex a2 restructured the reorientation prompt into cache-stable SystemBlocks.
+grep_check "synthesis uses character reorientation prompt" "build_reorientation_system_blocks" "$SRC/awareness_core.rs"
 # apex a1: synthesis routes through the model router at judgment tier; the
 # 5-second timeout from the phase 27 spec is preserved as timeout_ms.
 grep_check "synthesis uses judgment tier" "Tier::Judgment" "$SRC/awareness_core.rs"
@@ -73,7 +74,9 @@ grep_check "synthesis log DTO present" "pub struct SynthesisLogEntryDto" "$SRC/m
 grep_check "main registers synthesis module" "mod synthesis" "$SRC/main.rs"
 grep_check "run_synthesis_check present" "pub async fn run_synthesis_check" "$SRC/synthesis.rs"
 grep_check "run_synthesis_check reads snapshot through TimeTick update" "SnapshotTrigger::TimeTick" "$SRC/synthesis.rs"
-grep_check "run_synthesis_check calls should_speak_proactively" "should_speak_proactively" "$SRC/synthesis.rs"
+# apex c1 replaced the single-stage should_speak_proactively call with two-stage
+# judgment: stage 1 generate_proactive_candidate + stage 2 decide_proactive_stage2.
+grep_check "run_synthesis_check runs stage 1 candidate generation" "generate_proactive_candidate" "$SRC/synthesis.rs"
 grep_check "run_synthesis_check logs decisions" "log_synthesis_decision" "$SRC/synthesis.rs"
 grep_check "run_synthesis_check suppresses quiet mode before LLM" "quiet_mode" "$SRC/synthesis.rs"
 grep_check "run_synthesis_check dispatches native notification when hidden" "dispatch_notification" "$SRC/synthesis.rs"
