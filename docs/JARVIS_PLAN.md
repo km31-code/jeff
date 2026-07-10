@@ -844,7 +844,7 @@ directional and may be re-scoped when their epoch begins.
 | B2 | Goal understanding | A1, A3 | complete; `scripts/apex_b2_check.sh`, `cargo test --quiet`, `npm run lint`, `npm test -- --run`, phase30/phase31/phase21 checks, `scripts/apex_b1_check.sh`, and live `JEFF_RUN_EXTERNAL_EVAL=1 scripts/goal_eval.sh` passed. Eval: retired prefix 9/30, deterministic fallback 30/30, live Reflex LLM 30/30 |
 | B3 | Episodic memory store | A3 | complete; `scripts/apex_b3_check.sh` passed (schema, async writers, session-summary/tag capture, proposal outcomes, debug commands, scripted 5-turn session test, `cargo check`, B3 tests, frontend typecheck) |
 | B4 | Consolidation and memory panel | B3 | complete; `scripts/apex_b4_check.sh` passed (facts schema, consolidation engine, duplicate merge, decay/drop, prompt-preview delete, named budget, drift-count retirement, Privacy Center facts/episodes panel, `cargo check`, B4 tests, frontend typecheck/tests) |
-| B5 | Recall injection | B3, B4 | not started |
+| B5 | Recall injection | B3, B4 | complete; `scripts/apex_b5_check.sh` passed (ranked recall over facts/high-salience episodes, session-block injection for chat/streaming/revision/reorientation, empty-memory no-op, 500-fact <30ms recall test, seeded preference shaping revision assessment), plus `scripts/apex_a1_check.sh`, `scripts/apex_a2_check.sh`, `scripts/apex_b3_check.sh`, `scripts/apex_b4_check.sh`, `cargo test --quiet`, `npm run lint`, and `npm test -- --run` |
 | B6 | Browser perception (Google Docs reader) | B1 | not started |
 | B7 | Comprehension pass (WorkUnderstanding) | B1, B2, B3, A4 | not started |
 | C1 | Two-stage judgment | B5, B7 | not started |

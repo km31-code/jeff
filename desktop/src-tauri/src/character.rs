@@ -19,6 +19,7 @@ pub struct ChatContext {
     pub active_window: Option<String>,
     pub profile_injection: Option<String>,
     pub relational_context: Option<String>,
+    pub memory_recall: Option<String>,
     pub recent_transcript: Vec<String>,
     pub is_first_message: bool,
     pub snapshot_summary: Option<String>,
@@ -30,6 +31,7 @@ pub struct RevisionContext {
     pub target_description: String,
     pub instruction: String,
     pub profile_injection: Option<String>,
+    pub memory_recall: Option<String>,
     pub prefers_opinions: Option<f32>,
     pub snapshot_summary: Option<String>,
 }
@@ -41,6 +43,7 @@ pub struct ReorientationContext {
     pub profile_injection: Option<String>,
     pub active_window: Option<String>,
     pub calendar_context: Option<String>,
+    pub memory_recall: Option<String>,
     pub snapshot_summary: Option<String>,
 }
 
@@ -58,6 +61,7 @@ pub fn build_chat_system_blocks(ctx: &ChatContext) -> Vec<SystemBlock> {
     let mut session = Vec::new();
     push_optional(&mut session, ctx.profile_injection.as_deref());
     push_optional(&mut session, ctx.relational_context.as_deref());
+    push_optional(&mut session, ctx.memory_recall.as_deref());
 
     if !ctx.task_summary.trim().is_empty() {
         session.push(format!("Task summary:\n{}", ctx.task_summary.trim()));
@@ -99,6 +103,7 @@ pub fn build_revision_system_blocks(ctx: &RevisionContext) -> Vec<SystemBlock> {
     let mut blocks = vec![stable_block(base_character_prompt())];
     let mut session = Vec::new();
     push_optional(&mut session, ctx.profile_injection.as_deref());
+    push_optional(&mut session, ctx.memory_recall.as_deref());
     push_labeled(&mut session, "Task summary", &ctx.task_summary);
     push_block(&mut blocks, CacheHint::Session, session.join("\n\n"));
 
@@ -124,6 +129,7 @@ pub fn build_reorientation_system_blocks(ctx: &ReorientationContext) -> Vec<Syst
     let mut blocks = vec![stable_block(base_character_prompt())];
     let mut session = Vec::new();
     push_optional(&mut session, ctx.profile_injection.as_deref());
+    push_optional(&mut session, ctx.memory_recall.as_deref());
     push_labeled(&mut session, "Task summary", &ctx.task_summary);
     push_block(&mut blocks, CacheHint::Session, session.join("\n\n"));
 
@@ -284,6 +290,7 @@ mod tests {
             active_window: None,
             profile_injection: None,
             relational_context: None,
+            memory_recall: None,
             recent_transcript: Vec::new(),
             is_first_message: false,
             snapshot_summary: None,
@@ -299,6 +306,7 @@ mod tests {
             active_window: Some("Draft.md".to_string()),
             profile_injection: Some("User prefers direct edits.".to_string()),
             relational_context: Some("Long-running writing task.".to_string()),
+            memory_recall: Some("Memory recall:\n- preference: User likes concise critique.".to_string()),
             recent_transcript: vec!["user: tighten this".to_string()],
             is_first_message: false,
             snapshot_summary: Some("Draft is open.".to_string()),
@@ -308,6 +316,7 @@ mod tests {
             active_window: Some("Different.md".to_string()),
             profile_injection: Some("User prefers direct edits.".to_string()),
             relational_context: Some("Long-running writing task.".to_string()),
+            memory_recall: Some("Memory recall:\n- preference: User likes concise critique.".to_string()),
             recent_transcript: vec!["user: continue".to_string()],
             is_first_message: false,
             snapshot_summary: Some("Different snapshot.".to_string()),
@@ -325,6 +334,7 @@ mod tests {
             active_window: Some("active".to_string()),
             profile_injection: Some("profile".to_string()),
             relational_context: Some("relational".to_string()),
+            memory_recall: Some("memory".to_string()),
             recent_transcript: vec!["recent".to_string()],
             is_first_message: false,
             snapshot_summary: Some("snapshot".to_string()),
@@ -334,7 +344,29 @@ mod tests {
         assert_eq!(blocks[1].cache_hint, CacheHint::Session);
         assert_eq!(blocks[2].cache_hint, CacheHint::Volatile);
         assert!(blocks[1].text.contains("profile"));
+        assert!(blocks[1].text.contains("memory"));
         assert!(blocks[2].text.contains("snapshot"));
+    }
+
+    #[test]
+    fn b5_chat_recall_sits_after_relational_context_in_session_block() {
+        let blocks = build_chat_system_blocks(&ChatContext {
+            task_summary: "task".to_string(),
+            active_window: None,
+            profile_injection: Some("profile".to_string()),
+            relational_context: Some("relational context".to_string()),
+            memory_recall: Some("Memory recall:\n- preference: direct assessments".to_string()),
+            recent_transcript: Vec::new(),
+            is_first_message: false,
+            snapshot_summary: None,
+        });
+        let session = &blocks[1].text;
+        let relational_index = session.find("relational context").unwrap();
+        let recall_index = session.find("Memory recall").unwrap();
+        let task_index = session.find("Task summary").unwrap();
+        assert!(relational_index < recall_index);
+        assert!(recall_index < task_index);
+        assert_eq!(blocks[1].cache_hint, CacheHint::Session);
     }
 
     #[test]
@@ -348,6 +380,9 @@ mod tests {
                 profile_injection: Some("User prefers direct critique.".to_string()),
                 relational_context: Some(
                     "The user has been revising this essay for an hour.".to_string(),
+                ),
+                memory_recall: Some(
+                    "Memory recall:\n- preference: User prefers direct critique.".to_string(),
                 ),
                 recent_transcript: vec![format!("user turn {turn}")],
                 is_first_message: false,

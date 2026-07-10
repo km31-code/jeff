@@ -12,6 +12,7 @@ use crate::{
     character::{self, ReorientationContext},
     embedding::EmbeddingProvider,
     message_kind::MessageKind,
+    memory,
     models::{DriftFlagDto, ReorientationDto, SubTaskDto},
     reasoning::ReasoningProvider,
     retrieval::retrieve_relevant_chunks,
@@ -201,6 +202,7 @@ fn unix_to_ymd_hms(secs: i64) -> (i64, i64, i64, i64, i64, i64) {
 pub fn generate_reorientation(
     store: &TaskStore,
     reasoning: &dyn ReasoningProvider,
+    embeddings: &dyn EmbeddingProvider,
     task_id: i64,
     // phase 20: active window context prefix for the system prompt.
     active_context: Option<&str>,
@@ -269,6 +271,19 @@ pub fn generate_reorientation(
     } else {
         None
     };
+    let recall_query = memory::build_recall_query(
+        Some(&task_summary.summary_text),
+        active_context,
+        Some(&message_context),
+    );
+    let memory_recall = if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        memory::build_recall_block(store, embeddings, &recall_query, 4)
+    } else {
+        None
+    };
 
     let effective_reorientation_blocks =
         character::build_reorientation_system_blocks(&ReorientationContext {
@@ -279,6 +294,7 @@ pub fn generate_reorientation(
             profile_injection: profile_prefix,
             active_window: active_context.map(|value| value.to_string()),
             calendar_context: calendar_event.map(|value| value.to_string()),
+            memory_recall,
             snapshot_summary: snapshot_summary.map(|value| value.to_string()),
         });
     let summary = reasoning
@@ -556,7 +572,10 @@ mod tests {
         };
 
         // no prior focus → treated as first visit; absence is considered infinite
-        let result = generate_reorientation(&store, &reasoning, task.id, None, None, None).unwrap();
+        let embeddings = FixedEmbeddingProvider(vec![1.0]);
+        let result =
+            generate_reorientation(&store, &reasoning, &embeddings, task.id, None, None, None)
+                .unwrap();
         // first visit with no prior focus record: since get_last_task_focus returns None
         // the absence check is skipped and we proceed to fire the LLM
         assert!(
@@ -582,7 +601,10 @@ mod tests {
             drift: r#"{"is_drifting":false,"reason":"","confidence":0.0}"#.to_string(),
         };
 
-        let result = generate_reorientation(&store, &reasoning, task.id, None, None, None).unwrap();
+        let embeddings = FixedEmbeddingProvider(vec![1.0]);
+        let result =
+            generate_reorientation(&store, &reasoning, &embeddings, task.id, None, None, None)
+                .unwrap();
         assert!(
             result.summary.is_empty(),
             "expected suppressed summary within cooldown"
@@ -617,8 +639,17 @@ mod tests {
                 fired_at: String::new(),
             }
         } else {
-            generate_reorientation(&store, &PanicReasoningProvider, task.id, None, None, None)
-                .unwrap()
+            let embeddings = FixedEmbeddingProvider(vec![1.0]);
+            generate_reorientation(
+                &store,
+                &PanicReasoningProvider,
+                &embeddings,
+                task.id,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
         };
 
         assert_eq!(response.task_id, task.id);

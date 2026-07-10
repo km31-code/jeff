@@ -1661,6 +1661,7 @@ pub fn trigger_task_resume(
     crate::proactive::generate_reorientation(
         &state.store,
         state.judgment_reasoning().as_ref(),
+        state.embeddings.as_ref(),
         task_id,
         active_ctx.as_deref(),
         None, // calendar context injected at the command layer when CalendarState is available

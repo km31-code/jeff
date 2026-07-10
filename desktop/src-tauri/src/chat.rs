@@ -7,6 +7,7 @@ use crate::{
     model_router::SystemBlock,
     models::{SendMessageResponseDto, TaskContextPackDto},
     reasoning::ReasoningProvider,
+    memory,
     relational_model,
     retrieval::build_task_context_pack,
     store::TaskStore,
@@ -64,10 +65,12 @@ pub fn send_message_for_task(
     let context_pack = build_task_context_pack(store, embeddings, task_id, clean_message)?;
     let user_prompt = build_user_prompt(clean_message, &context_pack, active_context);
 
-    let effective_system_blocks = build_system_blocks(
+    let effective_system_blocks = build_system_blocks_with_recall(
         store,
+        embeddings,
         &context_pack.task_summary,
         active_context,
+        clean_message,
         is_first_message,
         &context_pack.recent_transcript,
         snapshot_summary,
@@ -129,6 +132,58 @@ pub fn build_system_blocks(
     recent_transcript: &[String],
     snapshot_summary: Option<&str>,
 ) -> Vec<SystemBlock> {
+    build_system_blocks_inner(
+        store,
+        task_summary,
+        active_context,
+        None,
+        is_first_message,
+        recent_transcript,
+        snapshot_summary,
+    )
+}
+
+pub fn build_system_blocks_with_recall(
+    store: &TaskStore,
+    embeddings: &dyn EmbeddingProvider,
+    task_summary: &str,
+    active_context: Option<&str>,
+    user_instruction: &str,
+    is_first_message: bool,
+    recent_transcript: &[String],
+    snapshot_summary: Option<&str>,
+) -> Vec<SystemBlock> {
+    let recall_query =
+        memory::build_recall_query(Some(task_summary), active_context, Some(user_instruction));
+    let memory_recall = if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        memory::build_recall_block(store, embeddings, &recall_query, 4)
+    } else {
+        None
+    };
+
+    build_system_blocks_inner(
+        store,
+        task_summary,
+        active_context,
+        memory_recall,
+        is_first_message,
+        recent_transcript,
+        snapshot_summary,
+    )
+}
+
+fn build_system_blocks_inner(
+    store: &TaskStore,
+    task_summary: &str,
+    active_context: Option<&str>,
+    memory_recall: Option<String>,
+    is_first_message: bool,
+    recent_transcript: &[String],
+    snapshot_summary: Option<&str>,
+) -> Vec<SystemBlock> {
     let profile_injection = if store
         .get_privacy_user_profile_memory_enabled()
         .unwrap_or(false)
@@ -153,6 +208,7 @@ pub fn build_system_blocks(
         active_window: active_context.map(|value| value.to_string()),
         profile_injection,
         relational_context,
+        memory_recall,
         recent_transcript: recent_transcript.to_vec(),
         is_first_message,
         snapshot_summary: snapshot_summary.map(|value| value.to_string()),

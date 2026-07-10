@@ -14,6 +14,7 @@ use crate::{
         RevisionProposalResultDto, RevisionTargetDto,
     },
     reasoning::ReasoningProvider,
+    memory,
     relational_model,
     retrieval::build_task_context_pack,
     store::{ChunkEmbeddingInput, NewArtifactVersionInput, NewRevisionProposalInput, TaskStore},
@@ -132,6 +133,7 @@ pub fn propose_artifact_revision(
 
     let revision_system_blocks = build_revision_system_blocks(
         store,
+        embeddings,
         &context_pack.task_summary,
         &resolved_target.target_description,
         clean_instruction,
@@ -482,6 +484,7 @@ fn build_revision_prompt(
 
 fn build_revision_system_blocks(
     store: &TaskStore,
+    embeddings: &dyn EmbeddingProvider,
     task_summary: &str,
     target_description: &str,
     instruction: &str,
@@ -505,12 +508,23 @@ fn build_revision_system_blocks(
     } else {
         None
     };
+    let recall_query =
+        memory::build_recall_query(Some(task_summary), Some(target_description), Some(instruction));
+    let memory_recall = if store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        memory::build_recall_block(store, embeddings, &recall_query, 4)
+    } else {
+        None
+    };
 
     character::build_revision_system_blocks(&RevisionContext {
         task_summary: task_summary.to_string(),
         target_description: target_description.to_string(),
         instruction: instruction.to_string(),
         profile_injection,
+        memory_recall,
         prefers_opinions,
         snapshot_summary: snapshot_summary.map(|s| s.to_string()),
     })
@@ -777,6 +791,7 @@ pub fn generate_revision_alternative(
             prior_rationale
         ),
         profile_injection,
+        memory_recall: None,
         prefers_opinions,
         snapshot_summary: snapshot_summary.map(|s| s.to_string()),
     });
@@ -890,6 +905,26 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct MemoryAwareRevisionReasoningProvider;
+
+    impl ReasoningProvider for MemoryAwareRevisionReasoningProvider {
+        fn generate_response(&self, system_prompt: &str, _user_prompt: &str) -> Result<String> {
+            assert!(
+                system_prompt.contains("Memory recall:"),
+                "revision prompt did not receive memory recall: {system_prompt}"
+            );
+            assert!(
+                system_prompt.contains("direct first-person assessment"),
+                "seeded user fact missing from revision prompt: {system_prompt}"
+            );
+            Ok(
+                r#"{"proposed_text":"This thesis directly frames the citizenship dispute and names the stakes without softening the claim.","rationale":"I used the user's direct first-person assessment preference to keep the judgment explicit.","confidence":0.83,"grounding_notes":"Grounded in the seeded preference and target thesis language."}"#
+                    .to_string(),
+            )
+        }
+    }
+
+    #[derive(Clone)]
     struct NudgeReasoningProvider;
 
     impl ReasoningProvider for NudgeReasoningProvider {
@@ -952,6 +987,29 @@ mod tests {
         (temp, store, task.id, imported_notes.id)
     }
 
+    fn seed_revision_preference_fact(store: &TaskStore) {
+        let text = "User prefers direct first-person assessment before thesis revisions.";
+        let embedding = KeywordEmbeddingProvider.embed_text(text).unwrap();
+        let conn = store.connect().unwrap();
+        conn.execute(
+            "INSERT INTO facts
+             (text, kind, embedding, embedding_model, confidence, evidence_ids_json, salience, last_reinforced, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                text,
+                "preference",
+                crate::memory::encode_embedding(&embedding),
+                "test-keyword",
+                0.9_f32,
+                "[1]",
+                0.95_f32,
+                "2026-01-09T00:00:00.000Z",
+                "2026-01-09T00:00:00.000Z",
+            ],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn revision_object_lifecycle_pending_accept_reject_statuses() {
         let (_temp, store, task_id, artifact_id) = setup_revision_fixture();
@@ -996,6 +1054,35 @@ mod tests {
         let rejected =
             reject_revision(&store, second.revision_id).expect("failed to reject revision");
         assert_eq!(rejected.status, "rejected");
+    }
+
+    #[test]
+    fn b5_seeded_user_fact_shapes_revision_assessment_prompt() {
+        let (_temp, store, task_id, artifact_id) = setup_revision_fixture();
+        store.set_privacy_user_profile_memory_enabled(true).unwrap();
+        seed_revision_preference_fact(&store);
+
+        let proposal = propose_artifact_revision(
+            &store,
+            &KeywordEmbeddingProvider,
+            &MemoryAwareRevisionReasoningProvider,
+            task_id,
+            artifact_id,
+            Some(RevisionTargetDto {
+                start_offset: Some(34),
+                end_offset: Some(93),
+            }),
+            "tighten this thesis with a direct assessment",
+            "typed",
+            None,
+        )
+        .expect("failed to propose memory-aware revision")
+        .proposal;
+
+        assert!(proposal
+            .rationale
+            .unwrap_or_default()
+            .contains("direct first-person assessment"));
     }
 
     #[test]
@@ -1388,6 +1475,7 @@ mod tests {
             target_description: "intro paragraph".to_string(),
             instruction: "tighten this".to_string(),
             profile_injection: None,
+            memory_recall: None,
             prefers_opinions: None,
             snapshot_summary: None,
         });

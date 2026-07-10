@@ -40,6 +40,13 @@ pub const SESSION_SUMMARY_SYSTEM_PROMPT: &str = "Summarize this work session for
 Write at most 120 words. Capture concrete decisions, progress, blockers, deadlines, and user preferences. \
 Do not flatter, do not narrate the summarization, and do not invent details.";
 
+const RECALL_FACT_LIMIT: usize = 500;
+const RECALL_EPISODE_LIMIT: usize = 300;
+const HIGH_SALIENCE_EPISODE_THRESHOLD: f32 = 0.70;
+const MAX_RECALL_BLOCK_WORDS: usize = 120;
+#[cfg(test)]
+const RECALL_LATENCY_BUDGET_MS: u128 = 30;
+
 #[derive(Debug, Clone)]
 pub struct NewEpisode {
     pub task_id: i64,
@@ -64,6 +71,19 @@ impl NewEpisode {
         self.salience = salience;
         self
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecalledItem {
+    pub source_type: String,
+    pub id: i64,
+    pub task_id: Option<i64>,
+    pub kind: String,
+    pub text: String,
+    pub score: f32,
+    pub similarity_score: f32,
+    pub salience: f32,
+    pub created_at: String,
 }
 
 pub fn record_episode(
@@ -163,6 +183,61 @@ pub fn search_episodes(
     });
     scored.truncate(limit);
     Ok(scored)
+}
+
+pub fn recall(store: &TaskStore, query_embedding: &[f32], k: usize) -> Vec<RecalledItem> {
+    if query_embedding.is_empty() || k == 0 {
+        return Vec::new();
+    }
+    match recall_result(store, query_embedding, k) {
+        Ok(items) => items,
+        Err(err) => {
+            eprintln!("[jeff] memory_recall_failed reason={err}");
+            Vec::new()
+        }
+    }
+}
+
+pub fn build_recall_query(
+    current_goal: Option<&str>,
+    document_topic: Option<&str>,
+    user_instruction: Option<&str>,
+) -> String {
+    [current_goal, document_topic, user_instruction]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn build_recall_block(
+    store: &TaskStore,
+    embeddings: &dyn EmbeddingProvider,
+    query: &str,
+    k: usize,
+) -> Option<String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+    let embedding = embeddings.embed_text(query).ok()?;
+    build_recall_block_from_items(&recall(store, &embedding, k))
+}
+
+pub fn build_recall_block_from_items(items: &[RecalledItem]) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let lines = items
+        .iter()
+        .map(|item| format!("- {}: {}", item.kind, item.text))
+        .collect::<Vec<_>>();
+    Some(truncate_words(
+        format!("Memory recall:\n{}", lines.join("\n")),
+        MAX_RECALL_BLOCK_WORDS,
+    ))
 }
 
 pub fn record_proposal_outcome_async(
@@ -514,6 +589,170 @@ fn list_episode_embeddings(
         .context("failed to collect episode embeddings")
 }
 
+fn recall_result(store: &TaskStore, query_embedding: &[f32], k: usize) -> Result<Vec<RecalledItem>> {
+    let now = chrono::Utc::now().timestamp();
+    let mut items = Vec::new();
+    items.extend(list_recall_facts(store, query_embedding, now)?);
+    items.extend(list_recall_episodes(store, query_embedding, now)?);
+    dedupe_recalled_items(&mut items);
+    items.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.similarity_score
+                    .partial_cmp(&a.similarity_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    items.truncate(k);
+    Ok(items)
+}
+
+fn list_recall_facts(
+    store: &TaskStore,
+    query_embedding: &[f32],
+    now: i64,
+) -> Result<Vec<RecalledItem>> {
+    let conn = store.connect()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, text, kind, confidence, salience, last_reinforced, created_at, embedding
+             FROM facts
+             ORDER BY salience DESC, last_reinforced DESC, id DESC
+             LIMIT ?1",
+        )
+        .context("failed to prepare fact recall query")?;
+    let rows = stmt
+        .query_map(params![RECALL_FACT_LIMIT as i64], |row| {
+            let id: i64 = row.get(0)?;
+            let text: String = row.get(1)?;
+            let kind: String = row.get(2)?;
+            let confidence = row.get::<_, f64>(3)? as f32;
+            let salience = row.get::<_, f64>(4)? as f32;
+            let last_reinforced: String = row.get(5)?;
+            let created_at: String = row.get(6)?;
+            let blob: Vec<u8> = row.get(7)?;
+            Ok((
+                id,
+                text,
+                kind,
+                confidence,
+                salience,
+                last_reinforced,
+                created_at,
+                decode_embedding(&blob),
+            ))
+        })
+        .context("failed to query fact recall candidates")?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        let (id, text, kind, confidence, salience, last_reinforced, created_at, embedding) =
+            row.context("failed to map fact recall row")?;
+        let similarity = cosine_similarity(query_embedding, &embedding);
+        if similarity <= 0.0 {
+            continue;
+        }
+        let recency = recency_weight(&last_reinforced, now);
+        let quality = (salience.clamp(0.0, 1.0) * 0.65) + (confidence.clamp(0.0, 1.0) * 0.35);
+        items.push(RecalledItem {
+            source_type: "fact".to_string(),
+            id,
+            task_id: None,
+            kind,
+            text,
+            score: recall_score(similarity, quality, recency),
+            similarity_score: similarity,
+            salience,
+            created_at,
+        });
+    }
+    Ok(items)
+}
+
+fn list_recall_episodes(
+    store: &TaskStore,
+    query_embedding: &[f32],
+    now: i64,
+) -> Result<Vec<RecalledItem>> {
+    let conn = store.connect()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, task_id, kind, text, salience, created_at, embedding
+             FROM episodes
+             WHERE salience >= ?1
+             ORDER BY salience DESC, created_at DESC, id DESC
+             LIMIT ?2",
+        )
+        .context("failed to prepare episode recall query")?;
+    let rows = stmt
+        .query_map(
+            params![HIGH_SALIENCE_EPISODE_THRESHOLD, RECALL_EPISODE_LIMIT as i64],
+            |row| {
+                let id: i64 = row.get(0)?;
+                let task_id: i64 = row.get(1)?;
+                let kind: String = row.get(2)?;
+                let text: String = row.get(3)?;
+                let salience = row.get::<_, f64>(4)? as f32;
+                let created_at: String = row.get(5)?;
+                let blob: Vec<u8> = row.get(6)?;
+                Ok((
+                    id,
+                    task_id,
+                    kind,
+                    text,
+                    salience,
+                    created_at,
+                    decode_embedding(&blob),
+                ))
+            },
+        )
+        .context("failed to query episode recall candidates")?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        let (id, task_id, kind, text, salience, created_at, embedding) =
+            row.context("failed to map episode recall row")?;
+        let similarity = cosine_similarity(query_embedding, &embedding);
+        if similarity <= 0.0 {
+            continue;
+        }
+        let recency = recency_weight(&created_at, now);
+        items.push(RecalledItem {
+            source_type: "episode".to_string(),
+            id,
+            task_id: Some(task_id),
+            kind,
+            text,
+            score: recall_score(similarity, salience.clamp(0.0, 1.0), recency),
+            similarity_score: similarity,
+            salience,
+            created_at,
+        });
+    }
+    Ok(items)
+}
+
+fn recall_score(similarity: f32, salience: f32, recency: f32) -> f32 {
+    (similarity.clamp(0.0, 1.0) * 0.70)
+        + (salience.clamp(0.0, 1.0) * 0.20)
+        + (recency.clamp(0.0, 1.0) * 0.10)
+}
+
+fn recency_weight(timestamp: &str, now: i64) -> f32 {
+    let Some(then) = parse_sqlite_datetime_to_unix(timestamp) else {
+        return 0.5;
+    };
+    let elapsed_days = now.saturating_sub(then).max(0) as f32 / 86_400.0;
+    (1.0 / (1.0 + elapsed_days / 30.0)).clamp(0.0, 1.0)
+}
+
+fn dedupe_recalled_items(items: &mut Vec<RecalledItem>) {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| seen.insert(item.text.to_ascii_lowercase()));
+}
+
 fn episode_from_row(row: &Row<'_>) -> rusqlite::Result<EpisodeDto> {
     Ok(EpisodeDto {
         id: row.get(0)?,
@@ -718,6 +957,36 @@ mod tests {
         }
     }
 
+    fn insert_fact(
+        store: &TaskStore,
+        provider: &TestEmbeddingProvider,
+        text: &str,
+        kind: &str,
+        salience: f32,
+        last_reinforced: &str,
+    ) -> i64 {
+        let embedding = provider.embed_text(text).unwrap();
+        let conn = store.connect().unwrap();
+        conn.execute(
+            "INSERT INTO facts
+             (text, kind, embedding, embedding_model, confidence, evidence_ids_json, salience, last_reinforced, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                text,
+                kind,
+                encode_embedding(&embedding),
+                provider.model_id(),
+                0.86_f32,
+                "[1]",
+                salience,
+                last_reinforced,
+                last_reinforced,
+            ],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
     #[test]
     fn b3_episode_round_trips_with_embedding_blob() {
         let (_dir, store, task_id) = test_store();
@@ -855,5 +1124,121 @@ mod tests {
                 "{kind}"
             );
         }
+    }
+
+    #[test]
+    fn b5_empty_memory_injects_no_recall_block() {
+        let (_dir, store, _task_id) = test_store();
+        let provider = TestEmbeddingProvider;
+        let block = build_recall_block(&store, &provider, "revise the thesis", 4);
+        assert!(block.is_none());
+    }
+
+    #[test]
+    fn b5_recall_ranks_matching_facts_and_high_salience_episodes() {
+        let (_dir, store, task_id) = test_store();
+        let provider = TestEmbeddingProvider;
+        insert_fact(
+            &store,
+            &provider,
+            "User prefers direct first-person assessment before thesis revisions.",
+            "preference",
+            0.92,
+            "2026-01-09T00:00:00.000Z",
+        );
+        insert_fact(
+            &store,
+            &provider,
+            "Deadline/date: slides are due next Friday.",
+            "deadline",
+            0.88,
+            "2026-01-09T00:00:00.000Z",
+        );
+        record_episode(
+            &store,
+            &provider,
+            &NewEpisode::new(
+                task_id,
+                KIND_DECISION,
+                "Decision: keep direct assessment language in revisions.",
+                "test",
+            )
+            .with_salience(0.91),
+        )
+        .unwrap();
+
+        let query = provider
+            .embed_text("direct assessment thesis revision")
+            .unwrap();
+        let recalled = recall(&store, &query, 3);
+        assert!(!recalled.is_empty());
+        assert!(
+            recalled
+                .iter()
+                .any(|item| item.text.contains("direct first-person assessment"))
+        );
+        assert!(
+            recalled
+                .iter()
+                .any(|item| item.source_type == "episode" && item.text.contains("assessment"))
+        );
+        assert!(
+            recalled[0].text.contains("assessment"),
+            "top recall should match the revision assessment query: {recalled:?}"
+        );
+    }
+
+    #[test]
+    fn b5_recall_block_is_compact_under_120_words() {
+        let (_dir, store, _task_id) = test_store();
+        let provider = TestEmbeddingProvider;
+        insert_fact(
+            &store,
+            &provider,
+            "User prefers direct assessment sentences that name the tradeoff before a revision.",
+            "preference",
+            0.95,
+            "2026-01-09T00:00:00.000Z",
+        );
+        let block = build_recall_block(
+            &store,
+            &provider,
+            "direct assessment tradeoff revision",
+            4,
+        )
+        .unwrap();
+        assert!(block.starts_with("Memory recall:"));
+        assert!(
+            block.split_whitespace().count() <= MAX_RECALL_BLOCK_WORDS,
+            "{block}"
+        );
+    }
+
+    #[test]
+    fn b5_recall_latency_under_30ms_at_500_facts() {
+        let (_dir, store, _task_id) = test_store();
+        let provider = TestEmbeddingProvider;
+        for index in 0..RECALL_FACT_LIMIT {
+            insert_fact(
+                &store,
+                &provider,
+                &format!("Fact {index}: user prefers direct assessment for thesis revision."),
+                "preference",
+                0.6 + ((index % 20) as f32 / 100.0),
+                "2026-01-09T00:00:00.000Z",
+            );
+        }
+
+        let query = provider
+            .embed_text("direct assessment thesis revision")
+            .unwrap();
+        let started = std::time::Instant::now();
+        let recalled = recall(&store, &query, 6);
+        let elapsed = started.elapsed().as_millis();
+        assert_eq!(recalled.len(), 6);
+        assert!(
+            elapsed < RECALL_LATENCY_BUDGET_MS,
+            "recall took {elapsed}ms"
+        );
     }
 }

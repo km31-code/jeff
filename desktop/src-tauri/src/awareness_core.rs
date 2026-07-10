@@ -412,6 +412,7 @@ pub async fn synthesize_proactive_message(
                 .time_pressure
                 .as_ref()
                 .map(|pressure| pressure.description.clone()),
+            memory_recall: None,
             snapshot_summary: Some(snapshot_summary(snapshot)),
         },
     );
