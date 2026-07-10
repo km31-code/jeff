@@ -123,6 +123,8 @@ import {
   SynthesisLogEntryDto,
   DataClearResultDto,
   getPrivacyCenterDashboard,
+  getInterruptionAudit,
+  type InterruptionAuditDto,
   setPrivacySurfaceEnabled,
   getSelectionCaptureIndicator,
   getSelectionBridgeStatus,
@@ -387,6 +389,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   // phase 21: privacy and trust control center
   const [privacyCenterOpen, setPrivacyCenterOpen] = useState(false);
   const [privacyDashboard, setPrivacyDashboard] = useState<PrivacyCenterDashboardDto | null>(null);
+  const [interruptionAudit, setInterruptionAudit] = useState<InterruptionAuditDto | null>(null);
   const [proactiveAuditLog, setProactiveAuditLog] = useState<ProactiveAuditEntryDto[]>([]);
   const [synthesisLog, setSynthesisLog] = useState<SynthesisLogEntryDto[]>([]);
   const [memoryFacts, setMemoryFacts] = useState<FactDto[]>([]);
@@ -1119,14 +1122,16 @@ function App({ onCloseWorkspace }: AppProps = {}) {
 
   async function refreshPrivacyCenter() {
     try {
-      const [dashboard, bridgeStatus, profile] = await Promise.all([
+      const [dashboard, bridgeStatus, profile, audit] = await Promise.all([
         getPrivacyCenterDashboard(),
         getSelectionBridgeStatus(),
-        getRelationalProfile()
+        getRelationalProfile(),
+        getInterruptionAudit().catch(() => null)
       ]);
       setPrivacyDashboard(dashboard);
       setSelectionBridgeStatus(bridgeStatus);
       setRelationalProfile(profile);
+      setInterruptionAudit(audit);
       setClipboardCaptureEnabled(dashboard.clipboard_capture_enabled);
       setAccessibilityPermissionGranted(dashboard.accessibility_permission_status === "granted");
       setQuietModeState(!dashboard.proactive_triggers_enabled);
@@ -4223,6 +4228,21 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                             Download semantic embedding model (~35 MB)
                           </button>
                         </div>
+                      </li>
+
+                      <li data-testid="privacy-surface-interruptions">
+                        <label className="toggle-row">
+                          <span>Interruptions</span>
+                        </label>
+                        <p className="task-meta" data-testid="interruption-self-audit">
+                          {interruptionAudit
+                            ? `Jeff spoke ${interruptionAudit.delivered} ${
+                                interruptionAudit.delivered === 1 ? "time" : "times"
+                              } in the last ${interruptionAudit.days} days; you engaged with ${
+                                interruptionAudit.engaged
+                              }.`
+                            : "No interjections recorded yet."}
+                        </p>
                       </li>
 
                       <li data-testid="privacy-surface-spend">

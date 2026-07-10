@@ -655,6 +655,7 @@ fn main() {
             commands::download_curated_embedding_model,
             commands::delete_local_model,
             commands::get_cost_governor_status,
+            commands::get_interruption_audit,
             commands::set_llm_daily_budget,
             commands::get_workspace_prompt_dismissed,
             commands::set_workspace_prompt_dismissed,

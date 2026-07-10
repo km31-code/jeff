@@ -410,6 +410,24 @@ pub fn get_cost_governor_status(
     crate::cost_governor::status(&state.store).map_err(map_jeff_error)
 }
 
+// apex c2: weekly interruption self-audit — how often Jeff spoke and how often
+// the user engaged, computed from the interruption ledger.
+#[tauri::command]
+pub fn get_interruption_audit(
+    state: State<'_, JeffState>,
+) -> Result<crate::models::InterruptionAuditDto, String> {
+    let days = 7;
+    let (delivered, engaged) = state
+        .store
+        .interruption_audit(days)
+        .map_err(map_jeff_error)?;
+    Ok(crate::models::InterruptionAuditDto {
+        days,
+        delivered,
+        engaged,
+    })
+}
+
 #[tauri::command]
 pub fn set_llm_daily_budget(
     state: State<'_, JeffState>,

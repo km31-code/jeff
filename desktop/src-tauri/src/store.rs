@@ -91,6 +91,15 @@ pub struct LlmUsageLogInput {
     pub est_cost_usd: f64,
 }
 
+// apex c2: a delivered interjection and how it landed.
+#[derive(Debug, Clone)]
+pub struct InterruptionLedgerRow {
+    pub reason_type: String,
+    pub focus_score: f32,
+    pub reaction: Option<String>,
+    pub delivered_at_unix: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct LlmSpendByTier {
     pub tier: String,
@@ -590,6 +599,24 @@ impl TaskStore {
             .execute_batch("ALTER TABLE synthesis_log ADD COLUMN stage2_decision TEXT;");
         let _ = conn.execute_batch("ALTER TABLE synthesis_log ADD COLUMN stage2_channel TEXT;");
         let _ = conn.execute_batch("ALTER TABLE synthesis_log ADD COLUMN stage2_reason TEXT;");
+
+        // apex c2: interruption ledger. every delivered interjection records the
+        // focus it landed in and the user's reaction, so spacing becomes learned.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS interruption_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER,
+                delivered_at TEXT NOT NULL DEFAULT (datetime('now')),
+                reason_type TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                focus_score REAL NOT NULL DEFAULT 0,
+                reaction TEXT,
+                reaction_at TEXT
+             );
+             CREATE INDEX IF NOT EXISTS idx_interruption_ledger_task
+                ON interruption_ledger(task_id, id DESC);",
+        )
+        .context("failed to create interruption_ledger table")?;
 
         // phase 30: relational understanding.
         conn.execute_batch(&format!(
@@ -3669,6 +3696,112 @@ impl TaskStore {
         Ok(conn.last_insert_rowid())
     }
 
+    // apex c2: record a delivered interjection into the ledger (reaction pending).
+    pub fn record_interruption(
+        &self,
+        task_id: Option<i64>,
+        reason_type: &str,
+        channel: &str,
+        focus_score: f32,
+    ) -> Result<i64> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO interruption_ledger (task_id, reason_type, channel, focus_score)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![task_id, reason_type.trim(), channel.trim(), focus_score],
+        )
+        .context("failed to record interruption")?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    // record the user's reaction to the most recent still-pending interruption
+    // for a task delivered within the window. returns the affected row id.
+    pub fn record_interruption_reaction_within(
+        &self,
+        task_id: i64,
+        window_seconds: i64,
+        reaction: &str,
+    ) -> Result<Option<i64>> {
+        let conn = self.connect()?;
+        let id = conn
+            .query_row(
+                "SELECT id FROM interruption_ledger
+                 WHERE task_id = ?1 AND reaction IS NULL
+                   AND CAST(strftime('%s','now') AS INTEGER)
+                       - CAST(strftime('%s', delivered_at) AS INTEGER) <= ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![task_id, window_seconds],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .context("failed to find pending interruption")?;
+        if let Some(id) = id {
+            conn.execute(
+                "UPDATE interruption_ledger
+                 SET reaction = ?1, reaction_at = datetime('now') WHERE id = ?2",
+                params![reaction.trim(), id],
+            )
+            .context("failed to record interruption reaction")?;
+        }
+        Ok(id)
+    }
+
+    pub fn list_recent_interruptions(
+        &self,
+        task_id: i64,
+        limit: usize,
+    ) -> Result<Vec<InterruptionLedgerRow>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT reason_type, focus_score, reaction,
+                        CAST(strftime('%s', delivered_at) AS INTEGER)
+                 FROM interruption_ledger
+                 WHERE task_id = ?1
+                 ORDER BY id DESC LIMIT ?2",
+            )
+            .context("failed to prepare interruption query")?;
+        let rows = stmt
+            .query_map(params![task_id, limit as i64], |row| {
+                Ok(InterruptionLedgerRow {
+                    reason_type: row.get(0)?,
+                    focus_score: row.get::<_, f64>(1)? as f32,
+                    reaction: row.get(2)?,
+                    delivered_at_unix: row.get(3)?,
+                })
+            })
+            .context("failed to query interruptions")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect interruptions")
+    }
+
+    // weekly self-audit: (delivered, engaged) over the last `days` days.
+    pub fn interruption_audit(&self, days: i64) -> Result<(i64, i64)> {
+        let conn = self.connect()?;
+        let delivered: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM interruption_ledger
+                     WHERE delivered_at >= datetime('now', '-{days} days')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to count delivered interruptions")?;
+        let engaged: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM interruption_ledger
+                     WHERE reaction = 'engaged'
+                       AND delivered_at >= datetime('now', '-{days} days')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to count engaged interruptions")?;
+        Ok((delivered, engaged))
+    }
+
     pub fn get_last_synthesis_at(&self, task_id: i64) -> Result<Option<i64>> {
         let conn = self.connect()?;
         let value = conn
@@ -4703,8 +4836,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 33,
-            "expected 33 application tables after apex b4"
+            count, 34,
+            "expected 34 application tables after apex c2 (added interruption_ledger)"
         );
     }
 

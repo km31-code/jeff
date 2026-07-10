@@ -576,6 +576,14 @@ pub struct LocalRuntimeStatusDto {
     pub installed_model_bytes: u64,
 }
 
+// apex c2: weekly interruption self-audit (delivered vs engaged) from the ledger.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InterruptionAuditDto {
+    pub days: i64,
+    pub delivered: i64,
+    pub engaged: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CostGovernorStatusDto {
     pub today_total_usd: f64,

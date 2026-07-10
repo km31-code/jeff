@@ -25,7 +25,6 @@ const PROACTIVE_MIN_DELIVERY_GAP_SECONDS: i64 = 300;
 // stage 1 candidate.
 const PENDING_APPROVAL_AGING_MINUTES: i64 = 20;
 const DEFAULT_RETURN_IDLE_THRESHOLD_SECONDS: i64 = 300;
-const DOWNWEIGHTED_RETURN_IDLE_THRESHOLD_SECONDS: i64 = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SituationalSnapshot {
@@ -45,6 +44,8 @@ pub struct SituationalSnapshot {
     pub content_idle_seconds: Option<u32>,
     // apex b7: latest structured comprehension pass, no raw document text.
     pub work_understanding: Option<WorkUnderstanding>,
+    // apex c2: focus depth (0-1), recorded at every interruption for the ledger.
+    pub focus_score: f32,
 }
 
 impl Default for SituationalSnapshot {
@@ -64,11 +65,12 @@ impl Default for SituationalSnapshot {
             active_document_excerpt: None,
             content_idle_seconds: None,
             work_understanding: None,
+            focus_score: 0.0,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AttentionState {
     Focused,
@@ -361,17 +363,17 @@ fn within_delivery_gap(last_delivered_at: Option<i64>, now: i64) -> bool {
 // decides speak/hold/drop, channel, and wording.
 pub fn generate_proactive_candidate(
     snapshot: &SituationalSnapshot,
-    profile: &UserProfile,
-    last_delivered_at: Option<i64>,
+    _profile: &UserProfile,
+    _last_delivered_at: Option<i64>,
     now: i64,
 ) -> Option<ProactiveSpeechReason> {
+    // apex c2: the interim 300s delivery guard is retired here. spacing is now
+    // stage 2's job, informed by the interruption ledger; stage 1 only decides
+    // whether a candidate exists this tick (the ambient tick cadence bounds cost).
     if snapshot.snapshot_confidence < 0.3 {
         return None;
     }
-    if within_delivery_gap(last_delivered_at, now) {
-        return None;
-    }
-    if let Some(reason) = select_base_reason(snapshot, profile, now) {
+    if let Some(reason) = select_base_reason(snapshot, now) {
         return Some(reason);
     }
     if let Some(understanding) = snapshot.work_understanding.as_ref() {
@@ -430,12 +432,12 @@ pub fn should_speak_proactively(
     if within_delivery_gap(last_proactive_at, now) {
         return None;
     }
-    select_base_reason(snapshot, profile, now)
+    let _ = profile;
+    select_base_reason(snapshot, now)
 }
 
 fn select_base_reason(
     snapshot: &SituationalSnapshot,
-    profile: &UserProfile,
     now: i64,
 ) -> Option<ProactiveSpeechReason> {
     // use the most recent of last_focus_at or last_meaningful_turn as "last active" time
@@ -446,9 +448,9 @@ fn select_base_reason(
         .max()
         .copied();
     let idle_seconds = last_active_at.map(|t| now.saturating_sub(t)).unwrap_or(0);
-    let idle_threshold = if profile.trigger_weight_reorientation < 0.5 {
-        DOWNWEIGHTED_RETURN_IDLE_THRESHOLD_SECONDS
-    } else {
+    // apex c2: trigger_weight down-weighting is retired in favor of the ledger.
+    // the user_model keys remain for the "Jeff remembers" panel.
+    let idle_threshold = {
         DEFAULT_RETURN_IDLE_THRESHOLD_SECONDS
     };
 
@@ -653,6 +655,8 @@ fn assemble_snapshot(
         snapshot_confidence += 0.10;
     }
 
+    let focus_score = compute_focus_score(attention_state, content_idle_seconds);
+
     SituationalSnapshot {
         current_goal: current_goal.map(|value| truncate_chars(value.trim(), 240)),
         recent_progress,
@@ -668,7 +672,43 @@ fn assemble_snapshot(
         active_document_excerpt,
         content_idle_seconds,
         work_understanding,
+        focus_score,
     }
+}
+
+// apex c2: focus depth in 0-1. attention state provides the base (typing
+// cadence feeds attention_state since phase 22), sharpened by how recently the
+// document changed: actively editing raises focus, long content idle lowers it.
+pub fn compute_focus_score(attention_state: AttentionState, content_idle_seconds: Option<u32>) -> f32 {
+    let base: f32 = match attention_state {
+        AttentionState::Focused => 0.7,
+        AttentionState::Drifting => 0.45,
+        AttentionState::Returning => 0.3,
+        AttentionState::Idle => 0.1,
+    };
+    let adjustment: f32 = match content_idle_seconds {
+        Some(idle) if idle < 30 => 0.2,
+        Some(idle) if idle > 120 => -0.2,
+        _ => 0.0,
+    };
+    (base + adjustment).clamp(0.0, 1.0)
+}
+
+// apex c2: a natural boundary is a good moment to release a held interjection —
+// a save, a long pause after sustained typing, or an app/task switch. drifting
+// or idle attention and a long content pause count as boundaries; deep focus
+// with active editing does not.
+pub fn is_at_natural_boundary(snapshot: &SituationalSnapshot) -> bool {
+    if matches!(
+        snapshot.attention_state,
+        AttentionState::Returning | AttentionState::Idle | AttentionState::Drifting
+    ) {
+        return true;
+    }
+    snapshot
+        .content_idle_seconds
+        .map(|idle| idle >= 90)
+        .unwrap_or(false)
 }
 
 fn content_observation_summary(state: &JeffState) -> (Option<String>, Option<u32>) {
@@ -1007,6 +1047,7 @@ mod tests {
             ),
             content_idle_seconds: Some(0),
             work_understanding: None,
+            focus_score: 0.0,
         };
         assert!(snapshot_summary(&snapshot).chars().count() <= 600);
     }
@@ -1071,6 +1112,7 @@ mod tests {
             active_document_excerpt: None,
             content_idle_seconds: None,
             work_understanding: None,
+            focus_score: 0.0,
         }
     }
 
@@ -1181,12 +1223,44 @@ mod tests {
     }
 
     #[test]
-    fn c1_within_delivery_gap_yields_no_candidate() {
+    fn c2_focus_score_high_when_typing_low_when_idle() {
+        // typing burst: focused attention, content actively changing -> high.
+        let typing = compute_focus_score(AttentionState::Focused, Some(0));
+        assert!(typing >= 0.8, "typing burst should be high focus, got {typing}");
+        // idle: idle attention, long content pause -> low.
+        let idle = compute_focus_score(AttentionState::Idle, Some(600));
+        assert!(idle <= 0.2, "idle should be low focus, got {idle}");
+        assert!(typing > idle);
+    }
+
+    #[test]
+    fn c2_natural_boundary_detected_at_idle_and_pause_not_deep_focus() {
+        let mut deep = SituationalSnapshot::default();
+        deep.attention_state = AttentionState::Focused;
+        deep.content_idle_seconds = Some(0);
+        assert!(!is_at_natural_boundary(&deep));
+
+        let mut idle = SituationalSnapshot::default();
+        idle.attention_state = AttentionState::Idle;
+        assert!(is_at_natural_boundary(&idle));
+
+        // a long pause during otherwise-focused work is also a boundary.
+        let mut paused = SituationalSnapshot::default();
+        paused.attention_state = AttentionState::Focused;
+        paused.content_idle_seconds = Some(120);
+        assert!(is_at_natural_boundary(&paused));
+    }
+
+    #[test]
+    fn c2_stage1_no_longer_enforces_a_delivery_gap() {
+        // apex c2 retired the interim 300s guard from the live candidate path;
+        // spacing is now stage 2's job, informed by the ledger. a candidate is
+        // generated even right after a recent delivery.
         let now = 10_000;
         let snapshot = speech_test_snapshot(now);
-        assert!(
-            generate_proactive_candidate(&snapshot, &UserProfile::default(), Some(now - 100), now)
-                .is_none()
+        assert_eq!(
+            generate_proactive_candidate(&snapshot, &UserProfile::default(), Some(now - 100), now),
+            Some(ProactiveSpeechReason::TaskReturn { idle_minutes: 6 })
         );
     }
 
@@ -1208,20 +1282,6 @@ mod tests {
                 event: "Design review in 89 minutes".to_string(),
                 minutes_until: 89,
             })
-        );
-    }
-
-    #[test]
-    fn should_speak_raises_threshold_after_dismissals() {
-        let now = 10_000;
-        let snapshot = speech_test_snapshot(now);
-        let profile = UserProfile {
-            trigger_weight_reorientation: 0.3,
-        };
-
-        assert_eq!(
-            should_speak_proactively(&snapshot, &profile, None, now),
-            None
         );
     }
 

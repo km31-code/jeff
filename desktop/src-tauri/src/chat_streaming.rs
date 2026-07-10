@@ -166,6 +166,9 @@ pub async fn start_streaming_turn(
     {
         let _ = crate::relational_model::record_message_signals(&state.store, task_id, &clean);
     }
+    // apex c2: a reply is a reaction to any recent interjection (independent of
+    // profile-memory: this records Jeff's own delivery outcomes, not user facts).
+    crate::synthesis::record_interruption_reaction_for_reply(&state.store, task_id, &clean);
     state
         .store
         .append_chat_message(task_id, "user", &message_source, user_kind, &clean)?;

@@ -124,6 +124,16 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
         Stage2Verdict::Speak if !decision.message.trim().is_empty() => {
             let delivered =
                 deliver_by_channel(handle, &jeff, task.id, &reason, &decision).await;
+            if delivered {
+                // apex c2: record the interjection and the focus it landed in;
+                // the reaction is filled in later (reply, dismissal, or ignored).
+                let _ = jeff.store.record_interruption(
+                    Some(task.id),
+                    reason.reason_type(),
+                    decision.channel.as_str(),
+                    snapshot.focus_score,
+                );
+            }
             log_stage2(&jeff, task.id, &reason, &snapshot, &decision, None, delivered);
         }
         Stage2Verdict::Speak => {
@@ -281,8 +291,18 @@ async fn decide_proactive_stage2(
     reason: &ProactiveSpeechReason,
 ) -> Stage2Decision {
     let recall_block = build_stage2_recall(jeff, task_id, snapshot);
-    let ledger_summary = "not yet available (C2)";
-    let user_prompt = build_stage2_prompt(reason, snapshot, recall_block.as_deref(), ledger_summary);
+    let ledger = jeff
+        .store
+        .list_recent_interruptions(task_id, LEDGER_LOOKBACK)
+        .unwrap_or_default();
+    let now = unix_now();
+    let ledger_summary = build_ledger_summary(&ledger, now);
+    let user_prompt = build_stage2_prompt(
+        reason,
+        snapshot,
+        recall_block.as_deref(),
+        ledger_summary.as_deref().unwrap_or("no interruption history yet"),
+    );
 
     match jeff
         .model_router
@@ -302,33 +322,181 @@ async fn decide_proactive_stage2(
         .and_then(|raw| parse_stage2_json(&raw))
     {
         Some(decision) => decision,
-        None => fallback_stage2(jeff, snapshot, reason).await,
+        None => fallback_stage2(jeff, task_id, snapshot, reason, &ledger, now).await,
     }
 }
 
 // deterministic fallback when the stage 2 model call fails. keeps the phase 27
-// wording path for the message so we never regress to silence, and holds during
-// deep focus rather than interrupting.
+// wording path for the message so we never regress to silence. holds when the
+// user is in deep focus, or when this reason has been repeatedly ignored at this
+// focus band — unless we are at a natural boundary, which releases the hold.
 async fn fallback_stage2(
     jeff: &JeffState,
+    _task_id: i64,
     snapshot: &SituationalSnapshot,
     reason: &ProactiveSpeechReason,
+    ledger: &[crate::store::InterruptionLedgerRow],
+    now: i64,
 ) -> Stage2Decision {
-    let verdict = if is_deep_focus(snapshot) {
-        Stage2Verdict::Hold
-    } else {
-        Stage2Verdict::Speak
-    };
+    let repeatedly_ignored =
+        reason_band_is_ignored(ledger, reason.reason_type(), snapshot.focus_score, now);
+    let verdict = fallback_verdict(snapshot, reason.reason_type(), ledger, now);
+    let should_hold = verdict == Stage2Verdict::Hold;
     let message = awareness_core::synthesize_proactive_message(reason, snapshot, &jeff.model_router)
         .await
         .map(|value| value.trim().to_string())
         .unwrap_or_default();
+    let reason_text = if should_hold && repeatedly_ignored {
+        "held: this cue has been ignored at this focus level"
+    } else if should_hold {
+        "held: deep focus, waiting for a natural boundary"
+    } else {
+        "stage2_fallback"
+    };
     Stage2Decision {
         verdict,
         channel: Stage2Channel::Bubble,
         message,
-        reason: "stage2_fallback".to_string(),
+        reason: reason_text.to_string(),
     }
+}
+
+// ---- apex c2: interruption ledger summary + learned hold ---------------------
+
+// pure hold/speak decision for the deterministic fallback: hold during deep
+// focus or a repeatedly-ignored cue at this focus band, unless we are at a
+// natural boundary (which releases the hold).
+fn fallback_verdict(
+    snapshot: &SituationalSnapshot,
+    reason_type: &str,
+    ledger: &[crate::store::InterruptionLedgerRow],
+    now: i64,
+) -> Stage2Verdict {
+    let at_boundary = awareness_core::is_at_natural_boundary(snapshot);
+    let repeatedly_ignored = reason_band_is_ignored(ledger, reason_type, snapshot.focus_score, now);
+    if (is_deep_focus(snapshot) || repeatedly_ignored) && !at_boundary {
+        Stage2Verdict::Hold
+    } else {
+        Stage2Verdict::Speak
+    }
+}
+
+const LEDGER_LOOKBACK: usize = 40;
+// a still-pending interjection older than this is treated as ignored.
+const LEDGER_IGNORE_SECONDS: i64 = 300;
+
+fn focus_band(focus_score: f32) -> &'static str {
+    if focus_score >= 0.6 {
+        "deep-focus"
+    } else if focus_score >= 0.3 {
+        "engaged"
+    } else {
+        "break"
+    }
+}
+
+// classify a ledger row's settled outcome. returns None when the outcome is not
+// yet known (recently delivered, still awaiting a reaction).
+fn settled_outcome(row: &crate::store::InterruptionLedgerRow, now: i64) -> Option<bool> {
+    match row.reaction.as_deref() {
+        Some("engaged") => Some(true),
+        Some(_) => Some(false), // dismissed / explicit_negative / ignored
+        None => {
+            if now.saturating_sub(row.delivered_at_unix) >= LEDGER_IGNORE_SECONDS {
+                Some(false) // ignored: delivered long ago, never reacted to
+            } else {
+                None
+            }
+        }
+    }
+}
+
+// a compact (~60 token) engagement summary bucketed by focus band and reason.
+fn build_ledger_summary(ledger: &[crate::store::InterruptionLedgerRow], now: i64) -> Option<String> {
+    use std::collections::BTreeMap;
+    let mut buckets: BTreeMap<(String, &str), (u32, u32)> = BTreeMap::new();
+    for row in ledger {
+        let Some(engaged) = settled_outcome(row, now) else {
+            continue;
+        };
+        let entry = buckets
+            .entry((row.reason_type.clone(), focus_band(row.focus_score)))
+            .or_insert((0, 0));
+        entry.0 += 1;
+        if engaged {
+            entry.1 += 1;
+        }
+    }
+    if buckets.is_empty() {
+        return None;
+    }
+    let lines = buckets
+        .into_iter()
+        .map(|((reason, band), (delivered, engaged))| {
+            format!("{band} {reason}: engaged {engaged}/{delivered}")
+        })
+        .collect::<Vec<_>>();
+    Some(lines.join("; "))
+}
+
+// true when this reason at this focus band has a clear ignored pattern: at least
+// three settled outcomes and none engaged.
+fn reason_band_is_ignored(
+    ledger: &[crate::store::InterruptionLedgerRow],
+    reason_type: &str,
+    focus_score: f32,
+    now: i64,
+) -> bool {
+    let band = focus_band(focus_score);
+    let mut delivered = 0u32;
+    let mut engaged = 0u32;
+    for row in ledger {
+        if row.reason_type != reason_type || focus_band(row.focus_score) != band {
+            continue;
+        }
+        if let Some(is_engaged) = settled_outcome(row, now) {
+            delivered += 1;
+            if is_engaged {
+                engaged += 1;
+            }
+        }
+    }
+    delivered >= 3 && engaged == 0
+}
+
+// ---- apex c2: reaction capture ----------------------------------------------
+
+// record the user's reaction to a recent interjection when they send a message:
+// "not now"-class replies are explicit_negative, everything else is engaged.
+pub fn record_interruption_reaction_for_reply(
+    store: &crate::store::TaskStore,
+    task_id: i64,
+    message: &str,
+) {
+    let reaction = if is_explicit_negative(message) {
+        "explicit_negative"
+    } else {
+        "engaged"
+    };
+    let _ = store.record_interruption_reaction_within(task_id, LEDGER_IGNORE_SECONDS, reaction);
+}
+
+fn is_explicit_negative(message: &str) -> bool {
+    let lower = message.trim().to_ascii_lowercase();
+    [
+        "not now",
+        "not right now",
+        "leave me",
+        "go away",
+        "stop interrupting",
+        "not helpful",
+        "quiet",
+        "shush",
+        "later",
+        "busy",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
 }
 
 // deep focus: actively engaged (focused, content changing) — a high bar for
@@ -527,6 +695,104 @@ fn unix_now() -> i64 {
 mod tests {
     use super::*;
     use crate::store::TaskStore;
+
+    use crate::awareness_core::{AttentionState, SituationalSnapshot};
+    use crate::store::InterruptionLedgerRow;
+
+    fn ignored_row(reason: &str, focus: f32, age: i64, now: i64) -> InterruptionLedgerRow {
+        InterruptionLedgerRow {
+            reason_type: reason.to_string(),
+            focus_score: focus,
+            reaction: Some("ignored".to_string()),
+            delivered_at_unix: now - age,
+        }
+    }
+
+    #[test]
+    fn c2_three_ignored_at_high_focus_holds_the_fourth() {
+        let now = 100_000;
+        // three prior task_return interjections at deep focus, all ignored.
+        let ledger = vec![
+            ignored_row("task_return", 0.8, 600, now),
+            ignored_row("task_return", 0.85, 500, now),
+            ignored_row("task_return", 0.75, 400, now),
+        ];
+        // a fourth comparable candidate arrives during deep focus (no boundary).
+        let mut deep = SituationalSnapshot::default();
+        deep.attention_state = AttentionState::Focused;
+        deep.content_idle_seconds = Some(0);
+        deep.focus_score = 0.8;
+        assert_eq!(
+            fallback_verdict(&deep, "task_return", &ledger, now),
+            Stage2Verdict::Hold
+        );
+
+        // the same ignored history releases at a natural boundary (user idle).
+        let mut boundary = SituationalSnapshot::default();
+        boundary.attention_state = AttentionState::Idle;
+        boundary.focus_score = 0.8;
+        assert_eq!(
+            fallback_verdict(&boundary, "task_return", &ledger, now),
+            Stage2Verdict::Speak
+        );
+    }
+
+    #[test]
+    fn c2_reason_band_needs_three_settled_ignores() {
+        let now = 100_000;
+        let two = vec![
+            ignored_row("task_return", 0.8, 600, now),
+            ignored_row("task_return", 0.8, 500, now),
+        ];
+        assert!(!reason_band_is_ignored(&two, "task_return", 0.8, now));
+        let mut three = two.clone();
+        three.push(ignored_row("task_return", 0.8, 400, now));
+        assert!(reason_band_is_ignored(&three, "task_return", 0.8, now));
+        // one engaged breaks the ignored pattern.
+        let mut with_engaged = three.clone();
+        with_engaged[0].reaction = Some("engaged".to_string());
+        assert!(!reason_band_is_ignored(&with_engaged, "task_return", 0.8, now));
+        // a different focus band does not count.
+        assert!(!reason_band_is_ignored(&three, "task_return", 0.2, now));
+    }
+
+    #[test]
+    fn c2_pending_recent_row_is_not_yet_ignored() {
+        let now = 100_000;
+        let recent = vec![InterruptionLedgerRow {
+            reason_type: "task_return".to_string(),
+            focus_score: 0.8,
+            reaction: None,
+            delivered_at_unix: now - 10, // just delivered
+        }];
+        assert!(settled_outcome(&recent[0], now).is_none());
+        assert!(build_ledger_summary(&recent, now).is_none());
+    }
+
+    #[test]
+    fn c2_reaction_capture_records_engaged_and_explicit_negative() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        let task = store.create_task("react").unwrap();
+
+        // engaged: a normal reply within the window.
+        store
+            .record_interruption(Some(task.id), "task_return", "bubble", 0.8)
+            .unwrap();
+        record_interruption_reaction_for_reply(&store, task.id, "yes, fix that transition");
+        let (delivered, engaged) = store.interruption_audit(7).unwrap();
+        assert_eq!(delivered, 1);
+        assert_eq!(engaged, 1);
+
+        // explicit_negative: a "not now"-class reply.
+        store
+            .record_interruption(Some(task.id), "deadline_pressure", "bubble", 0.9)
+            .unwrap();
+        record_interruption_reaction_for_reply(&store, task.id, "not now, I'm busy");
+        let (delivered, engaged) = store.interruption_audit(7).unwrap();
+        assert_eq!(delivered, 2);
+        assert_eq!(engaged, 1); // the negative reply is not engagement
+    }
 
     #[test]
     fn c1_parse_stage2_json_reads_decision_channel_message() {

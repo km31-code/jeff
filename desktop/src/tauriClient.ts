@@ -447,6 +447,17 @@ export interface CostGovernorStatusDto {
   last_notice: string | null;
 }
 
+// apex c2: weekly interruption self-audit.
+export interface InterruptionAuditDto {
+  days: number;
+  delivered: number;
+  engaged: number;
+}
+
+export async function getInterruptionAudit(): Promise<InterruptionAuditDto> {
+  return invoke<InterruptionAuditDto>("get_interruption_audit");
+}
+
 export interface CostTierSpendDto {
   tier: string;
   budget_key: string;
