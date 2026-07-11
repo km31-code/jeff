@@ -71,6 +71,12 @@ pub struct CrisisEvalCase {
     pub removed_count: usize,
     pub known_file_count: usize,
     pub disk_available_bytes: Option<u64>,
+    #[serde(default)]
+    pub signal_present: bool,
+    #[serde(default)]
+    pub guard_tripped: bool,
+    #[serde(default)]
+    pub evidence: String,
     pub expected_fire: bool,
 }
 
@@ -85,7 +91,8 @@ pub fn detect_meeting_imminent(
     acknowledged: bool,
     movement_toward: bool,
 ) -> Option<CrisisCandidate> {
-    if minutes_until <= MEETING_IMMINENT_MINUTES && !acknowledged && !movement_toward {
+    if (0..=MEETING_IMMINENT_MINUTES).contains(&minutes_until) && !acknowledged && !movement_toward
+    {
         Some(CrisisCandidate {
             class: CrisisClass::MeetingImminent,
             evidence: format!("meeting starts in {minutes_until} minutes; no movement toward it"),
@@ -99,10 +106,51 @@ pub fn detect_deadline_collision(
     minutes_until: i64,
     far_from_done: bool,
 ) -> Option<CrisisCandidate> {
-    if minutes_until <= DEADLINE_COLLISION_MINUTES && far_from_done {
+    if (0..=DEADLINE_COLLISION_MINUTES).contains(&minutes_until) && far_from_done {
         Some(CrisisCandidate {
             class: CrisisClass::DeadlineCollision,
             evidence: format!("deadline in {minutes_until} minutes while work is far from done"),
+        })
+    } else {
+        None
+    }
+}
+
+#[allow(dead_code)]
+pub fn detect_deadline_collision_from_estimate(
+    minutes_until: i64,
+    estimated_remaining_minutes: Option<i64>,
+) -> Option<CrisisCandidate> {
+    let remaining = estimated_remaining_minutes.filter(|minutes| *minutes >= 0)?;
+    let far_from_done = remaining > minutes_until;
+    let mut candidate = detect_deadline_collision(minutes_until, far_from_done)?;
+    candidate.evidence = format!(
+        "deadline in {minutes_until} minutes; estimated work remaining is {remaining} minutes"
+    );
+    Some(candidate)
+}
+
+pub fn detect_awaited_reply_landed(evidence: &str, was_watched: bool) -> Option<CrisisCandidate> {
+    let clean = evidence.trim();
+    if was_watched && !clean.is_empty() {
+        Some(CrisisCandidate {
+            class: CrisisClass::AwaitedReplyLanded,
+            evidence: clean.to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+pub fn detect_standing_job_critical(
+    evidence: &str,
+    guard_tripped: bool,
+) -> Option<CrisisCandidate> {
+    let clean = evidence.trim();
+    if guard_tripped && !clean.is_empty() {
+        Some(CrisisCandidate {
+            class: CrisisClass::StandingJobCritical,
+            evidence: clean.to_string(),
         })
     } else {
         None
@@ -163,8 +211,12 @@ pub fn evaluate_crisis_case(case: &CrisisEvalCase) -> bool {
             case.disk_available_bytes,
         )
         .is_some(),
-        CrisisClass::AwaitedReplyLanded => false,
-        CrisisClass::StandingJobCritical => false,
+        CrisisClass::AwaitedReplyLanded => {
+            detect_awaited_reply_landed(&case.evidence, case.signal_present).is_some()
+        }
+        CrisisClass::StandingJobCritical => {
+            detect_standing_job_critical(&case.evidence, case.guard_tripped).is_some()
+        }
     }
 }
 
@@ -176,6 +228,7 @@ mod tests {
     fn c7_meeting_imminent_fires_at_ten_not_forty() {
         assert!(detect_meeting_imminent(10, false, false).is_some());
         assert!(detect_meeting_imminent(40, false, false).is_none());
+        assert!(detect_meeting_imminent(-1, false, false).is_none());
     }
 
     #[test]
@@ -189,6 +242,10 @@ mod tests {
         assert!(detect_deadline_collision(90, true).is_some());
         assert!(detect_deadline_collision(90, false).is_none());
         assert!(detect_deadline_collision(180, true).is_none());
+        assert!(detect_deadline_collision(-5, true).is_none());
+        assert!(detect_deadline_collision_from_estimate(60, Some(90)).is_some());
+        assert!(detect_deadline_collision_from_estimate(60, Some(45)).is_none());
+        assert!(detect_deadline_collision_from_estimate(60, None).is_none());
     }
 
     #[test]
@@ -196,5 +253,14 @@ mod tests {
         assert!(is_mass_deletion_signal(30, 100));
         assert!(!is_mass_deletion_signal(19, 20));
         assert!(!is_mass_deletion_signal(20, 200));
+    }
+
+    #[test]
+    fn c7_reply_and_standing_job_require_real_guard_signals() {
+        assert!(detect_awaited_reply_landed("reply id 42", true).is_some());
+        assert!(detect_awaited_reply_landed("reply id 42", false).is_none());
+        assert!(detect_standing_job_critical("budget exceeded", true).is_some());
+        assert!(detect_standing_job_critical("budget exceeded", false).is_none());
+        assert!(detect_standing_job_critical("", true).is_none());
     }
 }

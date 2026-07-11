@@ -68,6 +68,127 @@ function originFromUrl(url) {
   }
 }
 
+function googleDocsDocumentId(url) {
+  try {
+    const parsed = new URL(url || "");
+    if (parsed.origin !== "https://docs.google.com") return "";
+    const match = parsed.pathname.match(/\/document\/(?:u\/\d+\/)?d\/([^/?#]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function normalizedGoogleDocsTitle(title) {
+  return String(title || "")
+    .replace(/\s+-\s+Google Docs\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function postBridgeJson(port, path, payload) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (response.ok) return;
+      const body = await response.text();
+      lastError = new Error(body || `Jeff bridge returned ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+  }
+  throw lastError || new Error("Jeff bridge did not acknowledge the action result");
+}
+
+async function reportApplyOutcome(result, receiptId, port, token) {
+  if (!result || result.guided || result.anchorMismatch) {
+    await postBridgeJson(port, "/apply-fallback", {
+      token,
+      receipt_id: receiptId,
+      reason: result?.reason || "guided_apply_required"
+    });
+    return;
+  }
+  await postBridgeJson(port, "/apply-result", {
+    token,
+    receipt_id: receiptId,
+    status: result.ok ? "applied" : "failed",
+    error: result.ok && result.mode
+      ? `mode:${result.mode}`
+      : (result.reason || null)
+  });
+}
+
+async function dispatchApprovedEdit(
+  receiptId,
+  beforeText,
+  afterText,
+  anchorHash,
+  tabId,
+  port,
+  token,
+  options
+) {
+  if (!Number.isInteger(tabId)) {
+    await reportApplyOutcome(
+      { ok: false, guided: true, reason: "source_tab_unavailable" },
+      receiptId,
+      port,
+      token
+    );
+    return;
+  }
+  const tab = await chrome.tabs.get(tabId);
+  const googleDocs = options.editorSurface === "google_docs" || options.editorSurface === "Google Docs";
+  const currentUrl = String(tab?.url || "");
+  const currentTitle = String(tab?.title || "");
+  const identityChanged = googleDocs
+    ? (
+      !options.expectedDocumentId ||
+      googleDocsDocumentId(currentUrl) !== options.expectedDocumentId ||
+      normalizedGoogleDocsTitle(currentTitle) !== options.expectedDocumentTitle
+    )
+    : currentUrl !== options.expectedUrl;
+  if (identityChanged) {
+    await reportApplyOutcome(
+      { ok: false, guided: true, reason: "document_identity_mismatch" },
+      receiptId,
+      port,
+      token
+    );
+    return;
+  }
+
+  let result;
+  try {
+    result = await chrome.tabs.sendMessage(tabId, {
+      type: googleDocs ? "JEFF_APPLY_GOOGLE_DOCS_ACTION" : "JEFF_APPLY_EDIT",
+      receiptId,
+      beforeText,
+      afterText,
+      anchorHash,
+      anchorBefore: options.anchorBefore || "",
+      anchorAfter: options.anchorAfter || "",
+      preferSuggesting: options.preferSuggesting !== false,
+      expectedDocumentId: options.expectedDocumentId || "",
+      expectedDocumentTitle: options.expectedDocumentTitle || ""
+    });
+  } catch (error) {
+    result = {
+      ok: false,
+      guided: true,
+      reason: `content_script_unavailable:${error && error.message ? error.message : String(error)}`
+    };
+  }
+  await reportApplyOutcome(result, receiptId, port, token);
+}
+
 function isContentObservationOriginAllowed(origin) {
   return origin === "https://docs.google.com";
 }
@@ -109,20 +230,22 @@ async function pollForLiveEditApproval(receiptId, beforeText, afterText, anchorH
       if (!resp.ok) continue;
       const data = await resp.json();
       if (data.status === "approved") {
-        // dispatch the apply command to the content script
-        const googleDocs = options.editorSurface === "google_docs" || options.editorSurface === "Google Docs";
-        chrome.tabs.sendMessage(tabId, {
-          type: googleDocs ? "JEFF_APPLY_GOOGLE_DOCS_ACTION" : "JEFF_APPLY_EDIT",
-          receiptId,
-          beforeText,
-          afterText,
-          anchorHash,
-          anchorBefore: options.anchorBefore || "",
-          anchorAfter: options.anchorAfter || "",
-          preferSuggesting: options.preferSuggesting !== false,
-          token,
-          port
-        });
+        // Await both the content-script result and the backend acknowledgment.
+        // Never re-dispatch an edit just because result reporting was slow.
+        try {
+          await dispatchApprovedEdit(
+            receiptId,
+            beforeText,
+            afterText,
+            anchorHash,
+            tabId,
+            port,
+            token,
+            options
+          );
+        } catch (error) {
+          console.warn("[jeff-live-edit-result]", error);
+        }
         return;
       }
       if (data.status === "rejected") {
@@ -152,7 +275,7 @@ async function handleLiveEditProposal(proposal) {
     selection_anchor_hash: anchorHash,
     before_text: proposal.beforeText,
     after_text: proposal.afterText,
-    document_title: proposal.documentTitle || ""
+    document_title: proposal.documentTitle || proposal.expectedDocumentTitle || ""
   };
 
   const response = await fetch(`http://127.0.0.1:${config.port}/apply-edit`, {
@@ -177,7 +300,10 @@ async function handleLiveEditProposal(proposal) {
         editorSurface: proposal.editorSurface || "",
         anchorBefore: proposal.anchorBefore || "",
         anchorAfter: proposal.anchorAfter || "",
-        preferSuggesting: proposal.preferSuggesting !== false
+        preferSuggesting: proposal.preferSuggesting !== false,
+        expectedUrl: proposal.expectedUrl || "",
+        expectedDocumentId: proposal.expectedDocumentId || "",
+        expectedDocumentTitle: proposal.expectedDocumentTitle || ""
       }
     );
   }
@@ -225,9 +351,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message.type === "JEFF_PROPOSE_LIVE_EDIT") {
+    const sourceUrl = String(sender.tab?.url || "");
+    const sourceTitle = String(sender.tab?.title || "");
     handleLiveEditProposal({
       ...message,
-      tabId: sender.tab?.id
+      tabId: sender.tab?.id,
+      documentTitle: sourceTitle || message.documentTitle || "",
+      expectedUrl: sourceUrl,
+      expectedDocumentId: googleDocsDocumentId(sourceUrl),
+      expectedDocumentTitle: normalizedGoogleDocsTitle(sourceTitle)
     }).catch((error) => {
       console.warn("[jeff-live-edit]", error);
     });

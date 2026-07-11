@@ -46,6 +46,14 @@ pub struct SituationalSnapshot {
     pub work_understanding: Option<WorkUnderstanding>,
     // apex c2: focus depth (0-1), recorded at every interruption for the ledger.
     pub focus_score: f32,
+    // Explicit, metadata-only editing signals. Recency alone cannot distinguish
+    // active typing from a recent passive capture or represent a real boundary.
+    #[serde(default)]
+    pub typing_active: bool,
+    #[serde(default)]
+    pub document_churn_score: u32,
+    #[serde(default)]
+    pub natural_boundary_cues: Vec<String>,
 }
 
 impl Default for SituationalSnapshot {
@@ -66,6 +74,9 @@ impl Default for SituationalSnapshot {
             content_idle_seconds: None,
             work_understanding: None,
             focus_score: 0.0,
+            typing_active: false,
+            document_churn_score: 0,
+            natural_boundary_cues: Vec::new(),
         }
     }
 }
@@ -94,6 +105,7 @@ pub struct TimePressure {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SnapshotTrigger {
     NewTurn,
     FocusEvent,
@@ -103,6 +115,8 @@ pub enum SnapshotTrigger {
     TimeTick,
     // phase 31: fired after each content observation poll cycle.
     ContentObservation,
+    DocumentSave,
+    TaskSwitch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,6 +211,8 @@ impl SnapshotTrigger {
             Self::CalendarEvent => "calendar_event",
             Self::TimeTick => "time_tick",
             Self::ContentObservation => "content_observation",
+            Self::DocumentSave => "document_save",
+            Self::TaskSwitch => "task_switch",
         }
     }
 }
@@ -205,6 +221,7 @@ pub struct AwarenessCore {
     snapshot: Mutex<SituationalSnapshot>,
     last_active_window: StdMutex<Option<String>>,
     last_calendar_event: StdMutex<Option<CalendarEventDto>>,
+    last_typing_at: StdMutex<Option<i64>>,
 }
 
 impl AwarenessCore {
@@ -213,6 +230,7 @@ impl AwarenessCore {
             snapshot: Mutex::new(SituationalSnapshot::default()),
             last_active_window: StdMutex::new(None),
             last_calendar_event: StdMutex::new(None),
+            last_typing_at: StdMutex::new(None),
         }
     }
 
@@ -258,7 +276,11 @@ impl AwarenessCore {
             .ok()
             .and_then(|value| value.clone());
 
-        let snapshot = assemble_snapshot(trigger, task_id, state, active_window, calendar_event);
+        let mut snapshot =
+            assemble_snapshot(trigger, task_id, state, active_window, calendar_event);
+        if let Ok(mut last_typing_at) = self.last_typing_at.lock() {
+            update_typing_boundary(&mut snapshot, &mut last_typing_at);
+        }
         let mut guard = self.snapshot.lock().await;
         *guard = snapshot.clone();
         snapshot
@@ -273,6 +295,27 @@ impl AwarenessCore {
             .try_lock()
             .map(|snapshot| snapshot.clone())
             .unwrap_or_default()
+    }
+}
+
+fn update_typing_boundary(snapshot: &mut SituationalSnapshot, last_typing_at: &mut Option<i64>) {
+    if snapshot.typing_active {
+        *last_typing_at = Some(snapshot.updated_at);
+    } else if snapshot
+        .content_idle_seconds
+        .map(|idle| idle >= 20)
+        .unwrap_or(false)
+        && last_typing_at
+            .as_ref()
+            .map(|last| snapshot.updated_at.saturating_sub(*last) <= 10 * 60)
+            .unwrap_or(false)
+    {
+        snapshot
+            .natural_boundary_cues
+            .push("typing_pause".to_string());
+        // A pause is an edge, not a state. Consume it so every later idle poll
+        // does not masquerade as a new natural boundary.
+        *last_typing_at = None;
     }
 }
 
@@ -346,6 +389,21 @@ pub fn snapshot_summary(snapshot: &SituationalSnapshot) -> String {
             lines.push(format!("weakest point: {}", truncate_chars(weak, 120)));
         }
     }
+    if snapshot.typing_active {
+        lines.push("editing signal: active typing".to_string());
+    }
+    if snapshot.document_churn_score > 0 {
+        lines.push(format!(
+            "revision churn score: {}",
+            snapshot.document_churn_score
+        ));
+    }
+    if !snapshot.natural_boundary_cues.is_empty() {
+        lines.push(format!(
+            "natural boundary: {}",
+            snapshot.natural_boundary_cues.join(", ")
+        ));
+    }
 
     truncate_chars(&lines.join("\n"), 600)
 }
@@ -397,6 +455,14 @@ pub fn generate_proactive_candidate(
                 observation: stuck.to_string(),
             });
         }
+    }
+    if snapshot.document_churn_score >= 2 {
+        return Some(ProactiveSpeechReason::WorkQualityObservation {
+            observation: format!(
+                "Repeated revision is concentrated in the active document (churn score {}).",
+                snapshot.document_churn_score
+            ),
+        });
     }
     if let Some((pending, oldest_minutes)) = pending_approval_aging(&snapshot.pending_work, now) {
         return Some(ProactiveSpeechReason::PendingApprovalAging {
@@ -457,7 +523,7 @@ fn select_base_reason(snapshot: &SituationalSnapshot, now: i64) -> Option<Proact
 
     if let Some(time_pressure) = snapshot.time_pressure.as_ref() {
         if let Some(minutes_until) = time_pressure.minutes_until {
-            if minutes_until < 90 {
+            if (0..90).contains(&minutes_until) {
                 return Some(ProactiveSpeechReason::DeadlinePressure {
                     event: time_pressure.description.clone(),
                     minutes_until,
@@ -614,7 +680,9 @@ fn assemble_snapshot(
 
     // phase 31: content observation — always include latest captured data so
     // subsequent triggers (NewTurn etc.) don't lose the content excerpt.
-    let (active_document_excerpt, content_idle_seconds) = content_observation_summary(state);
+    let content_activity = content_observation_summary(state);
+    let active_document_excerpt = content_activity.excerpt;
+    let content_idle_seconds = content_activity.idle_seconds;
 
     let mut snapshot_confidence = 0.0_f32;
     if state.store.get_active_task().ok().flatten().is_some() {
@@ -650,8 +718,19 @@ fn assemble_snapshot(
         snapshot_confidence += 0.10;
     }
 
-    let focus_score = compute_focus_score(attention_state, content_idle_seconds);
-
+    let focus_score = compute_focus_score_with_signals(
+        attention_state,
+        content_idle_seconds,
+        content_activity.typing_active,
+        content_activity.document_churn_score,
+    );
+    let mut natural_boundary_cues = Vec::new();
+    match trigger {
+        SnapshotTrigger::WindowSwitch => natural_boundary_cues.push("window_switch".to_string()),
+        SnapshotTrigger::TaskSwitch => natural_boundary_cues.push("task_switch".to_string()),
+        SnapshotTrigger::DocumentSave => natural_boundary_cues.push("document_save".to_string()),
+        _ => {}
+    }
     SituationalSnapshot {
         current_goal: current_goal.map(|value| truncate_chars(value.trim(), 240)),
         recent_progress,
@@ -668,15 +747,33 @@ fn assemble_snapshot(
         content_idle_seconds,
         work_understanding,
         focus_score,
+        typing_active: content_activity.typing_active,
+        document_churn_score: content_activity.document_churn_score,
+        natural_boundary_cues,
     }
 }
 
 // apex c2: focus depth in 0-1. attention state provides the base (typing
 // cadence feeds attention_state since phase 22), sharpened by how recently the
 // document changed: actively editing raises focus, long content idle lowers it.
+#[allow(dead_code)]
 pub fn compute_focus_score(
     attention_state: AttentionState,
     content_idle_seconds: Option<u32>,
+) -> f32 {
+    compute_focus_score_with_signals(
+        attention_state,
+        content_idle_seconds,
+        content_idle_seconds.map(|idle| idle < 30).unwrap_or(false),
+        0,
+    )
+}
+
+pub fn compute_focus_score_with_signals(
+    attention_state: AttentionState,
+    content_idle_seconds: Option<u32>,
+    typing_active: bool,
+    document_churn_score: u32,
 ) -> f32 {
     let base: f32 = match attention_state {
         AttentionState::Focused => 0.7,
@@ -684,12 +781,18 @@ pub fn compute_focus_score(
         AttentionState::Returning => 0.3,
         AttentionState::Idle => 0.1,
     };
-    let adjustment: f32 = match content_idle_seconds {
-        Some(idle) if idle < 30 => 0.2,
+    let recency_adjustment: f32 = match content_idle_seconds {
+        Some(idle) if idle < 30 && typing_active => 0.2,
+        Some(idle) if idle < 30 => 0.05,
         Some(idle) if idle > 120 => -0.2,
         _ => 0.0,
     };
-    (base + adjustment).clamp(0.0, 1.0)
+    let churn_adjustment: f32 = match document_churn_score {
+        0 => 0.0,
+        1 => 0.03,
+        _ => 0.08,
+    };
+    (base + recency_adjustment + churn_adjustment).clamp(0.0, 1.0)
 }
 
 // apex c2: a natural boundary is a good moment to release a held interjection —
@@ -697,6 +800,9 @@ pub fn compute_focus_score(
 // or idle attention and a long content pause count as boundaries; deep focus
 // with active editing does not.
 pub fn is_at_natural_boundary(snapshot: &SituationalSnapshot) -> bool {
+    if !snapshot.natural_boundary_cues.is_empty() {
+        return true;
+    }
     if matches!(
         snapshot.attention_state,
         AttentionState::Returning | AttentionState::Idle | AttentionState::Drifting
@@ -709,14 +815,22 @@ pub fn is_at_natural_boundary(snapshot: &SituationalSnapshot) -> bool {
         .unwrap_or(false)
 }
 
-fn content_observation_summary(state: &JeffState) -> (Option<String>, Option<u32>) {
+#[derive(Debug, Default)]
+struct ContentActivitySummary {
+    excerpt: Option<String>,
+    idle_seconds: Option<u32>,
+    typing_active: bool,
+    document_churn_score: u32,
+}
+
+fn content_observation_summary(state: &JeffState) -> ContentActivitySummary {
     let guard = match state.content_observation.lock() {
         Ok(g) => g,
-        Err(_) => return (None, None),
+        Err(_) => return ContentActivitySummary::default(),
     };
     let obs = match guard.observation.as_ref() {
         Some(o) => o,
-        None => return (None, None),
+        None => return ContentActivitySummary::default(),
     };
     let change_phrase = match (&obs.change_magnitude, obs.content_changed) {
         (ChangeMagnitude::None, _) | (_, false) => "no recent changes",
@@ -750,7 +864,12 @@ fn content_observation_summary(state: &JeffState) -> (Option<String>, Option<u32
     let idle_secs = obs
         .stable_for_ticks
         .saturating_mul(crate::context_observer::CONTENT_OBSERVATION_POLL_INTERVAL_SECONDS as u32);
-    (Some(excerpt), Some(idle_secs))
+    ContentActivitySummary {
+        excerpt: Some(excerpt),
+        idle_seconds: Some(idle_secs),
+        typing_active: obs.content_changed && idle_secs < 30,
+        document_churn_score: guard.document_max_churn,
+    }
 }
 
 fn current_active_window_string<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
@@ -912,7 +1031,7 @@ fn collect_blockers(
 
 fn calendar_time_pressure(event: Option<CalendarEventDto>) -> Option<TimePressure> {
     let event = event?;
-    if event.minutes_until > 120 {
+    if !(0..=120).contains(&event.minutes_until) {
         return None;
     }
     Some(TimePressure {
@@ -1046,6 +1165,9 @@ mod tests {
             content_idle_seconds: Some(0),
             work_understanding: None,
             focus_score: 0.0,
+            typing_active: false,
+            document_churn_score: 0,
+            natural_boundary_cues: Vec::new(),
         };
         assert!(snapshot_summary(&snapshot).chars().count() <= 600);
     }
@@ -1111,6 +1233,9 @@ mod tests {
             content_idle_seconds: None,
             work_understanding: None,
             focus_score: 0.0,
+            typing_active: false,
+            document_churn_score: 0,
+            natural_boundary_cues: Vec::new(),
         }
     }
 
@@ -1220,6 +1345,19 @@ mod tests {
     }
 
     #[test]
+    fn c1_document_churn_is_a_direct_candidate_signal() {
+        let now = 10_000;
+        let mut snapshot = SituationalSnapshot::default();
+        snapshot.snapshot_confidence = 0.8;
+        snapshot.attention_state = AttentionState::Focused;
+        snapshot.document_churn_score = 3;
+        assert!(matches!(
+            generate_proactive_candidate(&snapshot, &UserProfile::default(), None, now),
+            Some(ProactiveSpeechReason::WorkQualityObservation { .. })
+        ));
+    }
+
+    #[test]
     fn c2_focus_score_high_when_typing_low_when_idle() {
         // typing burst: focused attention, content actively changing -> high.
         let typing = compute_focus_score(AttentionState::Focused, Some(0));
@@ -1231,6 +1369,11 @@ mod tests {
         let idle = compute_focus_score(AttentionState::Idle, Some(600));
         assert!(idle <= 0.2, "idle should be low focus, got {idle}");
         assert!(typing > idle);
+        let passive_recent =
+            compute_focus_score_with_signals(AttentionState::Focused, Some(0), false, 0);
+        let active_churn =
+            compute_focus_score_with_signals(AttentionState::Focused, Some(0), true, 3);
+        assert!(active_churn > passive_recent);
     }
 
     #[test]
@@ -1249,6 +1392,36 @@ mod tests {
         paused.attention_state = AttentionState::Focused;
         paused.content_idle_seconds = Some(120);
         assert!(is_at_natural_boundary(&paused));
+
+        let mut saved = SituationalSnapshot::default();
+        saved.attention_state = AttentionState::Focused;
+        saved.content_idle_seconds = Some(0);
+        saved.natural_boundary_cues = vec!["document_save".to_string()];
+        assert!(is_at_natural_boundary(&saved));
+    }
+
+    #[test]
+    fn c2_typing_pause_is_an_edge_and_requires_prior_typing() {
+        let mut typing = SituationalSnapshot::default();
+        typing.updated_at = 1_000;
+        typing.typing_active = true;
+        typing.content_idle_seconds = Some(0);
+        let mut last_typing_at = None;
+        update_typing_boundary(&mut typing, &mut last_typing_at);
+        assert_eq!(last_typing_at, Some(1_000));
+
+        let mut paused = SituationalSnapshot::default();
+        paused.updated_at = 1_025;
+        paused.content_idle_seconds = Some(20);
+        update_typing_boundary(&mut paused, &mut last_typing_at);
+        assert_eq!(paused.natural_boundary_cues, vec!["typing_pause"]);
+        assert_eq!(last_typing_at, None);
+
+        let mut still_idle = paused.clone();
+        still_idle.updated_at = 1_035;
+        still_idle.natural_boundary_cues.clear();
+        update_typing_boundary(&mut still_idle, &mut last_typing_at);
+        assert!(still_idle.natural_boundary_cues.is_empty());
     }
 
     #[test]
@@ -1282,6 +1455,22 @@ mod tests {
                 event: "Design review in 89 minutes".to_string(),
                 minutes_until: 89,
             })
+        );
+    }
+
+    #[test]
+    fn c1_past_deadline_is_not_a_new_proactive_candidate() {
+        let now = 10_000;
+        let mut snapshot = SituationalSnapshot::default();
+        snapshot.snapshot_confidence = 0.8;
+        snapshot.attention_state = AttentionState::Focused;
+        snapshot.time_pressure = Some(TimePressure {
+            source: "calendar".to_string(),
+            description: "meeting already started".to_string(),
+            minutes_until: Some(-2),
+        });
+        assert!(
+            generate_proactive_candidate(&snapshot, &UserProfile::default(), None, now).is_none()
         );
     }
 

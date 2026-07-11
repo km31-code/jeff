@@ -4530,7 +4530,9 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                                 ) : null}
                               </div>
                               <div className="row-actions trust-ladder-actions">
-                                {entry.max_level !== "L1" && entry.level === "L1" ? (
+                                {entry.max_level !== "L1" &&
+                                entry.level === "L1" &&
+                                entry.graduation_offer?.startsWith("Offer L2") ? (
                                   <button
                                     type="button"
                                     data-testid="trust-offer-l2"
@@ -4539,7 +4541,9 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                                     L2
                                   </button>
                                 ) : null}
-                                {entry.max_level === "L3" && entry.level !== "L3" ? (
+                                {entry.max_level === "L3" &&
+                                entry.level === "L2" &&
+                                entry.graduation_offer?.includes("L3 is available") ? (
                                   <button
                                     type="button"
                                     data-testid="trust-explicit-l3"

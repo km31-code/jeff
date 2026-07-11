@@ -32,7 +32,9 @@ grep -q "body text of front document" "$NATIVE" || fail "Pages adapter does not 
 grep -q "characters targetOffset thru targetEnd" "$NATIVE" || fail "Pages ranged replacement script missing"
 grep -q "build_word_script" "$NATIVE" || fail "Word script builder missing"
 grep -q "tell application \"Microsoft Word\"" "$NATIVE" || fail "Word adapter is not AppleScript/ScriptingBridge-based"
-grep -q "find object of text object of active document" "$NATIVE" || fail "Word adapter does not use Word scripting dictionary find object"
+# Word uses an exact anchored range (create range + content of text object),
+# not an ambiguous global find, so replacements land at the intended location.
+grep -q "create range active document start" "$NATIVE" || fail "Word adapter does not use Word scripting dictionary ranged replacement"
 grep -q "AX_BUFFER_WRITEBACK_ENABLED_KEY" "$NATIVE" || fail "AX fallback feature flag missing"
 grep -q "unwrap_or(false)" "$NATIVE" || fail "AX fallback is not default off"
 pass "native Pages/Word scripting adapters and default-off AX guard are present"

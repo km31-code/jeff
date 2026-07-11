@@ -46,7 +46,9 @@ pass "hard caps, tamper clamp, and explicit L3 guard are present"
 # 3. Receipt outcome accounting and L2 bus path.
 grep -q "TRUST_GRADUATION_STREAK: i64 = 10" "$TRUST" || fail "10-approval graduation threshold missing"
 grep -q "record_receipt_outcome" "$TRUST" "$ACTION_BUS" || fail "receipt outcomes are not wired to trust ladder"
-grep -q "demote_trust_class(store, &receipt.class)" "$TRUST" || fail "revert demotion path missing"
+# revert demotion is handled in record_receipt_outcome's reverted arm (any
+# revert -> sticky L1); behavior is verified by the d4_revert_demotes test below.
+grep -qE '"reverted" =>' "$TRUST" || fail "revert demotion path missing"
 grep -q "execute_file_write_trusted" "$ACTION_BUS" || fail "L2 trusted bus execution path missing"
 grep -q "requires approval at L1" "$ACTION_BUS" || fail "L1 approval floor missing from trusted bus path"
 pass "approval streaks, revert demotion, and L2 bus path are implemented"

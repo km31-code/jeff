@@ -554,6 +554,7 @@ impl TaskStore {
                 task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                 subtask_id INTEGER NOT NULL,
                 proposal_id INTEGER NOT NULL,
+                action_receipt_id INTEGER REFERENCES action_receipts(id) ON DELETE SET NULL,
                 action TEXT NOT NULL,
                 proposed_path TEXT NOT NULL,
                 resolved_at TEXT NOT NULL DEFAULT ({now})
@@ -572,6 +573,7 @@ impl TaskStore {
                 status TEXT NOT NULL,
                 failure_reason TEXT,
                 undo_ref TEXT,
+                outcome_accounted_at TEXT,
                 created_at TEXT NOT NULL DEFAULT ({now}),
                 resolved_at TEXT
             );
@@ -715,6 +717,7 @@ impl TaskStore {
 
             CREATE TABLE IF NOT EXISTS speculation_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
                 kind TEXT NOT NULL,
                 request_signature TEXT,
                 created_at TEXT NOT NULL DEFAULT ({now})
@@ -759,6 +762,18 @@ impl TaskStore {
         ))
         .context("failed to initialize sqlite schema")?;
 
+        // D1/D8 hardening migrations. These are intentionally additive so an
+        // existing user database can be upgraded without rebuilding it.
+        let _ = conn.execute_batch(
+            "ALTER TABLE action_receipts ADD COLUMN outcome_accounted_at TEXT;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE subtask_write_audit_log ADD COLUMN action_receipt_id INTEGER REFERENCES action_receipts(id) ON DELETE SET NULL;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE speculation_events ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE;",
+        );
+
         // idempotent migration for older subtasks schema without phase 16 columns.
         let _ = conn
             .execute_batch("ALTER TABLE subtasks ADD COLUMN max_steps INTEGER NOT NULL DEFAULT 5;");
@@ -788,6 +803,59 @@ impl TaskStore {
             );",
         )
         .context("failed to create phase 23 tables")?;
+
+        // apex: backfill legacy receipts now that live_edit_receipts exists.
+        conn.execute_batch(
+            "INSERT INTO action_receipts
+                (task_id, class, surface, level, description, payload_excerpt,
+                 status, failure_reason, undo_ref, created_at, resolved_at)
+             SELECT task_id, 'doc.replace', editor_surface, 'L1',
+                    'Migrated live edit receipt #' || id,
+                    before_hash || ' -> ' || after_hash,
+                    CASE status
+                        WHEN 'pending' THEN 'pending_approval'
+                        ELSE status
+                    END,
+                    NULL, NULL, timestamp,
+                    CASE WHEN status IN ('applied','rejected','failed','guided')
+                         THEN timestamp ELSE NULL END
+             FROM live_edit_receipts
+             WHERE action_receipt_id IS NULL AND task_id IS NOT NULL;
+
+             UPDATE live_edit_receipts
+             SET action_receipt_id = (
+                SELECT ar.id FROM action_receipts ar
+                WHERE ar.description = 'Migrated live edit receipt #' || live_edit_receipts.id
+                ORDER BY ar.id DESC LIMIT 1
+             )
+             WHERE action_receipt_id IS NULL AND task_id IS NOT NULL;
+
+             INSERT INTO action_receipts
+                (task_id, class, surface, level, description, payload_excerpt,
+                 status, failure_reason, undo_ref, created_at, resolved_at)
+             SELECT task_id, 'file.write', 'legacy_subtask', 'L1',
+                    'Migrated write audit #' || id,
+                    proposed_path,
+                    CASE action
+                        WHEN 'approved' THEN 'applied'
+                        WHEN 'rejected' THEN 'rejected'
+                        WHEN 'apply_failed' THEN 'failed'
+                        ELSE 'guided'
+                    END,
+                    CASE WHEN action = 'apply_failed' THEN 'legacy apply failed' ELSE NULL END,
+                    NULL, resolved_at, resolved_at
+             FROM subtask_write_audit_log
+             WHERE action_receipt_id IS NULL;
+
+             UPDATE subtask_write_audit_log
+             SET action_receipt_id = (
+                SELECT ar.id FROM action_receipts ar
+                WHERE ar.description = 'Migrated write audit #' || subtask_write_audit_log.id
+                ORDER BY ar.id DESC LIMIT 1
+             )
+             WHERE action_receipt_id IS NULL;",
+        )
+        .context("failed to backfill legacy mutation receipts")?;
 
         // idempotent migration for databases created by the first phase 23 pass.
         let _ = conn.execute_batch("ALTER TABLE live_edit_receipts ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL;");
@@ -2780,6 +2848,19 @@ impl TaskStore {
         failure_reason: Option<&str>,
         undo_ref: Option<&str>,
     ) -> Result<ActionReceiptDto> {
+        let class = class.trim();
+        let parsed_class = crate::action_bus::ActionClass::parse(class)
+            .ok_or_else(|| anyhow!("unknown action class: {class}"))?;
+        if parsed_class.as_str() != class {
+            return Err(anyhow!(
+                "action class must be canonical (received {class}, canonical {})",
+                parsed_class.as_str()
+            ));
+        }
+        crate::trust::assert_runtime_level_allowed(class, level.trim())?;
+        if surface.trim().is_empty() || description.trim().is_empty() {
+            return Err(anyhow!("action receipt surface and description are required"));
+        }
         let conn = self.connect()?;
         let mark_resolved = matches!(
             status,
@@ -2800,7 +2881,7 @@ impl TaskStore {
             ),
             params![
                 task_id,
-                class.trim(),
+                class,
                 surface.trim(),
                 level.trim(),
                 description.trim(),
@@ -2824,24 +2905,44 @@ impl TaskStore {
         failure_reason: Option<&str>,
         undo_ref: Option<&str>,
     ) -> Result<ActionReceiptDto> {
-        let conn = self.connect()?;
-        let changed = conn
-            .execute(
-                &format!(
-                    "UPDATE action_receipts
-                     SET status = ?1,
-                         failure_reason = ?2,
-                         undo_ref = COALESCE(?3, undo_ref),
-                         resolved_at = ({now})
-                     WHERE id = ?4",
-                    now = SQLITE_NOW_EXPR,
-                ),
-                params![status.trim(), failure_reason, undo_ref, receipt_id],
+        let status = status.trim();
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start action receipt transition")?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT status FROM action_receipts WHERE id = ?1",
+                params![receipt_id],
+                |row| row.get(0),
             )
-            .context("failed to update action receipt")?;
-        if changed == 0 {
-            return Err(anyhow!("action receipt id={} not found", receipt_id));
+            .optional()
+            .context("failed to read action receipt transition state")?;
+        let current = current.ok_or_else(|| anyhow!("action receipt id={} not found", receipt_id))?;
+        if !valid_action_status_transition(&current, status) {
+            return Err(anyhow!(
+                "invalid action receipt transition for id={receipt_id}: {current} -> {status}"
+            ));
         }
+        let resolved_at = if is_terminal_action_status(status) {
+            format!("COALESCE(resolved_at, ({SQLITE_NOW_EXPR}))")
+        } else {
+            "NULL".to_string()
+        };
+        tx.execute(
+            &format!(
+                "UPDATE action_receipts
+                 SET status = ?1,
+                     failure_reason = ?2,
+                     undo_ref = COALESCE(?3, undo_ref),
+                     resolved_at = {resolved_at}
+                 WHERE id = ?4 AND status = ?5"
+            ),
+            params![status, failure_reason, undo_ref, receipt_id, current],
+        )
+        .context("failed to update action receipt")?;
+        tx.commit()
+            .context("failed to commit action receipt transition")?;
         self.get_action_receipt(receipt_id)?
             .ok_or_else(|| anyhow!("action receipt disappeared after update"))
     }
@@ -4280,24 +4381,22 @@ impl TaskStore {
         before_text: &str,
         after_text: &str,
     ) -> Result<i64> {
-        let action_receipt_id = if let Some(task_id) = task_id {
-            Some(
-                self.create_action_receipt(
-                    task_id,
-                    "doc.replace",
-                    editor_surface,
-                    "L1",
-                    &format!("Live edit request for {}", document_title.trim()),
-                    &format!("{} -> {}", before_hash, after_hash),
-                    "pending_approval",
-                    None,
-                    None,
-                )?
-                .id,
-            )
-        } else {
-            None
-        };
+        let task_id = task_id.ok_or_else(|| {
+            anyhow!("live edit requests require an active task for audit ownership")
+        })?;
+        let action_receipt_id = self
+            .create_action_receipt(
+                task_id,
+                "doc.replace",
+                editor_surface,
+                "L1",
+                &format!("Live edit request for {}", document_title.trim()),
+                &format!("{} -> {}", before_hash, after_hash),
+                "pending_approval",
+                None,
+                None,
+            )?
+            .id;
         let conn = self.connect()?;
         conn.execute(
             "INSERT INTO live_edit_receipts
@@ -4493,11 +4592,60 @@ impl TaskStore {
             .get_task_by_id(task_id)?
             .ok_or_else(|| anyhow!("task id={} not found", task_id))?;
 
+        // Capture only server-owned undo paths before deleting their receipts.
+        // They are removed after the database transaction commits so a failed
+        // clear never leaves the DB claiming data was removed when it was not.
+        let undo_refs = {
+            let conn = self.connect()?;
+            let mut stmt = conn.prepare(
+                "SELECT id FROM action_receipts WHERE task_id = ?1",
+            )?;
+            let receipt_ids = stmt
+                .query_map(params![task_id], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                ;
+            receipt_ids
+                .into_iter()
+                .map(|receipt_id| {
+                    self.action_undo_root()
+                        .join(receipt_id.to_string())
+                        .display()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        };
+
         let mut conn = self.connect()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to start clear_task_data transaction")?;
 
+        tx.execute(
+            "DELETE FROM live_edit_receipts
+             WHERE task_id = ?1
+                OR action_receipt_id IN (SELECT id FROM action_receipts WHERE task_id = ?1)",
+            params![task_id],
+        )
+        .context("failed to clear live edit receipts")?;
+        tx.execute(
+            "DELETE FROM interruption_ledger WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear interruption ledger")?;
+        if Self::table_exists_tx(&tx, "speculation_events")? {
+            tx.execute(
+                "DELETE FROM speculation_events WHERE task_id = ?1",
+                params![task_id],
+            )
+            .context("failed to clear speculation events")?;
+        }
+        if Self::table_exists_tx(&tx, "speculation_cache")? {
+            tx.execute(
+                "DELETE FROM speculation_cache WHERE task_id = ?1",
+                params![task_id],
+            )
+            .context("failed to clear speculation cache")?;
+        }
         tx.execute(
             "DELETE FROM subtask_write_audit_log WHERE task_id = ?1",
             params![task_id],
@@ -4664,6 +4812,9 @@ impl TaskStore {
         tx.commit()
             .context("failed to commit clear_task_data transaction")?;
 
+        for undo_ref in undo_refs {
+            self.remove_owned_undo_path(&undo_ref)?;
+        }
         self.remove_internal_task_workspace_contents(&task.workspace_path)?;
         Ok(())
     }
@@ -4674,6 +4825,21 @@ impl TaskStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to start clear_all_data transaction")?;
 
+        // Tables with nullable/no task foreign keys must be cleared before the
+        // task cascade or their sensitive payloads would survive CLEAR JEFF.
+        for table in [
+            "live_edit_receipts",
+            "interruption_ledger",
+            "speculation_events",
+            "custom_tools",
+            "capability_gaps",
+            "llm_usage_log",
+        ] {
+            if Self::table_exists_tx(&tx, table)? {
+                tx.execute(&format!("DELETE FROM {table}"), [])
+                    .with_context(|| format!("failed to clear {table}"))?;
+            }
+        }
         tx.execute("DELETE FROM tasks", [])
             .context("failed to clear tasks")?;
         tx.execute("DELETE FROM app_settings", [])
@@ -4729,12 +4895,46 @@ impl TaskStore {
                 self.paths.workspace_root.display()
             )
         })?;
+        for owned_root in [self.action_undo_root(), self.custom_tools_root()] {
+            if owned_root.exists() {
+                fs::remove_dir_all(&owned_root).with_context(|| {
+                    format!("failed to remove sensitive root {}", owned_root.display())
+                })?;
+            }
+        }
         Ok(())
     }
 
     // ---------------------------------------------------------------------
     // shared helpers
     // ---------------------------------------------------------------------
+
+    fn remove_owned_undo_path(&self, undo_ref: &str) -> Result<()> {
+        let root = self.action_undo_root();
+        let candidate = PathBuf::from(undo_ref);
+        let owned = candidate.parent() == Some(root.as_path())
+            && candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| !name.is_empty() && name.chars().all(|ch| ch.is_ascii_digit()));
+        if !owned {
+            return Err(anyhow!(
+                "refusing to remove unowned undo path {}",
+                candidate.display()
+            ));
+        }
+        let Ok(metadata) = fs::symlink_metadata(&candidate) else {
+            return Ok(());
+        };
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            fs::remove_file(&candidate)
+                .with_context(|| format!("failed to remove undo path {}", candidate.display()))?;
+        } else if metadata.is_dir() {
+            fs::remove_dir_all(&candidate)
+                .with_context(|| format!("failed to remove undo path {}", candidate.display()))?;
+        }
+        Ok(())
+    }
 
     fn get_task_by_id(&self, task_id: i64) -> Result<Option<TaskDto>> {
         let conn = self.connect()?;
@@ -5200,6 +5400,28 @@ fn action_receipt_from_row(row: &Row<'_>) -> rusqlite::Result<ActionReceiptDto> 
         created_at: row.get(10)?,
         resolved_at: row.get(11)?,
     })
+}
+
+fn is_terminal_action_status(status: &str) -> bool {
+    matches!(status, "applied" | "rejected" | "reverted" | "failed" | "guided")
+}
+
+fn valid_action_status_transition(current: &str, next: &str) -> bool {
+    if current == next {
+        return true;
+    }
+    match current {
+        "pending_approval" => matches!(
+            next,
+            "approved" | "rejected" | "guided" | "failed" | "applying"
+        ),
+        "running" => matches!(next, "applying" | "applied" | "failed"),
+        "approved" => matches!(next, "applying" | "applied" | "rejected" | "failed"),
+        "applying" => matches!(next, "applied" | "failed"),
+        "applied" => next == "reverted",
+        "rejected" | "reverted" | "failed" | "guided" => false,
+        _ => false,
+    }
 }
 
 fn proactive_audit_from_row(row: &Row<'_>) -> rusqlite::Result<ProactiveAuditEntryDto> {

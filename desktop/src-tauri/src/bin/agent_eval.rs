@@ -2,11 +2,11 @@ use std::{env, fs, path::PathBuf, process};
 
 use anyhow::{anyhow, Context, Result};
 use jeff_desktop::{
-    agent_eval_core::{evaluate_agent_contract, AgentEvalContract},
+    agent_eval_core::{evaluate_agent_contract_in_workspace, AgentEvalContract},
     store::TaskStore,
 };
 
-const DEFAULT_MIN_PASSES: usize = 12;
+const REQUIRED_MIN_PASSES: usize = 12;
 const MIN_NON_GATED: usize = 15;
 const MIN_GATED: usize = 5;
 
@@ -42,6 +42,19 @@ fn run() -> Result<bool> {
             "agent eval requires at least {MIN_GATED} e2-gated contracts, got {gated}"
         ));
     }
+    if args.min_passes < REQUIRED_MIN_PASSES {
+        return Err(anyhow!(
+            "agent eval pass floor is immutable: requested {}, required at least {REQUIRED_MIN_PASSES}",
+            args.min_passes
+        ));
+    }
+    if args.min_passes > non_gated {
+        return Err(anyhow!(
+            "agent eval min passes {} exceeds {} non-gated contracts",
+            args.min_passes,
+            non_gated
+        ));
+    }
 
     let mut passed = 0usize;
     let mut ran = 0usize;
@@ -57,7 +70,11 @@ fn run() -> Result<bool> {
         let dir = fresh_store_dir(&contract.id)?;
         let store = TaskStore::initialize(&dir)
             .with_context(|| format!("failed to init store for contract {}", contract.id))?;
-        let outcome = evaluate_agent_contract(&store, contract)?;
+        let eval_root = args
+            .contracts_path
+            .parent()
+            .ok_or_else(|| anyhow!("contracts path has no parent"))?;
+        let outcome = evaluate_agent_contract_in_workspace(&store, contract, eval_root)?;
         let _ = fs::remove_dir_all(&dir);
         if outcome.passed {
             passed += 1;
@@ -83,7 +100,7 @@ fn parse_args() -> Result<Args> {
         .next()
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("usage: agent_eval <contracts.json> [--min-passes N]"))?;
-    let mut min_passes = DEFAULT_MIN_PASSES;
+    let mut min_passes = REQUIRED_MIN_PASSES;
 
     while let Some(arg) = raw.next() {
         match arg.as_str() {

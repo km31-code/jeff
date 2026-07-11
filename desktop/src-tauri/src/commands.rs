@@ -2368,12 +2368,12 @@ pub fn approve_subtask_file_write(
         .store
         .get_task_workspace_path(task_id)
         .map_err(map_jeff_error)?;
-    fs::create_dir_all(&workspace_uncanonical).map_err(|e| {
-        format!(
-            "failed to create task workspace '{}': {e}",
+    if !workspace_uncanonical.is_dir() {
+        return Err(format!(
+            "task workspace '{}' is missing; reconnect or recreate the task before approval",
             workspace_uncanonical.display()
-        )
-    })?;
+        ));
+    }
 
     // prefer the user's connected watcher folder as the write destination; fall back to
     // the internal workspace so approval never silently disappears into a hidden directory.
@@ -2382,12 +2382,12 @@ pub fn approve_subtask_file_write(
             Some(folder) => std::path::PathBuf::from(folder.folder_path),
             None => workspace_uncanonical.clone(),
         };
-    fs::create_dir_all(&write_root_uncanonical).map_err(|e| {
-        format!(
-            "failed to create write root '{}': {e}",
+    if !write_root_uncanonical.is_dir() {
+        return Err(format!(
+            "approved write root '{}' no longer exists",
             write_root_uncanonical.display()
-        )
-    })?;
+        ));
+    }
     let write_root = fs::canonicalize(&write_root_uncanonical).map_err(|e| {
         format!(
             "failed to canonicalize write root '{}': {e}",
@@ -2396,27 +2396,7 @@ pub fn approve_subtask_file_write(
     })?;
     let dest = write_root.join(raw_path);
 
-    // create parent directories if needed, then write
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "failed to create parent directories for '{}': {e}",
-                dest.display()
-            )
-        })?;
-        let canonical_parent = fs::canonicalize(parent).map_err(|e| {
-            format!(
-                "failed to canonicalize target parent '{}' for proposal id={proposal_id}: {e}",
-                parent.display()
-            )
-        })?;
-        if !canonical_parent.starts_with(&write_root) {
-            return Err(format!(
-                "proposed_path '{}' escapes write root",
-                proposal.proposed_path
-            ));
-        }
-    } else {
+    if dest.parent().is_none() {
         return Err(format!(
             "proposed_path '{}' does not have a valid parent directory",
             proposal.proposed_path
@@ -2430,13 +2410,13 @@ pub fn approve_subtask_file_write(
         .begin_file_write_proposal_apply(proposal_id)
         .map_err(map_jeff_error)?;
 
-    let action_receipt = match crate::action_bus::FileWriteAdapter::execute_file_write(
+    let action_receipt = match crate::action_bus::FileWriteAdapter::execute_file_write_approved(
         &state.store,
         proposal.task_id,
         "file",
         &format!("Apply file write proposal #{}", proposal_id),
-        "L1",
         crate::action_bus::FileWritePayload {
+            allowed_root: write_root.clone(),
             destination_path: dest.clone(),
             content: proposal.proposed_content.clone(),
             payload_excerpt: proposal.proposed_path.clone(),

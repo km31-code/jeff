@@ -2,14 +2,20 @@
 // but preserves the production loop shape: plan -> act -> observe -> revise ->
 // verify -> deliver, with persistent steps/events and honest blocked output.
 
+use std::{
+    collections::HashSet,
+    time::Instant,
+};
+
 use anyhow::{anyhow, Context, Result};
-use chrono::{Duration, NaiveTime, SecondsFormat, TimeZone, Utc};
-use rusqlite::{params, OptionalExtension, Row};
+use chrono::{Duration, Local, NaiveTime, SecondsFormat, TimeZone, Utc};
+use rusqlite::{params, OptionalExtension, Row, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     action_bus::ActionClass,
     crisis_core::{CrisisCandidate, CrisisClass},
+    message_kind::MessageKind,
     models::{
         AgentJobArtifactDto, AgentJobCheckpointDto, AgentJobDetailDto, AgentJobDto,
         AgentJobEventDto, AgentJobSteeringDto, AgentJobStepDto, StandingJobDto,
@@ -38,6 +44,51 @@ pub const TOOL_FILE_PROPOSAL_BUS: &str = "file_proposal_bus";
 pub const TOOL_ACTION_PROPOSAL_BUS: &str = "action_proposal_bus";
 
 const JOB_PHASES: &[&str] = &["plan", "act", "observe", "revise", "verify", "deliver"];
+
+const MAX_EVIDENCE_CHUNKS: usize = 6;
+const MAX_EVIDENCE_CHARS: usize = 1_200;
+const MAX_RECENT_MESSAGES: usize = 8;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct EvidenceChunk {
+    chunk_id: i64,
+    artifact_id: i64,
+    file_name: String,
+    position_index: i64,
+    text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct RuntimeState {
+    completed_steps: usize,
+    tool_calls: usize,
+    tokens_used: usize,
+    elapsed_ms: u64,
+    evidence: Vec<EvidenceChunk>,
+    observations: Vec<String>,
+    task_snapshot: Option<String>,
+    applied_steering: Vec<String>,
+    draft: Option<String>,
+    verification_findings: Vec<String>,
+    verification_passed: bool,
+    capability_request: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalContext {
+    task_summary: String,
+    recent_messages: Vec<String>,
+    evidence: Vec<EvidenceChunk>,
+    artifact_names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PhaseExecution {
+    output: serde_json::Value,
+    next_state: RuntimeState,
+    tool_calls: usize,
+    token_cost: usize,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobBudget {
@@ -153,13 +204,26 @@ pub fn create_job(
     }
     let budget = parse_budget(budget_json)?;
     let budget_json = serde_json::to_string(&budget)?;
-    let status = if running_job_count(store)? >= MAX_RUNNING_JOBS {
+    // Reserve a runtime slot in the same immediate transaction as the insert.
+    // Pending jobs count as reserved: otherwise four concurrent creators can all
+    // observe zero running jobs and bypass the three-job cap.
+    let mut conn = store.connect()?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("failed to reserve agent runtime slot")?;
+    let active_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM jobs WHERE status IN (?1, ?2)",
+            params![JOB_STATUS_PENDING, JOB_STATUS_RUNNING],
+            |row| row.get(0),
+        )
+        .context("failed to count active jobs")?;
+    let status = if active_count >= MAX_RUNNING_JOBS {
         JOB_STATUS_QUEUED
     } else {
         JOB_STATUS_PENDING
     };
-    let conn = store.connect()?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO jobs
          (task_id, goal_contract, plan_json, budget_json, status, speculative)
          VALUES (?1, ?2, '[]', ?3, ?4, ?5)",
@@ -172,7 +236,8 @@ pub fn create_job(
         ],
     )
     .context("failed to insert job")?;
-    let id = conn.last_insert_rowid();
+    let id = tx.last_insert_rowid();
+    tx.commit().context("failed to commit agent job")?;
     append_job_event(
         store,
         id,
@@ -191,7 +256,7 @@ pub fn create_job(
 }
 
 pub fn run_job_to_completion(store: &TaskStore, job_id: i64) -> Result<AgentJobDetailDto> {
-    let job = get_job(store, job_id)?.ok_or_else(|| anyhow!("job id={} not found", job_id))?;
+    let mut job = get_job(store, job_id)?.ok_or_else(|| anyhow!("job id={} not found", job_id))?;
     if matches!(
         job.status.as_str(),
         JOB_STATUS_COMPLETED
@@ -201,9 +266,21 @@ pub fn run_job_to_completion(store: &TaskStore, job_id: i64) -> Result<AgentJobD
     ) {
         return get_job_detail(store, job_id);
     }
+    if job.status == JOB_STATUS_QUEUED {
+        return get_job_detail(store, job_id);
+    }
     let budget = parse_budget(Some(&job.budget_json))?;
-    let plan = build_plan_json(&job.goal_contract, job.speculative);
-    update_job_plan_and_status(store, job_id, &plan.to_string(), JOB_STATUS_RUNNING)?;
+    let plan = if job.plan_json.trim() == "[]" || job.plan_json.trim().is_empty() {
+        build_plan_json(&job.goal_contract, job.speculative)
+    } else {
+        serde_json::from_str(&job.plan_json)
+            .unwrap_or_else(|_| build_plan_json(&job.goal_contract, job.speculative))
+    };
+    claim_job_for_run(store, job_id, &plan.to_string())?;
+    job = get_job(store, job_id)?.ok_or_else(|| anyhow!("job id={} disappeared", job_id))?;
+    if job.status == JOB_STATUS_QUEUED {
+        return get_job_detail(store, job_id);
+    }
     append_job_event(
         store,
         job_id,
@@ -211,19 +288,9 @@ pub fn run_job_to_completion(store: &TaskStore, job_id: i64) -> Result<AgentJobD
         serde_json::json!({ "status": JOB_STATUS_RUNNING }),
     )?;
 
-    let existing_steps = list_job_steps(store, job_id)?;
-    let mut completed_steps = existing_steps
-        .iter()
-        .filter(|step| step.status == "completed")
-        .count();
-    let start_index = existing_steps
-        .iter()
-        .filter(|step| step.status == "completed")
-        .map(|step| step.step_index + 1)
-        .max()
-        .unwrap_or(0)
-        .max(0) as usize;
-    let mut tool_calls = 0usize;
+    let (mut runtime, start_index) = load_runtime_state(store, job_id)?;
+    let persisted_elapsed_ms = runtime.elapsed_ms;
+    let call_started = Instant::now();
     if start_index > 0 {
         append_job_event(
             store,
@@ -233,15 +300,21 @@ pub fn run_job_to_completion(store: &TaskStore, job_id: i64) -> Result<AgentJobD
         )?;
     }
     for (index, phase) in JOB_PHASES.iter().enumerate().skip(start_index) {
-        if completed_steps >= budget.max_steps || tool_calls > budget.max_tool_calls {
-            return finish_budget_exhausted(store, job_id, completed_steps, &job.goal_contract);
+        let current = get_job(store, job_id)?.ok_or_else(|| anyhow!("job id={} disappeared", job_id))?;
+        if current.status == JOB_STATUS_CANCELLED_PARTIAL {
+            return get_job_detail(store, job_id);
+        }
+        runtime.elapsed_ms = persisted_elapsed_ms
+            .saturating_add(call_started.elapsed().as_millis() as u64);
+        if let Some(reason) = budget_exhausted_reason(&budget, &runtime, 0, 0) {
+            return finish_budget_exhausted(store, job_id, &runtime, &job.goal_contract, &reason);
         }
         let steering = apply_pending_steering_at_boundary(store, job_id, index as i64)?;
         let step_input = serde_json::json!({
             "phase": phase,
             "steering": steering.iter().map(|item| item.message.as_str()).collect::<Vec<_>>()
         });
-        let step = create_job_step(
+        let step = recover_or_create_job_step(
             store,
             job_id,
             index as i64,
@@ -250,11 +323,33 @@ pub fn run_job_to_completion(store: &TaskStore, job_id: i64) -> Result<AgentJobD
             &step_input.to_string(),
         )?;
         start_job_step(store, step.id)?;
-        let output = run_phase_output(phase, &job.goal_contract, job.speculative, &steering);
-        tool_calls += tool_calls_for_phase(phase);
+        let execution = execute_phase(
+            store,
+            &job,
+            phase,
+            &runtime,
+            &steering,
+        )?;
+        let elapsed_after_phase = persisted_elapsed_ms
+            .saturating_add(call_started.elapsed().as_millis() as u64);
+        let mut next_state = execution.next_state;
+        next_state.elapsed_ms = elapsed_after_phase;
+        if let Some(reason) = budget_exhausted_reason(
+            &budget,
+            &runtime,
+            execution.tool_calls,
+            execution.token_cost,
+        ) {
+            fail_job_step(store, step.id, &reason)?;
+            return finish_budget_exhausted(store, job_id, &runtime, &job.goal_contract, &reason);
+        }
+        next_state.completed_steps = runtime.completed_steps + 1;
+        next_state.tool_calls = runtime.tool_calls + execution.tool_calls;
+        next_state.tokens_used = runtime.tokens_used + execution.token_cost;
+        let output = execution.output.to_string();
         complete_job_step(store, step.id, &output)?;
-        create_job_checkpoint(store, job_id, index as i64, phase, &output)?;
-        completed_steps += 1;
+        create_job_checkpoint(store, job_id, index as i64, phase, &output, &next_state)?;
+        runtime = next_state;
         append_job_event(
             store,
             job_id,
@@ -266,12 +361,28 @@ pub fn run_job_to_completion(store: &TaskStore, job_id: i64) -> Result<AgentJobD
             }),
         )?;
 
-        if *phase == "verify" && goal_requires_unavailable_capability(&job.goal_contract) {
-            return finish_blocked(store, job_id, &job.goal_contract);
+        if *phase == "verify" {
+            if let Some(capability) = runtime.capability_request.clone() {
+                return finish_blocked(store, job_id, &job.goal_contract, &runtime, capability);
+            }
+            if !runtime.verification_passed {
+                let capability = serde_json::json!({
+                    "capability": "additional_local_evidence",
+                    "reason": runtime.verification_findings.join("; "),
+                    "needed_from_user": "Add the missing source material or narrow the goal contract."
+                });
+                return finish_blocked(store, job_id, &job.goal_contract, &runtime, capability);
+            }
         }
     }
 
-    finish_completed(store, job_id, &job.goal_contract)
+    if get_job(store, job_id)?
+        .map(|current| current.status == JOB_STATUS_CANCELLED_PARTIAL)
+        .unwrap_or(false)
+    {
+        return get_job_detail(store, job_id);
+    }
+    finish_completed(store, job_id, &job.goal_contract, &runtime, job.speculative)
 }
 
 pub fn list_jobs(
@@ -363,6 +474,15 @@ pub fn cancel_job_preserving_checkpoints(
     job_id: i64,
 ) -> Result<AgentJobDetailDto> {
     let job = get_job(store, job_id)?.ok_or_else(|| anyhow!("job id={} not found", job_id))?;
+    if job.status == JOB_STATUS_CANCELLED_PARTIAL {
+        return get_job_detail(store, job_id);
+    }
+    if matches!(
+        job.status.as_str(),
+        JOB_STATUS_COMPLETED | JOB_STATUS_BLOCKED | JOB_STATUS_BUDGET_EXHAUSTED
+    ) {
+        return Err(anyhow!("cannot cancel terminal job id={job_id}"));
+    }
     let checkpoint_count = list_job_checkpoints(store, job_id)?.len();
     let deliverable = serde_json::json!({
         "assessment": "I stopped this job and preserved its checkpoints.",
@@ -386,7 +506,7 @@ pub fn cancel_job_preserving_checkpoints(
         job_id,
         JOB_STATUS_CANCELLED_PARTIAL,
         Some(&deliverable.to_string()),
-        Some("fresh-context Craft verification skipped: user cancelled; checkpoints preserved."),
+        Some("fresh-context deterministic verification skipped: user cancelled; checkpoints preserved."),
         None,
         Some("cancelled with checkpoints preserved"),
     )?;
@@ -407,7 +527,7 @@ pub fn resume_incomplete_jobs(store: &TaskStore) -> Result<Vec<AgentJobDetailDto
                 deliverable_json, verification_transcript, capability_request_json,
                 error_message, created_at, updated_at
          FROM jobs
-         WHERE status IN ('pending', 'running')
+         WHERE status = 'running'
          ORDER BY id ASC
          LIMIT ?1",
     )?;
@@ -421,6 +541,7 @@ pub fn resume_incomplete_jobs(store: &TaskStore) -> Result<Vec<AgentJobDetailDto
     for job in jobs {
         resumed.push(run_job_to_completion(store, job.id)?);
     }
+    resumed.extend(run_pending_jobs(store)?);
     Ok(resumed)
 }
 
@@ -523,7 +644,7 @@ pub fn run_due_standing_jobs(
             false,
         )?;
         record_standing_job_run_receipt(store, &standing, &detail)?;
-        if standing.critical {
+        if standing.critical && detail.job.status == JOB_STATUS_COMPLETED && standing_guard_tripped(&detail) {
             append_job_event(
                 store,
                 detail.job.id,
@@ -557,16 +678,46 @@ fn finish_completed(
     store: &TaskStore,
     job_id: i64,
     goal_contract: &str,
+    runtime: &RuntimeState,
+    speculative: bool,
 ) -> Result<AgentJobDetailDto> {
+    let source_ledger = runtime
+        .evidence
+        .iter()
+        .map(|chunk| {
+            serde_json::json!({
+                "chunk_id": chunk.chunk_id,
+                "artifact_id": chunk.artifact_id,
+                "file_name": chunk.file_name,
+                "position_index": chunk.position_index
+            })
+        })
+        .collect::<Vec<_>>();
     let verification = format!(
-        "fresh-context Craft verification: deliverable satisfies the goal contract '{}'.",
-        goal_contract
+        "fresh-context deterministic verification: checked {} source chunk(s); {}",
+        source_ledger.len(),
+        if runtime.verification_findings.is_empty() {
+            "no unsupported local claims found".to_string()
+        } else {
+            runtime.verification_findings.join("; ")
+        }
     );
+    let draft = runtime
+        .draft
+        .clone()
+        .unwrap_or_else(|| "No deliverable text was produced.".to_string());
     let deliverable = serde_json::json!({
-        "assessment": "I can complete this with the available local context.",
-        "deliverable": format!("Completed delegated job: {goal_contract}"),
+        "assessment": format!(
+            "Completed from {} local source chunk(s); verification was run in a fresh read of the task context.",
+            source_ledger.len()
+        ),
+        "goal_contract": goal_contract,
+        "deliverable": draft,
         "verified": true,
         "verification": verification,
+        "source_ledger": source_ledger,
+        "applied_steering": runtime.applied_steering,
+        "not_done": runtime.verification_findings,
         "placement_proposal": {
             "surface": "conversation",
             "action_class": ActionClass::DocReplace.as_str(),
@@ -603,6 +754,22 @@ fn finish_completed(
             }
         }),
     )?;
+    if !speculative {
+        let conversation_text = format!(
+            "{}\n\n{}",
+            deliverable["assessment"].as_str().unwrap_or("Job completed."),
+            deliverable["deliverable"].as_str().unwrap_or_default()
+        );
+        store.append_chat_message(
+            get_job(store, job_id)?
+                .ok_or_else(|| anyhow!("job id={} missing during delivery", job_id))?
+                .task_id,
+            "assistant",
+            "agent_job",
+            MessageKind::AssistantAnswer,
+            &conversation_text,
+        )?;
+    }
     promote_next_queued_job(store)?;
     get_job_detail(store, job_id)
 }
@@ -611,18 +778,22 @@ fn finish_blocked(
     store: &TaskStore,
     job_id: i64,
     goal_contract: &str,
+    runtime: &RuntimeState,
+    capability_request: serde_json::Value,
 ) -> Result<AgentJobDetailDto> {
-    let capability_request = serde_json::json!({
-        "capability": "missing_external_or_unverifiable_access",
-        "reason": "couldn't verify the requested outcome with the available local context",
-        "needed_from_user": "Provide the missing source, account access, or permission before Jeff can complete this job."
-    });
-    let verification = "fresh-context Craft verification: couldn't verify, here's why: missing external or unavailable evidence.";
+    let reason = capability_request
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("missing evidence or capability");
+    let verification = format!(
+        "fresh-context deterministic verification: couldn't verify, here's why: {reason}."
+    );
     let deliverable = serde_json::json!({
         "assessment": "I couldn't verify this job against the goal contract.",
-        "deliverable": format!("Partial work only for: {goal_contract}"),
+        "deliverable": runtime.draft.clone().unwrap_or_else(|| format!("Partial work only for: {goal_contract}")),
         "verified": false,
-        "honesty": "couldn't verify, here's why: missing external or unavailable evidence",
+        "honesty": format!("couldn't verify, here's why: {reason}"),
+        "source_ledger": runtime.evidence.iter().map(|chunk| chunk.file_name.as_str()).collect::<Vec<_>>(),
         "capability_request": capability_request
     });
     create_job_artifact(
@@ -640,7 +811,7 @@ fn finish_blocked(
         job_id,
         JOB_STATUS_BLOCKED,
         Some(&deliverable.to_string()),
-        Some(verification),
+        Some(&verification),
         Some(&capability_request.to_string()),
         Some("couldn't verify requested job"),
     )?;
@@ -650,6 +821,17 @@ fn finish_blocked(
         "blocked_capability_request",
         capability_request,
     )?;
+    let blocked_job = get_job(store, job_id)?
+        .ok_or_else(|| anyhow!("job id={} missing during blocked delivery", job_id))?;
+    if !blocked_job.speculative {
+        store.append_chat_message(
+            blocked_job.task_id,
+            "assistant",
+            "agent_job",
+            MessageKind::AssistantAnswer,
+            deliverable["honesty"].as_str().unwrap_or("I couldn't verify this job."),
+        )?;
+    }
     promote_next_queued_job(store)?;
     get_job_detail(store, job_id)
 }
@@ -657,15 +839,24 @@ fn finish_blocked(
 fn finish_budget_exhausted(
     store: &TaskStore,
     job_id: i64,
-    completed_steps: usize,
+    runtime: &RuntimeState,
     goal_contract: &str,
+    reason: &str,
 ) -> Result<AgentJobDetailDto> {
-    let verification = "fresh-context Craft verification skipped: budget exhausted before mandatory verification completed.";
+    let verification = format!(
+        "fresh-context deterministic verification skipped: budget exhausted before mandatory verification completed ({reason})."
+    );
     let deliverable = serde_json::json!({
         "assessment": "Budget exhausted before I could fully verify the delegated job.",
-        "deliverable": format!("Partial deliverable after {completed_steps} completed steps for: {goal_contract}"),
+        "deliverable": runtime.draft.clone().unwrap_or_else(|| format!("Partial deliverable after {} completed steps for: {goal_contract}", runtime.completed_steps)),
         "verified": false,
-        "honesty": "budget exhausted mid-job; partial deliverable only",
+        "honesty": format!("budget exhausted mid-job ({reason}); partial deliverable only"),
+        "budget_usage": {
+            "completed_steps": runtime.completed_steps,
+            "tool_calls": runtime.tool_calls,
+            "tokens": runtime.tokens_used,
+            "elapsed_ms": runtime.elapsed_ms
+        },
         "capability_request": {
             "capability": "more_budget_or_smaller_scope",
             "reason": "job budget exhausted before verification",
@@ -690,7 +881,7 @@ fn finish_budget_exhausted(
         job_id,
         JOB_STATUS_BUDGET_EXHAUSTED,
         Some(&deliverable.to_string()),
-        Some(verification),
+        Some(&verification),
         capability_request_json.as_deref(),
         Some("budget exhausted before verification completed"),
     )?;
@@ -698,8 +889,25 @@ fn finish_budget_exhausted(
         store,
         job_id,
         "budget_exhausted",
-        serde_json::json!({ "completed_steps": completed_steps }),
+        serde_json::json!({
+            "completed_steps": runtime.completed_steps,
+            "tool_calls": runtime.tool_calls,
+            "tokens": runtime.tokens_used,
+            "elapsed_ms": runtime.elapsed_ms,
+            "reason": reason
+        }),
     )?;
+    let budget_job = get_job(store, job_id)?
+        .ok_or_else(|| anyhow!("job id={} missing during budget delivery", job_id))?;
+    if !budget_job.speculative {
+        store.append_chat_message(
+            budget_job.task_id,
+            "assistant",
+            "agent_job",
+            MessageKind::AssistantAnswer,
+            deliverable["honesty"].as_str().unwrap_or("Budget exhausted."),
+        )?;
+    }
     promote_next_queued_job(store)?;
     get_job_detail(store, job_id)
 }
@@ -707,9 +915,23 @@ fn finish_budget_exhausted(
 fn parse_budget(raw: Option<&str>) -> Result<JobBudget> {
     match raw.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => {
-            let mut budget: JobBudget = serde_json::from_str(value).unwrap_or_default();
+            let budget: JobBudget = serde_json::from_str(value)
+                .context("invalid agent job budget JSON")?;
             if budget.max_steps == 0 {
-                budget.max_steps = 1;
+                return Err(anyhow!("job budget max_steps must be greater than zero"));
+            }
+            if budget.max_wall_seconds == 0 {
+                return Err(anyhow!("job budget max_wall_seconds must be greater than zero"));
+            }
+            if budget.max_tokens == 0 {
+                return Err(anyhow!("job budget max_tokens must be greater than zero"));
+            }
+            if budget.max_steps > 1_000
+                || budget.max_tool_calls > 10_000
+                || budget.max_wall_seconds > 7 * 24 * 60 * 60
+                || budget.max_tokens > 10_000_000
+            {
+                return Err(anyhow!("job budget exceeds hardened runtime limits"));
             }
             Ok(budget)
         }
@@ -732,25 +954,138 @@ fn build_plan_json(goal_contract: &str, speculative: bool) -> serde_json::Value 
         "read_only": speculative,
         "tool_registry": tool_registry,
         "router_tool_use": ROUTER_TOOL_CALL_PASSTHROUGH,
+        "executor": "deterministic_local_context_v2",
         "verification_required": true,
         "delivery_contract": "assessment_first_card_with_action_bus_placement_proposal"
     })
 }
 
-fn run_phase_output(
+fn execute_phase(
+    store: &TaskStore,
+    job: &AgentJobDto,
     phase: &str,
-    goal_contract: &str,
-    speculative: bool,
+    runtime: &RuntimeState,
     steering: &[AgentJobSteeringDto],
-) -> String {
-    serde_json::json!({
-        "phase": phase,
-        "goal_contract_excerpt": goal_contract.chars().take(240).collect::<String>(),
-        "speculative": speculative,
-        "applied_steering": steering.iter().map(|item| item.message.as_str()).collect::<Vec<_>>(),
-        "status": "completed"
+) -> Result<PhaseExecution> {
+    let goal = goal_instruction(&job.goal_contract);
+    let mut next = runtime.clone();
+    for item in steering {
+        if !next.applied_steering.contains(&item.message) {
+            next.applied_steering.push(item.message.clone());
+        }
+    }
+
+    let (output, tool_calls) = match phase {
+        "plan" => (
+            serde_json::json!({
+                "phase": phase,
+                "goal": goal,
+                "steps": JOB_PHASES,
+                "tool_policy": if job.speculative { "read_only" } else { "proposal_only_for_mutations" },
+                "status": "completed"
+            }),
+            0,
+        ),
+        "act" => {
+            let context = collect_local_context(store, job.task_id, &goal, &next.applied_steering)?;
+            next.task_snapshot = Some(format!(
+                "{} Recent context: {}",
+                context.task_summary,
+                context.recent_messages.join(" | ")
+            ));
+            next.evidence = context.evidence.clone();
+            next.observations = vec![
+                format!("read {} task artifact(s)", context.artifact_names.len()),
+                format!("retrieved {} relevant local chunk(s)", context.evidence.len()),
+                format!("read {} recent conversation turn(s)", context.recent_messages.len()),
+            ];
+            (
+                serde_json::json!({
+                    "phase": phase,
+                    "tools_executed": [TOOL_LOCAL_RETRIEVAL, TOOL_DOCUMENT_MODEL_READ, TOOL_SNAPSHOT_READ],
+                    "artifact_names": context.artifact_names,
+                    "evidence": context.evidence,
+                    "snapshot": next.task_snapshot,
+                    "status": "completed"
+                }),
+                3,
+            )
+        }
+        "observe" => (
+            serde_json::json!({
+                "phase": phase,
+                "observations": next.observations,
+                "source_count": next.evidence.len(),
+                "status": "completed"
+            }),
+            0,
+        ),
+        "revise" => {
+            let draft = compose_grounded_deliverable(
+                &goal,
+                &next.evidence,
+                next.task_snapshot.as_deref(),
+                &next.applied_steering,
+            );
+            next.draft = Some(draft.clone());
+            (
+                serde_json::json!({
+                    "phase": phase,
+                    "draft": draft,
+                    "applied_steering": next.applied_steering,
+                    "source_chunk_ids": next.evidence.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>(),
+                    "status": "completed"
+                }),
+                0,
+            )
+        }
+        "verify" => {
+            let (passed, findings, capability_request) = verify_with_fresh_context(
+                store,
+                job.task_id,
+                &goal,
+                next.draft.as_deref().unwrap_or_default(),
+                &next.evidence,
+            )?;
+            next.verification_passed = passed;
+            next.verification_findings = findings.clone();
+            next.capability_request = capability_request.clone();
+            (
+                serde_json::json!({
+                    "phase": phase,
+                    "fresh_context": true,
+                    "passed": passed,
+                    "findings": findings,
+                    "capability_request": capability_request,
+                    "status": "completed"
+                }),
+                2,
+            )
+        }
+        "deliver" => (
+            serde_json::json!({
+                "phase": phase,
+                "assessment_first": true,
+                "deliverable": next.draft,
+                "verified": next.verification_passed,
+                "status": "completed"
+            }),
+            0,
+        ),
+        other => return Err(anyhow!("unknown agent runtime phase '{other}'")),
+    };
+    let token_cost = estimate_tokens(&format!(
+        "{}\n{}\n{}",
+        goal,
+        next.applied_steering.join("\n"),
+        output
+    ));
+    Ok(PhaseExecution {
+        output,
+        next_state: next,
+        tool_calls,
+        token_cost,
     })
-    .to_string()
 }
 
 fn phase_title(phase: &str) -> &'static str {
@@ -765,24 +1100,373 @@ fn phase_title(phase: &str) -> &'static str {
     }
 }
 
-fn tool_calls_for_phase(phase: &str) -> usize {
-    match phase {
-        "act" => 2,
-        "observe" => 1,
-        "verify" => 1,
-        _ => 0,
+fn estimate_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(4).max(1)
+}
+
+fn goal_instruction(raw: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("instruction")
+                .or_else(|| value.get("goal"))
+                .or_else(|| value.get("title"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| raw.trim().to_string())
+}
+
+fn goal_terms(goal: &str, steering: &[String]) -> HashSet<String> {
+    const STOP: &[&str] = &[
+        "the", "and", "from", "this", "that", "with", "into", "about", "against", "draft",
+        "revise", "check", "make", "please", "local", "section", "paragraph", "notes",
+    ];
+    format!("{} {}", goal, steering.join(" "))
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|term| term.len() >= 3 && !STOP.contains(term))
+        .map(str::to_string)
+        .collect()
+}
+
+fn collect_local_context(
+    store: &TaskStore,
+    task_id: i64,
+    goal: &str,
+    steering: &[String],
+) -> Result<LocalContext> {
+    let task_summary = store.get_task_summary(task_id)?.summary_text;
+    let recent_messages = store
+        .list_recent_chat_messages(task_id, MAX_RECENT_MESSAGES)?
+        .into_iter()
+        .map(|message| format!("{}: {}", message.role, message.content.trim()))
+        .collect::<Vec<_>>();
+    let artifacts = store.list_artifacts(task_id)?;
+    let artifact_names = artifacts
+        .iter()
+        .map(|artifact| artifact.file_name.clone())
+        .collect::<Vec<_>>();
+    let terms = goal_terms(goal, steering);
+    let conn = store.connect()?;
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.artifact_id, a.file_name, c.position_index, c.chunk_text
+         FROM artifact_chunks c
+         JOIN artifacts a ON a.id = c.artifact_id
+         WHERE c.task_id = ?1
+         ORDER BY c.artifact_id ASC, c.position_index ASC, c.id ASC",
+    )?;
+    let mut scored = stmt
+        .query_map(params![task_id], |row| {
+            Ok(EvidenceChunk {
+                chunk_id: row.get(0)?,
+                artifact_id: row.get(1)?,
+                file_name: row.get(2)?,
+                position_index: row.get(3)?,
+                text: row.get::<_, String>(4)?.chars().take(MAX_EVIDENCE_CHARS).collect(),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|chunk| {
+            let lower = chunk.text.to_ascii_lowercase();
+            let score = terms.iter().filter(|term| lower.contains(term.as_str())).count();
+            (score, chunk)
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|(score_a, chunk_a), (score_b, chunk_b)| {
+        score_b
+            .cmp(score_a)
+            .then_with(|| chunk_a.artifact_id.cmp(&chunk_b.artifact_id))
+            .then_with(|| chunk_a.position_index.cmp(&chunk_b.position_index))
+    });
+    let evidence = scored
+        .into_iter()
+        .take(MAX_EVIDENCE_CHUNKS)
+        .map(|(_, chunk)| chunk)
+        .collect();
+    Ok(LocalContext {
+        task_summary,
+        recent_messages,
+        evidence,
+        artifact_names,
+    })
+}
+
+fn compose_grounded_deliverable(
+    goal: &str,
+    evidence: &[EvidenceChunk],
+    snapshot: Option<&str>,
+    steering: &[String],
+) -> String {
+    let lower_goal = goal.to_ascii_lowercase();
+    let concise = steering
+        .iter()
+        .any(|message| message.to_ascii_lowercase().contains("concise"));
+    let two_paragraphs = steering.iter().any(|message| {
+        let lower = message.to_ascii_lowercase();
+        lower.contains("two paragraph") || lower.contains("2 paragraph")
+    });
+    let mut extracts = evidence
+        .iter()
+        .map(|chunk| chunk.text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    if concise && extracts.len() > 3 {
+        extracts.truncate(3);
     }
+    let mut draft = if lower_goal.contains("citation") || lower_goal.contains("bibliograph") {
+        evidence
+            .iter()
+            .map(|chunk| format!("- [{}] {}", chunk.file_name, chunk.text.trim()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else if !extracts.is_empty() {
+        if two_paragraphs {
+            let midpoint = extracts.len().div_ceil(2).max(1);
+            let first = extracts[..midpoint].join(" ");
+            let second = if midpoint < extracts.len() {
+                extracts[midpoint..].join(" ")
+            } else {
+                format!("This evidence directly supports the requested focus: {goal}")
+            };
+            format!("{first}\n\n{second}")
+        } else {
+            extracts.join(" ")
+        }
+    } else {
+        format!(
+            "Current task assessment for '{}': {}",
+            goal,
+            snapshot.unwrap_or("no local task snapshot is available")
+        )
+    };
+    let generic_steering = steering
+        .iter()
+        .filter(|message| {
+            let lower = message.to_ascii_lowercase();
+            !lower.contains("two paragraph")
+                && !lower.contains("2 paragraph")
+                && !lower.contains("concise")
+        })
+        .map(|message| message.trim())
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>();
+    if !generic_steering.is_empty() {
+        draft.push_str("\n\nRevision direction applied: ");
+        draft.push_str(&generic_steering.join("; "));
+    }
+    draft
 }
 
-fn goal_requires_unavailable_capability(goal: &str) -> bool {
-    let clean = goal.to_ascii_lowercase();
-    clean.contains("impossible")
-        || clean.contains("cannot verify")
-        || clean.contains("can't verify")
-        || clean.contains("live web")
-        || clean.contains("external account")
+fn verify_with_fresh_context(
+    store: &TaskStore,
+    task_id: i64,
+    goal: &str,
+    draft: &str,
+    evidence: &[EvidenceChunk],
+) -> Result<(bool, Vec<String>, Option<serde_json::Value>)> {
+    let artifacts = store.list_artifacts(task_id)?;
+    if let Some(capability) = missing_capability(goal, &artifacts, evidence) {
+        let reason = capability
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("missing capability")
+            .to_string();
+        return Ok((false, vec![reason], Some(capability)));
+    }
+    let conn = store.connect()?;
+    let mut stmt = conn.prepare("SELECT id FROM artifact_chunks WHERE task_id = ?1")?;
+    let fresh_ids = stmt
+        .query_map(params![task_id], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    let mut findings = Vec::new();
+    for chunk in evidence {
+        if !fresh_ids.contains(&chunk.chunk_id) {
+            findings.push(format!(
+                "source chunk {} from {} changed or disappeared before delivery",
+                chunk.chunk_id, chunk.file_name
+            ));
+        }
+    }
+    if draft.trim().is_empty() {
+        findings.push("deliverable is empty".to_string());
+    }
+    Ok((findings.is_empty(), findings, None))
 }
 
+fn missing_capability(
+    goal: &str,
+    artifacts: &[crate::models::ArtifactDto],
+    evidence: &[EvidenceChunk],
+) -> Option<serde_json::Value> {
+    let lower = goal.to_ascii_lowercase();
+    if lower.contains("live web")
+        || lower.contains("online source")
+        || lower.contains("search the web")
+        || lower.contains("internet")
+    {
+        return Some(serde_json::json!({
+            "capability": "web_research",
+            "reason": "the goal requires live web research, but this local runtime has no web tool",
+            "needed_from_user": "Enable the web research connection or provide local source files."
+        }));
+    }
+    if lower.contains("external account") || lower.contains("account without access") {
+        return Some(serde_json::json!({
+            "capability": "external_account_access",
+            "reason": "the requested external account is not connected",
+            "needed_from_user": "Connect the account or provide an exported local source."
+        }));
+    }
+    if lower.contains("pdf")
+        && !artifacts
+            .iter()
+            .any(|artifact| artifact.file_extension.eq_ignore_ascii_case("pdf"))
+    {
+        return Some(serde_json::json!({
+            "capability": "source_pdf",
+            "reason": "the goal requires a source PDF, but no PDF is attached to this task",
+            "needed_from_user": "Attach the source PDF."
+        }));
+    }
+    let requires_local_sources = ["local notes", "local outline", "local draft", "bibliography", "rubric"]
+        .iter()
+        .any(|needle| lower.contains(needle));
+    if requires_local_sources && evidence.is_empty() {
+        return Some(serde_json::json!({
+            "capability": "local_source_material",
+            "reason": "the goal names local source material, but the task contains no readable chunks",
+            "needed_from_user": "Import the notes, draft, rubric, or bibliography into the task."
+        }));
+    }
+    None
+}
+
+fn budget_exhausted_reason(
+    budget: &JobBudget,
+    runtime: &RuntimeState,
+    additional_tool_calls: usize,
+    additional_tokens: usize,
+) -> Option<String> {
+    if runtime.completed_steps >= budget.max_steps {
+        return Some(format!("step limit {} reached", budget.max_steps));
+    }
+    if runtime.tool_calls.saturating_add(additional_tool_calls) > budget.max_tool_calls {
+        return Some(format!("tool-call limit {} would be exceeded", budget.max_tool_calls));
+    }
+    if runtime.tokens_used.saturating_add(additional_tokens) > budget.max_tokens {
+        return Some(format!("token limit {} would be exceeded", budget.max_tokens));
+    }
+    if runtime.elapsed_ms >= budget.max_wall_seconds.saturating_mul(1_000) {
+        return Some(format!("wall-time limit {}s reached", budget.max_wall_seconds));
+    }
+    None
+}
+
+fn claim_job_for_run(store: &TaskStore, job_id: i64, plan_json: &str) -> Result<()> {
+    let mut conn = store.connect()?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("failed to claim agent job")?;
+    let status = tx
+        .query_row(
+            "SELECT status FROM jobs WHERE id = ?1",
+            params![job_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("job id={} not found", job_id))?;
+    if status == JOB_STATUS_QUEUED {
+        tx.commit()?;
+        return Ok(());
+    }
+    if matches!(
+        status.as_str(),
+        JOB_STATUS_COMPLETED
+            | JOB_STATUS_BLOCKED
+            | JOB_STATUS_BUDGET_EXHAUSTED
+            | JOB_STATUS_CANCELLED_PARTIAL
+    ) {
+        tx.commit()?;
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE jobs
+         SET plan_json = ?1, status = ?2,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ?3",
+        params![plan_json, JOB_STATUS_RUNNING, job_id],
+    )?;
+    tx.commit().context("failed to commit job claim")
+}
+
+fn load_runtime_state(store: &TaskStore, job_id: i64) -> Result<(RuntimeState, usize)> {
+    let checkpoints = list_job_checkpoints(store, job_id)?;
+    let Some(latest) = checkpoints.last() else {
+        return Ok((RuntimeState::default(), 0));
+    };
+    let envelope = serde_json::from_str::<serde_json::Value>(&latest.state_json).unwrap_or_default();
+    let mut runtime = envelope
+        .get("runtime_state")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<RuntimeState>(value).ok())
+        .unwrap_or_else(|| RuntimeState {
+            completed_steps: (latest.step_index + 1).max(0) as usize,
+            ..RuntimeState::default()
+        });
+    runtime.completed_steps = runtime
+        .completed_steps
+        .max((latest.step_index + 1).max(0) as usize);
+    Ok((runtime, (latest.step_index + 1).max(0) as usize))
+}
+
+fn recover_or_create_job_step(
+    store: &TaskStore,
+    job_id: i64,
+    step_index: i64,
+    phase: &str,
+    title: &str,
+    input_json: &str,
+) -> Result<AgentJobStepDto> {
+    let conn = store.connect()?;
+    conn.execute(
+        "INSERT INTO job_steps (job_id, step_index, phase, status, title, input_json)
+         VALUES (?1, ?2, ?3, 'pending', ?4, ?5)
+         ON CONFLICT(job_id, step_index) DO UPDATE SET
+             phase = excluded.phase,
+             status = 'pending',
+             title = excluded.title,
+             input_json = excluded.input_json,
+             output_json = NULL,
+             error_message = NULL,
+             started_at = NULL,
+             completed_at = NULL",
+        params![job_id, step_index, phase, title, input_json],
+    )
+    .context("failed to create or recover job step")?;
+    drop(conn);
+    get_job_step_by_index(store, job_id, step_index)?
+        .ok_or_else(|| anyhow!("job step {job_id}:{step_index} missing after upsert"))
+}
+
+fn fail_job_step(store: &TaskStore, step_id: i64, error: &str) -> Result<()> {
+    let conn = store.connect()?;
+    conn.execute(
+        "UPDATE job_steps
+         SET status = 'failed', error_message = ?1,
+             completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ?2",
+        params![error, step_id],
+    )?;
+    Ok(())
+}
+
+#[allow(dead_code)]
 fn update_job_plan_and_status(
     store: &TaskStore,
     job_id: i64,
@@ -841,19 +1525,31 @@ fn update_job_terminal(
 fn running_job_count(store: &TaskStore) -> Result<i64> {
     let conn = store.connect()?;
     conn.query_row(
-        "SELECT COUNT(*) FROM jobs WHERE status = ?1",
-        params![JOB_STATUS_RUNNING],
+        "SELECT COUNT(*) FROM jobs WHERE status IN (?1, ?2)",
+        params![JOB_STATUS_PENDING, JOB_STATUS_RUNNING],
         |row| row.get(0),
     )
-    .context("failed to count running jobs")
+    .context("failed to count active jobs")
 }
 
 fn promote_next_queued_job(store: &TaskStore) -> Result<()> {
     if running_job_count(store)? >= MAX_RUNNING_JOBS {
         return Ok(());
     }
-    let conn = store.connect()?;
-    let next_id = conn
+    let mut conn = store.connect()?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("failed to promote queued job")?;
+    let active: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE status IN (?1, ?2)",
+        params![JOB_STATUS_PENDING, JOB_STATUS_RUNNING],
+        |row| row.get(0),
+    )?;
+    if active >= MAX_RUNNING_JOBS {
+        tx.commit()?;
+        return Ok(());
+    }
+    let next_id = tx
         .query_row(
             "SELECT id FROM jobs WHERE status = ?1 ORDER BY id ASC LIMIT 1",
             params![JOB_STATUS_QUEUED],
@@ -862,21 +1558,50 @@ fn promote_next_queued_job(store: &TaskStore) -> Result<()> {
         .optional()
         .context("failed to query next queued job")?;
     if let Some(job_id) = next_id {
-        conn.execute(
+        tx.execute(
             "UPDATE jobs
              SET status = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
              WHERE id = ?2",
             params![JOB_STATUS_PENDING, job_id],
         )
         .context("failed to promote queued job")?;
+        tx.commit().context("failed to commit queue promotion")?;
         append_job_event(
             store,
             job_id,
             "queue_promoted",
             serde_json::json!({ "status": JOB_STATUS_PENDING }),
         )?;
+    } else {
+        tx.commit()?;
     }
     Ok(())
+}
+
+/// Drain jobs that have reserved a pending slot. Integration should call this
+/// from a lightweight background worker; it is also deterministic for startup
+/// recovery and tests. Queue promotion remains FIFO.
+pub fn run_pending_jobs(store: &TaskStore) -> Result<Vec<AgentJobDetailDto>> {
+    let mut completed = Vec::new();
+    loop {
+        let ids = {
+            let conn = store.connect()?;
+            let mut stmt = conn.prepare(
+                "SELECT id FROM jobs WHERE status = ?1 ORDER BY id ASC LIMIT ?2",
+            )?;
+            let ids = stmt
+                .query_map(params![JOB_STATUS_PENDING, MAX_RUNNING_JOBS], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            ids
+        };
+        if ids.is_empty() {
+            break;
+        }
+        for id in ids {
+            completed.push(run_job_to_completion(store, id)?);
+        }
+    }
+    Ok(completed)
 }
 
 fn apply_pending_steering_at_boundary(
@@ -918,12 +1643,14 @@ fn create_job_checkpoint(
     step_index: i64,
     phase: &str,
     output_json: &str,
+    runtime_state: &RuntimeState,
 ) -> Result<AgentJobCheckpointDto> {
     let state = serde_json::json!({
         "job_id": job_id,
         "step_index": step_index,
         "phase": phase,
         "step_output": output_json,
+        "runtime_state": runtime_state,
         "status": "completed"
     });
     let conn = store.connect()?;
@@ -943,6 +1670,7 @@ fn create_job_checkpoint(
         .ok_or_else(|| anyhow!("job checkpoint missing after insert"))
 }
 
+#[allow(dead_code)]
 fn create_job_step(
     store: &TaskStore,
     job_id: i64,
@@ -1039,6 +1767,7 @@ fn get_job(store: &TaskStore, job_id: i64) -> Result<Option<AgentJobDto>> {
     .map_err(Into::into)
 }
 
+#[allow(dead_code)]
 fn get_job_step(store: &TaskStore, step_id: i64) -> Result<Option<AgentJobStepDto>> {
     let conn = store.connect()?;
     conn.query_row(
@@ -1046,6 +1775,23 @@ fn get_job_step(store: &TaskStore, step_id: i64) -> Result<Option<AgentJobStepDt
                 error_message, started_at, completed_at
          FROM job_steps WHERE id = ?1",
         params![step_id],
+        agent_job_step_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn get_job_step_by_index(
+    store: &TaskStore,
+    job_id: i64,
+    step_index: i64,
+) -> Result<Option<AgentJobStepDto>> {
+    let conn = store.connect()?;
+    conn.query_row(
+        "SELECT id, job_id, step_index, phase, status, title, input_json, output_json,
+                error_message, started_at, completed_at
+         FROM job_steps WHERE job_id = ?1 AND step_index = ?2",
+        params![job_id, step_index],
         agent_job_step_from_row,
     )
     .optional()
@@ -1196,13 +1942,22 @@ fn parse_schedule_spec(schedule_spec: &str) -> Result<(String, String)> {
 fn next_daily_run_at(clock: &str) -> Result<String> {
     let time = NaiveTime::parse_from_str(clock, "%H:%M")
         .with_context(|| format!("invalid daily schedule time '{clock}'"))?;
-    let now = Utc::now();
-    let today_at_time = now.date_naive().and_time(time);
-    let mut next = Utc.from_utc_datetime(&today_at_time);
-    if next <= now {
-        next += Duration::days(1);
+    let now = Local::now();
+    let mut day = now.date_naive();
+    for _ in 0..3 {
+        let naive = day.and_time(time);
+        if let Some(candidate) = Local
+            .from_local_datetime(&naive)
+            .earliest()
+            .filter(|candidate| *candidate > now)
+        {
+            return Ok(candidate
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Secs, true));
+        }
+        day += Duration::days(1);
     }
-    Ok(next.to_rfc3339_opts(SecondsFormat::Secs, true))
+    Err(anyhow!("could not resolve local daily schedule '{clock}' across DST"))
 }
 
 fn update_standing_job_after_run(
@@ -1241,19 +1996,47 @@ fn record_standing_job_run_receipt(
         "status": detail.job.status,
         "critical": standing.critical
     });
+    let receipt_status = if detail.job.status == JOB_STATUS_COMPLETED {
+        "applied"
+    } else {
+        detail.job.status.as_str()
+    };
     let receipt = store.create_action_receipt(
         standing.task_id,
         &class,
         STANDING_JOB_RECEIPT_SURFACE,
         crate::trust::TRUST_LEVEL_L1,
-        "Standing job run completed",
+        if detail.job.status == JOB_STATUS_COMPLETED {
+            "Standing job run completed"
+        } else {
+            "Standing job run scheduled or stopped before completion"
+        },
         &payload.to_string(),
-        "applied",
+        receipt_status,
         None,
         None,
     )?;
     crate::trust::record_receipt_outcome(store, &receipt)?;
     Ok(())
+}
+
+fn standing_guard_tripped(detail: &AgentJobDetailDto) -> bool {
+    let deliverable = detail
+        .job
+        .deliverable_json
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    [
+        "critical:",
+        "deadline collision",
+        "missing citation",
+        "data loss",
+        "verification failed",
+        "inconsistent citation",
+    ]
+    .iter()
+    .any(|needle| deliverable.contains(needle))
 }
 
 fn agent_job_from_row(row: &Row<'_>) -> rusqlite::Result<AgentJobDto> {
@@ -1356,11 +2139,35 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::store::ChunkEmbeddingInput;
 
     fn store() -> (TempDir, TaskStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = TaskStore::initialize(dir.path()).unwrap();
         (dir, store)
+    }
+
+    fn seed_artifact(store: &TaskStore, task_id: i64, file_name: &str, chunks: &[&str]) {
+        let inputs = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, text)| ChunkEmbeddingInput {
+                chunk_text: (*text).to_string(),
+                position_index: index as i64,
+                embedding: Vec::new(),
+                embedding_model: "fixture".to_string(),
+            })
+            .collect::<Vec<_>>();
+        store
+            .insert_artifact_with_chunks(
+                task_id,
+                file_name,
+                file_name.rsplit('.').next().unwrap_or("txt"),
+                file_name,
+                file_name,
+                &inputs,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -1380,6 +2187,12 @@ mod tests {
     fn d5_unattended_job_runs_plan_act_observe_revise_verify_deliver() {
         let (_dir, store) = store();
         let task = store.create_task("d5").unwrap();
+        seed_artifact(
+            &store,
+            task.id,
+            "notes.md",
+            &["The counterargument is strongest when it addresses cost and implementation risk."],
+        );
         let detail = create_and_run_job(
             &store,
             task.id,
@@ -1396,8 +2209,10 @@ mod tests {
             .job
             .verification_transcript
             .unwrap()
-            .contains("fresh-context Craft verification"));
-        assert!(detail.job.deliverable_json.unwrap().contains("assessment"));
+            .contains("fresh-context deterministic verification"));
+        let deliverable = detail.job.deliverable_json.unwrap();
+        assert!(deliverable.contains("implementation risk"));
+        assert!(deliverable.contains("notes.md"));
         assert!(detail
             .events
             .iter()
@@ -1426,7 +2241,7 @@ mod tests {
             .job
             .capability_request_json
             .unwrap()
-            .contains("missing_external"));
+            .contains("external_account_access"));
         assert!(detail
             .events
             .iter()
@@ -1483,10 +2298,39 @@ mod tests {
     }
 
     #[test]
+    fn d5_tool_and_token_budgets_are_enforced_and_malformed_budget_is_rejected() {
+        let (_dir, store) = store();
+        let task = store.create_task("d5 strict budgets").unwrap();
+        assert!(create_job(&store, task.id, "x", Some("not-json"), false).is_err());
+        let budget = serde_json::json!({
+            "max_steps": 8,
+            "max_tool_calls": 2,
+            "max_wall_seconds": 120,
+            "max_tokens": 8000
+        });
+        let detail = create_and_run_job(
+            &store,
+            task.id,
+            "Assess the current task.",
+            Some(&budget.to_string()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(detail.job.status, JOB_STATUS_BUDGET_EXHAUSTED);
+        assert!(detail.job.error_message.unwrap().contains("budget exhausted"));
+    }
+
+    #[test]
     fn d6_steering_is_applied_at_step_boundary_and_checkpointed() {
         let (_dir, store) = store();
         let task = store.create_task("d6 steering").unwrap();
-        let job = create_job(&store, task.id, "Draft a short note.", None, false).unwrap();
+        seed_artifact(
+            &store,
+            task.id,
+            "notes.md",
+            &["Evidence one supports the claim.", "Evidence two limits the claim."],
+        );
+        let job = create_job(&store, task.id, "Draft a short note from local notes.", None, false).unwrap();
 
         enqueue_job_steering(&store, job.id, "Make it two paragraphs.").unwrap();
         let detail = run_job_to_completion(&store, job.id).unwrap();
@@ -1501,6 +2345,17 @@ mod tests {
             .steering
             .iter()
             .any(|item| item.status == "applied" && item.boundary_step_index == Some(0)));
+        let deliverable: serde_json::Value =
+            serde_json::from_str(detail.job.deliverable_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            deliverable["deliverable"]
+                .as_str()
+                .unwrap()
+                .matches("\n\n")
+                .count(),
+            1,
+            "steering must change the delivered artifact to two paragraphs"
+        );
     }
 
     #[test]
@@ -1509,7 +2364,12 @@ mod tests {
         let task = store.create_task("d6 resume").unwrap();
         let job = create_job(&store, task.id, "Resume the interrupted job.", None, false).unwrap();
         update_job_plan_and_status(&store, job.id, "[]", JOB_STATUS_RUNNING).unwrap();
-        let step = create_job_step(
+        let execution = execute_phase(&store, &job, "plan", &RuntimeState::default(), &[]).unwrap();
+        let mut state = execution.next_state;
+        state.completed_steps = 1;
+        state.tokens_used = execution.token_cost;
+        let output = execution.output.to_string();
+        let step = recover_or_create_job_step(
             &store,
             job.id,
             0,
@@ -1519,20 +2379,21 @@ mod tests {
         )
         .unwrap();
         start_job_step(&store, step.id).unwrap();
-        complete_job_step(
-            &store,
-            step.id,
-            &run_phase_output("plan", &job.goal_contract, false, &[]),
-        )
-        .unwrap();
-        create_job_checkpoint(
+        complete_job_step(&store, step.id, &output).unwrap();
+        create_job_checkpoint(&store, job.id, 0, "plan", &output, &state).unwrap();
+        // Simulate a crash after the next step was inserted and marked running,
+        // but before it completed or checkpointed. Recovery must reuse the row,
+        // not violate UNIQUE(job_id, step_index).
+        let interrupted = recover_or_create_job_step(
             &store,
             job.id,
-            0,
-            "plan",
-            &run_phase_output("plan", &job.goal_contract, false, &[]),
+            1,
+            "act",
+            phase_title("act"),
+            "{}",
         )
         .unwrap();
+        start_job_step(&store, interrupted.id).unwrap();
 
         let detail = run_job_to_completion(&store, job.id).unwrap();
 
@@ -1561,7 +2422,6 @@ mod tests {
                 false,
             )
             .unwrap();
-            update_job_plan_and_status(&store, job.id, "[]", JOB_STATUS_RUNNING).unwrap();
             running_ids.push(job.id);
         }
 
@@ -1591,6 +2451,10 @@ mod tests {
             0,
             "plan",
             &serde_json::json!({ "phase": "plan", "status": "completed" }).to_string(),
+            &RuntimeState {
+                completed_steps: 1,
+                ..RuntimeState::default()
+            },
         )
         .unwrap();
 
@@ -1609,6 +2473,12 @@ mod tests {
     fn d6_standing_job_runs_through_job_model_with_receipt_and_crisis_hook() {
         let (_dir, store) = store();
         let task = store.create_task("d6 standing").unwrap();
+        seed_artifact(
+            &store,
+            task.id,
+            "bibliography.md",
+            &["CRITICAL: missing citation for the central reliability claim."],
+        );
         let standing = create_standing_job(
             &store,
             task.id,
@@ -1639,6 +2509,12 @@ mod tests {
     fn d6_disabling_standing_job_stops_it_from_running() {
         let (_dir, store) = store();
         let task = store.create_task("d6 disable").unwrap();
+        seed_artifact(
+            &store,
+            task.id,
+            "bibliography.md",
+            &["Smith 2024. Reliable Systems. Journal of Verification."],
+        );
         let standing = create_standing_job(
             &store,
             task.id,

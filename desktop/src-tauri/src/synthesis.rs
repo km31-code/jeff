@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::{AppHandle, Manager, Runtime};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{
     ambient::{AmbientState, NotificationPayload, OVERLAY_WINDOW_LABEL},
@@ -48,6 +49,7 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
         .get_privacy_proactive_triggers_enabled()
         .unwrap_or(false);
     if !proactive_enabled {
+        clear_held_candidate(&jeff.store, task.id);
         log_synthesis_decision(
             &jeff,
             task.id,
@@ -69,14 +71,36 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
     } else {
         UserProfile::default()
     };
+    let now = unix_now();
+    let mut held = load_held_candidate(&jeff.store, task.id, now);
+    if held
+        .as_ref()
+        .map(|candidate| !held_candidate_is_relevant(candidate, &snapshot, now))
+        .unwrap_or(false)
+    {
+        clear_held_candidate(&jeff.store, task.id);
+        held = None;
+    }
+    if held.is_some() && !awareness_core::is_at_natural_boundary(&snapshot) {
+        let reason = &held.as_ref().expect("checked held candidate").reason;
+        log_synthesis_decision(
+            &jeff,
+            task.id,
+            Some(reason),
+            &snapshot,
+            Some("held_until_natural_boundary"),
+            None,
+            false,
+        );
+        return;
+    }
+
     let last_synthesis_at = jeff.store.get_last_synthesis_at(task.id).unwrap_or(None);
-    // stage 1: deterministic candidate generation (every tick).
-    let reason = awareness_core::generate_proactive_candidate(
-        &snapshot,
-        &profile,
-        last_synthesis_at,
-        unix_now(),
-    );
+    // A durable held candidate owns the next natural boundary. Only when there
+    // is no hold do we generate a fresh stage-1 candidate.
+    let reason = held.as_ref().map(|value| value.reason.clone()).or_else(|| {
+        awareness_core::generate_proactive_candidate(&snapshot, &profile, last_synthesis_at, now)
+    });
 
     let Some(reason) = reason else {
         log_synthesis_decision(
@@ -136,6 +160,7 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
             log_stage2(
                 &jeff, task.id, &reason, &snapshot, &decision, None, delivered,
             );
+            clear_held_candidate(&jeff.store, task.id);
         }
         Stage2Verdict::Speak => {
             // model chose speak but produced no message; record as a drop.
@@ -148,10 +173,139 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
                 Some("empty_message"),
                 false,
             );
+            clear_held_candidate(&jeff.store, task.id);
         }
         Stage2Verdict::Hold | Stage2Verdict::Drop => {
+            if decision.verdict == Stage2Verdict::Hold {
+                persist_held_candidate(&jeff.store, task.id, &reason, held.as_ref(), now);
+            } else {
+                clear_held_candidate(&jeff.store, task.id);
+            }
             log_stage2(&jeff, task.id, &reason, &snapshot, &decision, None, false);
         }
+    }
+}
+
+const HELD_CANDIDATE_TTL_SECONDS: i64 = 4 * 3600;
+const HELD_CANDIDATE_SET_EVENT: &str = "synthesis_held_candidate_set";
+const HELD_CANDIDATE_CLEAR_EVENT: &str = "synthesis_held_candidate_clear";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct HeldCandidate {
+    reason: ProactiveSpeechReason,
+    held_at_unix: i64,
+    expires_at_unix: i64,
+}
+
+fn load_held_candidate(
+    store: &crate::store::TaskStore,
+    task_id: i64,
+    now: i64,
+) -> Option<HeldCandidate> {
+    let (event_type, raw) = latest_held_candidate_event(store, task_id)?;
+    if event_type == HELD_CANDIDATE_CLEAR_EVENT {
+        return None;
+    }
+    let held: HeldCandidate = match serde_json::from_str(&raw) {
+        Ok(held) => held,
+        Err(_) => {
+            clear_held_candidate(store, task_id);
+            return None;
+        }
+    };
+    if held.expires_at_unix <= now {
+        clear_held_candidate(store, task_id);
+        return None;
+    }
+    Some(held)
+}
+
+fn persist_held_candidate(
+    store: &crate::store::TaskStore,
+    task_id: i64,
+    reason: &ProactiveSpeechReason,
+    existing: Option<&HeldCandidate>,
+    now: i64,
+) {
+    let held_at_unix = existing.map(|held| held.held_at_unix).unwrap_or(now);
+    let held = HeldCandidate {
+        reason: reason.clone(),
+        held_at_unix,
+        expires_at_unix: held_at_unix.saturating_add(HELD_CANDIDATE_TTL_SECONDS),
+    };
+    if let Ok(raw) = serde_json::to_string(&held) {
+        let _ = store.record_event(task_id, HELD_CANDIDATE_SET_EVENT, &raw);
+    }
+}
+
+fn clear_held_candidate(store: &crate::store::TaskStore, task_id: i64) {
+    if latest_held_candidate_event(store, task_id)
+        .map(|(event_type, _)| event_type == HELD_CANDIDATE_SET_EVENT)
+        .unwrap_or(false)
+    {
+        let _ = store.record_event(task_id, HELD_CANDIDATE_CLEAR_EVENT, "{}");
+    }
+}
+
+fn latest_held_candidate_event(
+    store: &crate::store::TaskStore,
+    task_id: i64,
+) -> Option<(String, String)> {
+    let conn = store.connect().ok()?;
+    conn.query_row(
+        "SELECT event_type, payload_json FROM event_log
+         WHERE task_id = ?1
+           AND event_type IN ('synthesis_held_candidate_set', 'synthesis_held_candidate_clear')
+         ORDER BY id DESC LIMIT 1",
+        [task_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .ok()
+}
+
+fn held_candidate_is_relevant(
+    held: &HeldCandidate,
+    snapshot: &SituationalSnapshot,
+    now: i64,
+) -> bool {
+    match &held.reason {
+        ProactiveSpeechReason::DeadlinePressure { event, .. } => snapshot
+            .time_pressure
+            .as_ref()
+            .and_then(|pressure| pressure.minutes_until.map(|minutes| (pressure, minutes)))
+            .map(|(pressure, minutes)| {
+                minutes >= 0
+                    && (pressure.description.contains(event) || event.contains(&pressure.description))
+            })
+            .unwrap_or(false),
+        ProactiveSpeechReason::BlockerDetected { blocker } => snapshot
+            .current_blockers
+            .iter()
+            .any(|current| current == blocker),
+        ProactiveSpeechReason::PendingApprovalAging { .. } => snapshot
+            .pending_work
+            .iter()
+            .map(|item| item.created_at)
+            .filter(|created_at| *created_at > 0)
+            .min()
+            .map(|oldest| now.saturating_sub(oldest) >= 20 * 60)
+            .unwrap_or(false),
+        ProactiveSpeechReason::TaskReturn { .. } => {
+            snapshot.attention_state == awareness_core::AttentionState::Returning
+        }
+        ProactiveSpeechReason::WorkQualityObservation { .. } => {
+            snapshot.document_churn_score >= 2
+                || snapshot
+                    .work_understanding
+                    .as_ref()
+                    .and_then(|understanding| understanding.stuck_signal.as_ref())
+                    .is_some()
+        }
+        ProactiveSpeechReason::ComprehensionObservation { .. } => snapshot
+            .work_understanding
+            .as_ref()
+            .and_then(|understanding| understanding.candidate_observation.as_ref())
+            .is_some(),
     }
 }
 
@@ -195,6 +349,116 @@ fn calendar_context<R: Runtime>(
 // ---- apex c1: stage 2 (judgment-tier interruption decision) -----------------
 
 const STAGE2_TIMEOUT_MS: u64 = 4000;
+pub const STAGE2_VOICE_DELIVERY_EVENT: &str = "synthesis://voice-delivery";
+pub const STAGE2_SILENT_CARD_EVENT: &str = "synthesis://silent-card";
+const STAGE2_SILENT_CARD_LOG_EVENT: &str = "proactive_silent_card";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Stage2DeliveryPayload {
+    pub task_id: i64,
+    pub kind: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct Stage2SilentCardRecord {
+    pub event_id: i64,
+    pub created_at: String,
+    pub card: Stage2DeliveryPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(dead_code)]
+pub struct Stage2AuditRecord {
+    pub id: i64,
+    pub reason_type: String,
+    pub reason_detail: Option<String>,
+    pub snapshot_confidence: f32,
+    pub snapshot_attention_state: String,
+    pub message: Option<String>,
+    pub delivered: bool,
+    pub created_at: String,
+    pub decision: Option<String>,
+    pub channel: Option<String>,
+    pub decision_reason: Option<String>,
+}
+
+#[allow(dead_code)]
+pub fn list_stage2_audit(
+    store: &crate::store::TaskStore,
+    task_id: i64,
+    limit: usize,
+) -> Vec<Stage2AuditRecord> {
+    let Ok(conn) = store.connect() else {
+        return Vec::new();
+    };
+    let Ok(mut statement) = conn.prepare(
+        "SELECT id, reason_type, reason_detail, snapshot_confidence,
+                snapshot_attention_state, message, delivered, created_at,
+                stage2_decision, stage2_channel, stage2_reason
+         FROM synthesis_log WHERE task_id = ?1
+         ORDER BY id DESC LIMIT ?2",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = statement.query_map([task_id, limit.min(500) as i64], |row| {
+        Ok(Stage2AuditRecord {
+            id: row.get(0)?,
+            reason_type: row.get(1)?,
+            reason_detail: row.get(2)?,
+            snapshot_confidence: row.get::<_, f64>(3)? as f32,
+            snapshot_attention_state: row.get(4)?,
+            message: row.get(5)?,
+            delivered: row.get::<_, i64>(6)? != 0,
+            created_at: row.get(7)?,
+            decision: row.get(8)?,
+            channel: row.get(9)?,
+            decision_reason: row.get(10)?,
+        })
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
+#[allow(dead_code)]
+pub fn list_recent_silent_cards(
+    store: &crate::store::TaskStore,
+    task_id: i64,
+    limit: usize,
+) -> Vec<Stage2SilentCardRecord> {
+    let Ok(conn) = store.connect() else {
+        return Vec::new();
+    };
+    let Ok(mut statement) = conn.prepare(
+        "SELECT id, payload_json, created_at FROM event_log
+         WHERE task_id = ?1 AND event_type = 'proactive_silent_card'
+         ORDER BY id DESC LIMIT ?2",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = statement.query_map([task_id, limit.min(100) as i64], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok)
+        .filter_map(|(event_id, raw, created_at)| {
+            serde_json::from_str(&raw)
+                .ok()
+                .map(|card| Stage2SilentCardRecord {
+                    event_id,
+                    created_at,
+                    card,
+                })
+        })
+        .collect()
+}
 
 pub const STAGE2_SYSTEM_PROMPT: &str = "You are Jeff's interruption-economics judgment. \
 A deterministic stage 1 produced one candidate reason to speak. You decide, like a considerate senior colleague, \
@@ -228,6 +492,15 @@ impl Stage2Verdict {
             _ => Stage2Verdict::Speak,
         }
     }
+
+    fn parse_strict(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "speak" => Some(Stage2Verdict::Speak),
+            "hold" => Some(Stage2Verdict::Hold),
+            "drop" => Some(Stage2Verdict::Drop),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,6 +529,16 @@ impl Stage2Channel {
             _ => Stage2Channel::Bubble,
         }
     }
+
+    fn parse_strict(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "voice" => Some(Stage2Channel::Voice),
+            "bubble" => Some(Stage2Channel::Bubble),
+            "notification" => Some(Stage2Channel::Notification),
+            "silent_card" => Some(Stage2Channel::SilentCard),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -273,11 +556,31 @@ pub fn parse_stage2_json(raw: &str) -> Option<Stage2Decision> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(&raw[start..=end]).ok()?;
+    let verdict = Stage2Verdict::parse_strict(value.get("decision")?.as_str()?)?;
+    let channel = Stage2Channel::parse_strict(value.get("channel")?.as_str()?)?;
+    let message = value
+        .get("message")
+        .and_then(|message| message.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if verdict == Stage2Verdict::Speak && message.is_empty() {
+        return None;
+    }
+    if message.split_whitespace().count() > 40 {
+        return None;
+    }
+    let reason = value
+        .get("reason")
+        .and_then(|reason| reason.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     Some(Stage2Decision {
-        verdict: Stage2Verdict::parse(value["decision"].as_str().unwrap_or("speak")),
-        channel: Stage2Channel::parse(value["channel"].as_str().unwrap_or("bubble")),
-        message: value["message"].as_str().unwrap_or("").trim().to_string(),
-        reason: value["reason"].as_str().unwrap_or("").trim().to_string(),
+        verdict,
+        channel,
+        message,
+        reason,
     })
 }
 
@@ -293,7 +596,21 @@ async fn decide_proactive_stage2(
         .list_recent_interruptions(task_id, LEDGER_LOOKBACK)
         .unwrap_or_default();
     let now = unix_now();
+    if recent_pending_same_reason(&ledger, reason.reason_type(), now) {
+        return Stage2Decision {
+            verdict: Stage2Verdict::Hold,
+            channel: Stage2Channel::SilentCard,
+            message: String::new(),
+            reason: "equivalent interruption is still awaiting a reaction".to_string(),
+        };
+    }
     let ledger_summary = build_ledger_summary(&ledger, now);
+    let last_delivery_age = jeff
+        .store
+        .get_last_synthesis_at(task_id)
+        .ok()
+        .flatten()
+        .map(|last| now.saturating_sub(last));
     let user_prompt = build_stage2_prompt(
         reason,
         snapshot,
@@ -301,6 +618,7 @@ async fn decide_proactive_stage2(
         ledger_summary
             .as_deref()
             .unwrap_or("no interruption history yet"),
+        last_delivery_age,
     );
 
     match jeff
@@ -317,11 +635,18 @@ async fn decide_proactive_stage2(
             },
         )
         .await
-        .ok()
-        .and_then(|raw| parse_stage2_json(&raw))
     {
-        Some(decision) => decision,
-        None => fallback_stage2(jeff, task_id, snapshot, reason, &ledger, now).await,
+        Ok(raw) => parse_stage2_json(&raw).unwrap_or_else(invalid_stage2_hold),
+        Err(_) => fallback_stage2(jeff, task_id, snapshot, reason, &ledger, now).await,
+    }
+}
+
+fn invalid_stage2_hold() -> Stage2Decision {
+    Stage2Decision {
+        verdict: Stage2Verdict::Hold,
+        channel: Stage2Channel::SilentCard,
+        message: String::new(),
+        reason: "invalid stage2 response; failed closed".to_string(),
     }
 }
 
@@ -340,15 +665,24 @@ async fn fallback_stage2(
     let economics = fallback_stage2_economics(snapshot, reason, ledger, now);
     let repeatedly_ignored =
         reason_band_is_ignored(ledger, reason.reason_type(), snapshot.focus_score, now);
-    let verdict = Stage2Verdict::parse(&economics.decision);
-    let should_hold = verdict == Stage2Verdict::Hold;
-    let message =
+    let mut verdict = Stage2Verdict::parse(&economics.decision);
+    let message = if verdict == Stage2Verdict::Speak {
         awareness_core::synthesize_proactive_message(reason, snapshot, &jeff.model_router)
             .await
-            .map(|value| value.trim().to_string())
-            .unwrap_or_default();
+            .map(|value| limit_stage2_words(value.trim(), 40))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let wording_unavailable = verdict == Stage2Verdict::Speak && message.is_empty();
+    if wording_unavailable {
+        verdict = Stage2Verdict::Hold;
+    }
+    let should_hold = verdict == Stage2Verdict::Hold;
     let reason_text = if should_hold && repeatedly_ignored {
         "held: this cue has been ignored at this focus level"
+    } else if wording_unavailable {
+        "held: safe wording was unavailable"
     } else if should_hold {
         "held: deep focus, waiting for a natural boundary"
     } else {
@@ -356,7 +690,11 @@ async fn fallback_stage2(
     };
     Stage2Decision {
         verdict,
-        channel: Stage2Channel::parse(&economics.channel),
+        channel: if wording_unavailable {
+            Stage2Channel::SilentCard
+        } else {
+            Stage2Channel::parse(&economics.channel)
+        },
         message,
         reason: reason_text.to_string(),
     }
@@ -401,6 +739,15 @@ fn fallback_stage2_economics(
     ledger: &[crate::store::InterruptionLedgerRow],
     now: i64,
 ) -> crate::judgment_eval_core::JudgmentStage2Output {
+    if recent_pending_same_reason(ledger, reason.reason_type(), now)
+        && !awareness_core::is_at_natural_boundary(snapshot)
+    {
+        return crate::judgment_eval_core::JudgmentStage2Output {
+            decision: "hold".to_string(),
+            channel: "silent_card".to_string(),
+            reason: "equivalent_interruption_still_awaiting_reaction".to_string(),
+        };
+    }
     let (ignored_count, engaged_count) =
         reason_band_stats(ledger, reason.reason_type(), snapshot.focus_score, now);
     crate::judgment_eval_core::evaluate_stage2_economics(
@@ -475,17 +822,19 @@ fn build_ledger_summary(
     now: i64,
 ) -> Option<String> {
     use std::collections::BTreeMap;
-    let mut buckets: BTreeMap<(String, &str), (u32, u32)> = BTreeMap::new();
+    let mut buckets: BTreeMap<(String, &str), (u32, u32, u32)> = BTreeMap::new();
     for row in ledger {
-        let Some(engaged) = settled_outcome(row, now) else {
-            continue;
-        };
         let entry = buckets
             .entry((row.reason_type.clone(), focus_band(row.focus_score)))
-            .or_insert((0, 0));
-        entry.0 += 1;
-        if engaged {
-            entry.1 += 1;
+            .or_insert((0, 0, 0));
+        match settled_outcome(row, now) {
+            Some(engaged) => {
+                entry.0 += 1;
+                if engaged {
+                    entry.1 += 1;
+                }
+            }
+            None => entry.2 += 1,
         }
     }
     if buckets.is_empty() {
@@ -493,11 +842,31 @@ fn build_ledger_summary(
     }
     let lines = buckets
         .into_iter()
-        .map(|((reason, band), (delivered, engaged))| {
-            format!("{band} {reason}: engaged {engaged}/{delivered}")
+        .map(|((reason, band), (settled, engaged, pending))| {
+            format!("{band} {reason}: engaged {engaged}/{settled}, pending {pending}")
         })
         .collect::<Vec<_>>();
     Some(lines.join("; "))
+}
+
+fn recent_pending_same_reason(
+    ledger: &[crate::store::InterruptionLedgerRow],
+    reason_type: &str,
+    now: i64,
+) -> bool {
+    ledger.iter().any(|row| {
+        row.reason_type == reason_type
+            && row.reaction.is_none()
+            && now.saturating_sub(row.delivered_at_unix) < LEDGER_IGNORE_SECONDS
+    })
+}
+
+fn limit_stage2_words(input: &str, max_words: usize) -> String {
+    input
+        .split_whitespace()
+        .take(max_words)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // true when this reason at this focus band has a clear ignored pattern: at least
@@ -552,6 +921,11 @@ pub fn record_interruption_reaction_for_reply(
     let _ = store.record_interruption_reaction_within(task_id, LEDGER_IGNORE_SECONDS, reaction);
 }
 
+#[allow(dead_code)]
+pub fn record_interruption_dismissal(store: &crate::store::TaskStore, task_id: i64) {
+    let _ = store.record_interruption_reaction_within(task_id, LEDGER_IGNORE_SECONDS, "dismissed");
+}
+
 fn is_explicit_negative(message: &str) -> bool {
     let lower = message.trim().to_ascii_lowercase();
     [
@@ -575,6 +949,13 @@ fn build_stage2_recall(
     _task_id: i64,
     snapshot: &SituationalSnapshot,
 ) -> Option<String> {
+    if !jeff
+        .store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        return None;
+    }
     let query = memory::build_recall_query(
         snapshot.current_goal.as_deref(),
         snapshot.active_document_excerpt.as_deref(),
@@ -591,11 +972,16 @@ fn build_stage2_prompt(
     snapshot: &SituationalSnapshot,
     recall_block: Option<&str>,
     ledger_summary: &str,
+    last_delivery_age_seconds: Option<i64>,
 ) -> String {
     format!(
-        "Candidate reason: {}\nDetail: {}\n\nSituation:\n{}\n\nMemory recall:\n{}\n\nInterruption ledger:\n{}\n\nDecide now.",
+        "Candidate reason: {}\nDetail: {}\nNatural boundary now: {}\nLast delivered interruption: {}\n\nSituation:\n{}\n\nMemory recall:\n{}\n\nInterruption ledger (pending means do not repeat it):\n{}\n\nDecide now.",
         reason.reason_type(),
         reason.detail(),
+        awareness_core::is_at_natural_boundary(snapshot),
+        last_delivery_age_seconds
+            .map(|age| format!("{age}s ago"))
+            .unwrap_or_else(|| "none".to_string()),
         snapshot_summary(snapshot),
         recall_block.unwrap_or("<none>"),
         ledger_summary,
@@ -611,6 +997,11 @@ async fn deliver_by_channel<R: Runtime>(
 ) -> bool {
     let kind = proactive_message_kind_for_reason(reason);
     let message = decision.message.as_str();
+    let payload = Stage2DeliveryPayload {
+        task_id,
+        kind: kind.to_string(),
+        message: message.to_string(),
+    };
 
     // notification channel: a system notification, no chat bubble.
     if decision.channel == Stage2Channel::Notification {
@@ -626,7 +1017,26 @@ async fn deliver_by_channel<R: Runtime>(
         .is_ok();
     }
 
-    // voice (until C4), bubble, and silent_card all render as a chat bubble.
+    // A silent card is durable and reply-addressable through its event payload,
+    // but it is deliberately not inserted into chat and never notifies.
+    if decision.channel == Stage2Channel::SilentCard {
+        if jeff
+            .store
+            .record_event(
+                task_id,
+                STAGE2_SILENT_CARD_LOG_EVENT,
+                &serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+            )
+            .is_err()
+        {
+            return false;
+        }
+        return handle.emit(STAGE2_SILENT_CARD_EVENT, &payload).is_ok();
+    }
+
+    // Bubble and voice both retain a conversation transcript, but only the
+    // voice channel requests audio playback. The frontend owns session-aware
+    // realtime/TTS playback for this event.
     if crate::proactive::deliver_proactive_as_chat_message(
         &jeff.store,
         handle,
@@ -640,12 +1050,11 @@ async fn deliver_by_channel<R: Runtime>(
         return false;
     }
 
-    // silent_card is intentionally non-notifying; bubble/voice raise a
-    // notification only when the overlay is hidden.
-    if decision.channel == Stage2Channel::SilentCard {
-        return true;
+    if decision.channel == Stage2Channel::Voice {
+        return handle.emit(STAGE2_VOICE_DELIVERY_EVENT, &payload).is_ok();
     }
 
+    // Bubble raises a notification only when the overlay is hidden.
     let overlay_visible = handle
         .get_webview_window(OVERLAY_WINDOW_LABEL)
         .and_then(|window| window.is_visible().ok())
@@ -835,7 +1244,9 @@ mod tests {
             delivered_at_unix: now - 10, // just delivered
         }];
         assert!(settled_outcome(&recent[0], now).is_none());
-        assert!(build_ledger_summary(&recent, now).is_none());
+        let summary = build_ledger_summary(&recent, now).unwrap();
+        assert!(summary.contains("pending 1"));
+        assert!(recent_pending_same_reason(&recent, "task_return", now));
     }
 
     #[test]
@@ -886,6 +1297,83 @@ mod tests {
     }
 
     #[test]
+    fn c1_malformed_stage2_output_fails_closed() {
+        assert!(parse_stage2_json(
+            r#"{"decision":"maybe","channel":"bubble","message":"Interrupt."}"#
+        )
+        .is_none());
+        assert!(parse_stage2_json(
+            r#"{"decision":"speak","channel":"pager","message":"Interrupt."}"#
+        )
+        .is_none());
+        assert!(
+            parse_stage2_json(r#"{"decision":"speak","channel":"bubble","message":""}"#).is_none()
+        );
+        let too_long = format!(
+            "{{\"decision\":\"speak\",\"channel\":\"bubble\",\"message\":\"{}\"}}",
+            vec!["word"; 41].join(" ")
+        );
+        assert!(parse_stage2_json(&too_long).is_none());
+        assert_eq!(invalid_stage2_hold().verdict, Stage2Verdict::Hold);
+    }
+
+    #[test]
+    fn c1_held_candidate_survives_ticks_and_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        let task = store.create_task("held").unwrap();
+        let reason = ProactiveSpeechReason::BlockerDetected {
+            blocker: "citation missing".to_string(),
+        };
+        persist_held_candidate(&store, task.id, &reason, None, 1_000);
+        assert_eq!(
+            load_held_candidate(&store, task.id, 1_001).unwrap().reason,
+            reason
+        );
+        assert!(load_held_candidate(&store, task.id, 1_000 + HELD_CANDIDATE_TTL_SECONDS).is_none());
+
+        let held = HeldCandidate {
+            reason: ProactiveSpeechReason::DeadlinePressure {
+                event: "Design review".to_string(),
+                minutes_until: 30,
+            },
+            held_at_unix: 1_000,
+            expires_at_unix: 2_000,
+        };
+        let mut snapshot = SituationalSnapshot::default();
+        snapshot.time_pressure = Some(crate::awareness_core::TimePressure {
+            source: "calendar".to_string(),
+            description: "Design review".to_string(),
+            minutes_until: Some(20),
+        });
+        assert!(held_candidate_is_relevant(&held, &snapshot, 1_100));
+        snapshot.time_pressure.as_mut().unwrap().minutes_until = Some(-1);
+        assert!(!held_candidate_is_relevant(&held, &snapshot, 1_100));
+    }
+
+    #[test]
+    fn c1_silent_cards_are_durable_and_task_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        let task = store.create_task("cards").unwrap();
+        let other = store.create_task("other").unwrap();
+        let card = Stage2DeliveryPayload {
+            task_id: task.id,
+            kind: "proactive_deadline".to_string(),
+            message: "The filing window closes soon.".to_string(),
+        };
+        store
+            .record_event(
+                task.id,
+                STAGE2_SILENT_CARD_LOG_EVENT,
+                &serde_json::to_string(&card).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(list_recent_silent_cards(&store, task.id, 10)[0].card, card);
+        assert!(list_recent_silent_cards(&store, other.id, 10).is_empty());
+    }
+
+    #[test]
     fn c1_staged_log_records_hold_decision_with_reason() {
         let dir = tempfile::tempdir().unwrap();
         let store = TaskStore::initialize(dir.path()).unwrap();
@@ -917,6 +1405,14 @@ mod tests {
         assert_eq!(channel, "bubble");
         assert_eq!(reason, "deep focus, wait for a boundary");
         assert_eq!(delivered, 0);
+        let audit = list_stage2_audit(&store, task.id, 10);
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].decision.as_deref(), Some("hold"));
+        assert_eq!(audit[0].channel.as_deref(), Some("bubble"));
+        assert_eq!(
+            audit[0].decision_reason.as_deref(),
+            Some("deep focus, wait for a boundary")
+        );
     }
 
     #[test]

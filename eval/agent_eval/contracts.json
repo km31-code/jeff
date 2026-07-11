@@ -3,125 +3,165 @@
     "id": "draft_counterargument",
     "category": "drafting",
     "goal_contract": "Draft the counterargument section from my local notes.",
+    "fixture_workspace": "fixtures/drafting",
     "expect_status": "completed",
     "require_assessment": true,
     "require_verification": true,
-    "must_contain": ["placement_proposal"]
+    "require_grounded_output": true,
+    "expected_source_files": ["notes.md"],
+    "must_contain": ["staged adoption reduces operational risk"]
   },
   {
     "id": "draft_intro",
     "category": "drafting",
     "goal_contract": "Draft an introduction paragraph from the local outline.",
+    "fixture_workspace": "fixtures/drafting",
     "expect_status": "completed",
     "require_assessment": true,
     "require_verification": true,
-    "must_contain": ["placement_proposal"]
+    "require_grounded_output": true,
+    "expected_source_files": ["notes.md"],
+    "must_contain": ["reliable systems depend on explicit verification boundaries"]
   },
   {
     "id": "draft_summary",
     "category": "drafting",
     "goal_contract": "Draft an assessment-first summary of the local notes.",
+    "fixture_workspace": "fixtures/drafting",
     "expect_status": "completed",
     "require_assessment": true,
     "require_verification": true,
-    "must_contain": ["placement_proposal"]
+    "require_grounded_output": true,
+    "expected_source_files": ["notes.md"],
+    "must_contain": ["local-first context, bounded tool use"]
   },
   {
     "id": "draft_methods",
     "category": "drafting",
     "goal_contract": "Draft the methods section from the local draft.",
+    "fixture_workspace": "fixtures/drafting",
     "expect_status": "completed",
     "require_assessment": true,
     "require_verification": true,
-    "must_contain": ["placement_proposal"]
+    "require_grounded_output": true,
+    "expected_source_files": ["notes.md"],
+    "must_contain": ["deterministic local retrieval"]
   },
   {
     "id": "draft_abstract",
     "category": "drafting",
     "goal_contract": "Draft a one-paragraph abstract from the local document.",
+    "fixture_workspace": "fixtures/drafting",
     "expect_status": "completed",
     "require_assessment": true,
     "require_verification": true,
-    "must_contain": ["placement_proposal"]
+    "require_grounded_output": true,
+    "expected_source_files": ["notes.md"],
+    "must_contain": ["grounded workflows catch missing evidence"]
   },
   {
     "id": "draft_conclusion",
     "category": "drafting",
     "goal_contract": "Draft a conclusion from the local notes.",
+    "fixture_workspace": "fixtures/drafting",
     "expect_status": "completed",
     "require_assessment": true,
     "require_verification": true,
-    "must_contain": ["placement_proposal"]
+    "require_grounded_output": true,
+    "expected_source_files": ["notes.md"],
+    "must_contain": ["honest partial results preserve trust"]
   },
   {
     "id": "revise_rubric_clarity",
     "category": "revision",
     "goal_contract": "Revise the opening paragraph for clarity against the rubric.",
+    "fixture_workspace": "fixtures/revision",
     "expect_status": "completed",
     "require_assessment": true,
-    "require_verification": true
+    "require_verification": true,
+    "require_grounded_output": true,
+    "expected_source_files": ["draft.md", "rubric.md"],
+    "must_contain": ["concrete mechanism and its observable result"]
   },
   {
     "id": "revise_rubric_concision",
     "category": "revision",
     "goal_contract": "Revise the section to be more concise per the rubric.",
+    "fixture_workspace": "fixtures/revision",
     "expect_status": "completed",
     "require_assessment": true,
-    "require_verification": true
+    "require_verification": true,
+    "require_grounded_output": true,
+    "expected_source_files": ["draft.md", "rubric.md"],
+    "must_contain": ["rejects repeated claims"]
   },
   {
     "id": "revise_structure",
     "category": "revision",
-    "goal_contract": "Revise the argument structure of the local draft.",
+    "goal_contract": "Revise the argument structure of the local draft against the rubric.",
+    "fixture_workspace": "fixtures/revision",
     "expect_status": "completed",
     "require_assessment": true,
-    "require_verification": true
+    "require_verification": true,
+    "require_grounded_output": true,
+    "expected_source_files": ["draft.md", "rubric.md"],
+    "must_contain": ["problem, mechanism, evidence, and limitation sequence"]
   },
   {
     "id": "citation_consistency",
     "category": "citation",
     "goal_contract": "Check the local draft for citation consistency against the bibliography.",
+    "fixture_workspace": "fixtures/citation",
     "expect_status": "completed",
     "require_assessment": true,
-    "require_verification": true
+    "require_verification": true,
+    "require_grounded_output": true,
+    "expected_source_files": ["draft.md", "bibliography.md"],
+    "must_contain": ["[draft.md]", "[bibliography.md]", "Durable Agent Runtimes"]
   },
   {
     "id": "impossible_external_account",
     "category": "impossible",
-    "goal_contract": "Impossible task: verify an external account without access.",
+    "goal_contract": "Verify the contents of an external account that is not connected.",
     "expect_status": "blocked",
     "require_capability_request": true,
-    "must_contain": ["couldn't verify"]
+    "must_contain": ["couldn't verify", "external account is not connected"]
   },
   {
     "id": "impossible_live_web",
     "category": "impossible",
-    "goal_contract": "Verify this claim against the live web without any tools.",
+    "goal_contract": "Verify this claim against the live web without any web connection.",
     "expect_status": "blocked",
     "require_capability_request": true,
-    "must_contain": ["couldn't verify"]
+    "must_contain": ["couldn't verify", "requires live web research"]
   },
   {
     "id": "impossible_cannot_verify_pdf",
     "category": "impossible",
-    "goal_contract": "Cannot verify the page number against a source PDF that is not present.",
+    "goal_contract": "Verify the page number against a source PDF that is not attached.",
     "expect_status": "blocked",
     "require_capability_request": true,
-    "must_contain": ["couldn't verify"]
+    "must_contain": ["couldn't verify", "no PDF is attached"]
   },
   {
     "id": "steering_two_paragraphs",
     "category": "steering",
     "goal_contract": "Draft a short note from the local notes.",
+    "fixture_workspace": "fixtures/drafting",
     "steering": ["Make it two paragraphs."],
     "expect_status": "completed",
     "require_assessment": true,
-    "require_steering_reflected": true
+    "require_verification": true,
+    "require_grounded_output": true,
+    "require_steering_reflected": true,
+    "expected_paragraphs": 2,
+    "expected_source_files": ["notes.md"]
   },
   {
     "id": "budget_exhaustion",
     "category": "budget",
     "goal_contract": "Draft a long deliverable with verification from the local notes.",
+    "fixture_workspace": "fixtures/drafting",
     "budget": { "max_steps": 2, "max_tool_calls": 12, "max_wall_seconds": 120, "max_tokens": 8000 },
     "expect_status": "budget_exhausted",
     "require_capability_request": true,

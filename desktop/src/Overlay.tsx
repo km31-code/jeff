@@ -364,6 +364,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   const [voiceState, setVoiceState] = useState<"idle" | "connecting" | "live" | "fallback" | "closed">("idle");
   const [voiceMuted, setVoiceMuted] = useState(false);
   const voiceConnRef = useRef<RealtimeConnection | null>(null);
+  const voiceStartPendingRef = useRef(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoNotice, setInfoNotice] = useState<string | null>(null);
   const [crisisCard, setCrisisCard] = useState<CrisisCardDto | null>(null);
@@ -1925,44 +1926,68 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   // session in the backend, then opens the WebRTC audio in the browser. falls
   // back to the STT/TTS pipeline when realtime is off or unavailable.
   const handleStartVoiceSession = useCallback(async () => {
+    if (recording) {
+      handleStopVoiceRecording();
+      return;
+    }
     if (voiceConnRef.current) {
       handleEndVoiceSession();
       return;
     }
+    if (voiceStartPendingRef.current) return;
+    voiceStartPendingRef.current = true;
+    let fallbackStarted = false;
+    const fallBackToVoicePipeline = (notice: string) => {
+      if (fallbackStarted) return;
+      fallbackStarted = true;
+      voiceConnRef.current?.close();
+      voiceConnRef.current = null;
+      setVoiceMuted(false);
+      setVoiceState("fallback");
+      setInfoNotice(notice);
+      void handleStartVoiceRecording();
+    };
     setVoiceState("connecting");
     try {
       const session = await startVoiceSession();
       if (session.fallback || !session.client_secret) {
-        setVoiceState("fallback");
-        setInfoNotice(session.notice ?? "Using the voice pipeline.");
+        fallBackToVoicePipeline(session.notice ?? "Using the voice pipeline.");
         return;
       }
       const conn = await connectRealtimeVoice(session.client_secret, session.model, {
         onTranscript: (role, text) => {
-          if (activeTask) {
-            void persistVoiceTranscript(activeTask.id, role, text).catch(() => undefined);
+          const task = activeTaskRef.current;
+          if (task) {
+            void persistVoiceTranscript(task.id, role, text).catch(() => undefined);
           }
         },
-        onToolCall: (name, args) => {
-          if (activeTask) {
-            void handleVoiceToolCall(activeTask.id, name, args).catch(() => undefined);
-          }
+        onToolCall: async (name, args) => {
+          const task = activeTaskRef.current;
+          if (!task) return { action: "none", text: null, error: "no active task" };
+          return handleVoiceToolCall(task.id, name, args);
         },
         onStateChange: (next) => {
-          setVoiceState(next === "live" ? "live" : next === "error" ? "fallback" : next);
+          if (next === "error") {
+            fallBackToVoicePipeline(
+              "Realtime voice disconnected; continuing with the voice pipeline."
+            );
+            return;
+          }
+          setVoiceState(next);
         }
       });
       if (!conn) {
-        setVoiceState("fallback");
-        setInfoNotice("Realtime voice unavailable; using the voice pipeline.");
+        fallBackToVoicePipeline("Realtime voice unavailable; using the voice pipeline.");
         return;
       }
       voiceConnRef.current = conn;
       setVoiceState("live");
     } catch {
-      setVoiceState("fallback");
+      fallBackToVoicePipeline("Realtime voice unavailable; using the voice pipeline.");
+    } finally {
+      voiceStartPendingRef.current = false;
     }
-  }, [activeTask, handleEndVoiceSession]);
+  }, [handleEndVoiceSession, handleStartVoiceRecording, handleStopVoiceRecording, recording]);
 
   const handleToggleVoiceMute = useCallback(() => {
     setVoiceMuted((prev) => {
@@ -1979,31 +2004,17 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     await handleStartVoiceSession();
   }, [handleStartVoiceSession]);
 
-  // apex c4: push-to-talk — Cmd/Ctrl+Shift+V opens (or closes) a voice session.
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "v") {
-        event.preventDefault();
-        void handleStartVoiceSession();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleStartVoiceSession]);
-
-  // d3: mic shortcut listener — placed after voice handlers so they are in scope.
+  // apex c4: the backend owns the single global Cmd/Ctrl+Shift+M registration.
+  // Do not also install a DOM shortcut: duplicate delivery could close a session
+  // immediately after opening it, and Shift+V belongs to selection capture.
   useEffect(() => {
     const unsub = listen("ambient://mic-shortcut", () => {
-      if (recording) {
-        handleStopVoiceRecording();
-      } else {
-        void handleStartVoiceRecording();
-      }
+      void handleStartVoiceSession();
     });
     return () => {
       unsub.then((fn) => fn()).catch(() => undefined);
     };
-  }, [recording, handleStopVoiceRecording, handleStartVoiceRecording]);
+  }, [handleStartVoiceSession]);
 
   // apex c5: wake-word detector only sends a wake token; the overlay plays a
   // local acknowledgement cue and opens voice without toggling off an open session.
@@ -2737,7 +2748,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                   type="button"
                   data-testid="voice-session-toggle"
                   onClick={() => void handleStartVoiceSession()}
-                  title="Talk to Jeff (Cmd/Ctrl+Shift+V)"
+                  title="Talk to Jeff (Cmd/Ctrl+Shift+M)"
                 >
                   {voiceState === "live" ? "End voice" : "Talk to Jeff"}
                 </button>

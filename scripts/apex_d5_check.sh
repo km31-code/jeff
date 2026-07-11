@@ -40,7 +40,7 @@ grep -q "TOOL_ACTION_PROPOSAL_BUS" "$RUNTIME" || fail "action proposal bus tool 
 grep -q "ROUTER_TOOL_CALL_PASSTHROUGH" "$RUNTIME" || fail "router tool-call passthrough seam missing"
 grep -q "JobBudget" "$RUNTIME" || fail "job budget struct missing"
 grep -q "finish_budget_exhausted" "$RUNTIME" || fail "budget exhaustion handler missing"
-grep -q "fresh-context Craft verification" "$RUNTIME" || fail "mandatory verification transcript missing"
+grep -q "fresh-context deterministic verification" "$RUNTIME" || fail "mandatory verification transcript missing"
 grep -q "couldn't verify" "$RUNTIME" || fail "honest unverifiable-task wording missing"
 grep -q "capability_request" "$RUNTIME" || fail "structured capability request missing"
 grep -q "assessment_first" "$RUNTIME" || fail "assessment-first delivery event missing"

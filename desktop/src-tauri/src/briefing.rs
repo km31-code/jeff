@@ -3,14 +3,13 @@
 // contract), never as reports.
 
 use anyhow::Result;
-use chrono::Timelike;
+use chrono::{Duration, Local, TimeZone, Timelike};
 use tauri::{AppHandle, Manager, Runtime};
 
 #[cfg(not(test))]
 use crate::model_router::{GenerateOptions, Tier};
 use crate::{
     ambient::AmbientState,
-    consolidation,
     model_router::ModelRouter,
     proactive::deliver_proactive_as_chat_message,
     state::{CalendarState, JeffState},
@@ -22,6 +21,7 @@ pub const BRIEFING_MESSAGE_KIND: &str = "proactive_briefing";
 pub const DEBRIEF_MESSAGE_KIND: &str = "proactive_debrief";
 pub const DEBRIEF_ENABLED_KEY: &str = "debrief_enabled";
 
+#[allow(dead_code)]
 pub const BRIEFING_AWAY_SECONDS: i64 = 6 * 3600;
 pub const DEBRIEF_IDLE_SECONDS: i64 = 45 * 60;
 pub const DEBRIEF_EVENING_HOUR: u32 = 17;
@@ -29,6 +29,9 @@ pub const DEBRIEF_EVENING_HOUR: u32 = 17;
 const BRIEFING_LAST_FIRED_KEY: &str = "ritual:briefing_last_fired_date";
 const DEBRIEF_LAST_FIRED_KEY: &str = "ritual:debrief_last_fired_date";
 const WRAP_REQUESTED_KEY: &str = "ritual:wrap_requested_date";
+const BRIEFING_READY_KEY_PREFIX: &str = "ritual:briefing_ready:";
+#[allow(dead_code)]
+const LAST_ENGAGEMENT_KEY_PREFIX: &str = "ritual:last_engagement:";
 
 #[cfg_attr(test, allow(dead_code))]
 pub const BRIEFING_SYSTEM_PROMPT: &str = "You are Jeff opening the user's day. \
@@ -59,6 +62,7 @@ pub struct DebriefInputs {
 
 // ---- trigger predicates (pure, testable) ------------------------------------
 
+#[allow(dead_code)]
 pub fn should_fire_briefing(
     last_activity_unix: Option<i64>,
     last_fired_date: Option<&str>,
@@ -69,7 +73,9 @@ pub fn should_fire_briefing(
     }
     match last_activity_unix {
         Some(last) => now.saturating_sub(last) >= BRIEFING_AWAY_SECONDS,
-        None => true,
+        // A fresh profile has no "return" yet. Firing here produced an empty
+        // ambient-timer briefing before the user ever engaged.
+        None => false,
     }
 }
 
@@ -114,6 +120,25 @@ pub fn note_wrapping_up(store: &TaskStore, now: i64) {
     let _ = store.set_app_setting(WRAP_REQUESTED_KEY, &date_of(now));
 }
 
+/// Mark an actual user engagement. Call this before persisting the new turn or
+/// focus event so the measured gap is the time the user was truly away. The
+/// ambient ritual tick consumes the ready marker; it never invents engagement.
+#[allow(dead_code)]
+pub fn note_user_engagement(store: &TaskStore, task_id: i64, now: i64) {
+    let last_key = format!("{LAST_ENGAGEMENT_KEY_PREFIX}{task_id}");
+    let ready_key = format!("{BRIEFING_READY_KEY_PREFIX}{task_id}");
+    let last = store
+        .get_app_setting(&last_key)
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<i64>().ok())
+        .or_else(|| last_activity_unix(store, task_id));
+    if should_fire_briefing(last, None, now) {
+        let _ = store.set_app_setting(&ready_key, &date_of(now));
+    }
+    let _ = store.set_app_setting(&last_key, &now.to_string());
+}
+
 // ---- firing ------------------------------------------------------------------
 
 pub async fn maybe_fire_rituals<R: Runtime>(app: &AppHandle<R>) {
@@ -139,17 +164,20 @@ pub async fn maybe_fire_briefing<R: Runtime>(app: &AppHandle<R>) {
         return;
     };
     let now = now_unix();
-    let last_activity = last_activity_unix(&jeff.store, task.id);
     let last_fired = jeff
         .store
         .get_app_setting(BRIEFING_LAST_FIRED_KEY)
         .ok()
         .flatten();
-    if !should_fire_briefing(last_activity, last_fired.as_deref(), now) {
+    let ready_key = format!("{BRIEFING_READY_KEY_PREFIX}{}", task.id);
+    let ready = jeff.store.get_app_setting(&ready_key).ok().flatten();
+    if ready.as_deref() != Some(date_of(now).as_str())
+        || last_fired.as_deref() == Some(date_of(now).as_str())
+    {
         return;
     }
 
-    let inputs = gather_briefing_inputs(app, &jeff, task.id);
+    let inputs = gather_briefing_inputs(app, &jeff, task.id, now);
     let message = compose_briefing(&jeff.model_router, &inputs);
     if message.trim().is_empty() {
         return;
@@ -161,6 +189,7 @@ pub async fn maybe_fire_briefing<R: Runtime>(app: &AppHandle<R>) {
         let _ = jeff
             .store
             .set_app_setting(BRIEFING_LAST_FIRED_KEY, &date_of(now));
+        let _ = jeff.store.set_app_setting(&ready_key, "");
     }
 }
 
@@ -186,9 +215,11 @@ pub async fn maybe_fire_debrief<R: Runtime>(app: &AppHandle<R>) {
     };
     let now = now_unix();
     let hour = chrono::Local::now().hour();
-    let idle_seconds = last_activity_unix(&jeff.store, task.id)
+    let stored_idle_seconds = last_activity_unix(&jeff.store, task.id)
         .map(|last| now.saturating_sub(last))
         .unwrap_or(i64::MAX);
+    let situational = jeff.awareness_core.snapshot_immediate();
+    let idle_seconds = effective_debrief_idle_seconds(stored_idle_seconds, &situational);
     let last_fired = jeff
         .store
         .get_app_setting(DEBRIEF_LAST_FIRED_KEY)
@@ -212,7 +243,7 @@ pub async fn maybe_fire_debrief<R: Runtime>(app: &AppHandle<R>) {
         return;
     }
 
-    let inputs = gather_debrief_inputs(&jeff, task.id);
+    let inputs = gather_debrief_inputs(app, &jeff, task.id, now);
     let message = compose_debrief(&jeff.model_router, &inputs);
     if message.trim().is_empty() {
         return;
@@ -234,10 +265,16 @@ fn gather_briefing_inputs<R: Runtime>(
     app: &AppHandle<R>,
     jeff: &JeffState,
     task_id: i64,
+    now: i64,
 ) -> BriefingInputs {
     let calendar = app
         .try_state::<CalendarState>()
         .and_then(|state: tauri::State<'_, CalendarState>| state.current())
+        .filter(|event| {
+            event.minutes_until >= 0
+                && date_of(now.saturating_add(event.minutes_until.saturating_mul(60)))
+                    == date_of(now)
+        })
         .map(|event| format!("{} in {} minutes", event.title, event.minutes_until));
     let workload = workload::compute_workload_summary(&jeff.store)
         .map(|summary| {
@@ -248,7 +285,15 @@ fn gather_briefing_inputs<R: Runtime>(
             )
         })
         .unwrap_or_else(|_| "workload unavailable".to_string());
-    let facts = memory_facts(&jeff.store);
+    let facts = if jeff
+        .store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        memory_takeaways_for_date(&jeff.store, task_id, &date_offset(now, -1))
+    } else {
+        Vec::new()
+    };
     let pending_approvals = pending_approvals_count(&jeff.store, task_id);
     BriefingInputs {
         calendar,
@@ -258,15 +303,30 @@ fn gather_briefing_inputs<R: Runtime>(
     }
 }
 
-fn gather_debrief_inputs(jeff: &JeffState, task_id: i64) -> DebriefInputs {
-    let done_today = crate::memory::list_episodes(&jeff.store, task_id, 8)
+fn gather_debrief_inputs<R: Runtime>(
+    app: &AppHandle<R>,
+    jeff: &JeffState,
+    task_id: i64,
+    now: i64,
+) -> DebriefInputs {
+    let memory_enabled = jeff
+        .store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false);
+    let done_today = memory_enabled
+        .then(|| crate::memory::list_episodes(&jeff.store, task_id, 50))
+        .transpose()
+        .ok()
+        .flatten()
         .map(|episodes| {
             episodes
                 .into_iter()
                 .filter(|episode| {
-                    episode.kind == crate::memory::KIND_DECISION
-                        || episode.kind == crate::memory::KIND_PROPOSAL_OUTCOME
-                        || episode.kind == crate::memory::KIND_SESSION_SUMMARY
+                    local_date_of_sqlite(&episode.created_at).as_deref()
+                        == Some(date_of(now).as_str())
+                        && (episode.kind == crate::memory::KIND_DECISION
+                            || episode.kind == crate::memory::KIND_PROPOSAL_OUTCOME
+                            || episode.kind == crate::memory::KIND_SESSION_SUMMARY)
                 })
                 .map(|episode| episode.text)
                 .take(3)
@@ -274,7 +334,15 @@ fn gather_debrief_inputs(jeff: &JeffState, task_id: i64) -> DebriefInputs {
         })
         .unwrap_or_default();
     let pending_approvals = pending_approvals_count(&jeff.store, task_id);
-    let tomorrow_first = memory_facts(&jeff.store).into_iter().next();
+    let tomorrow = date_offset(now, 1);
+    let tomorrow_first = app
+        .try_state::<CalendarState>()
+        .and_then(|state: tauri::State<'_, CalendarState>| state.current())
+        .filter(|event| {
+            event.minutes_until >= 0
+                && date_of(now.saturating_add(event.minutes_until.saturating_mul(60))) == tomorrow
+        })
+        .map(|event| format!("{} in {} minutes", event.title, event.minutes_until));
     DebriefInputs {
         done_today,
         pending_approvals,
@@ -282,39 +350,91 @@ fn gather_debrief_inputs(jeff: &JeffState, task_id: i64) -> DebriefInputs {
     }
 }
 
-fn memory_facts(store: &TaskStore) -> Vec<String> {
-    consolidation::list_facts(store, 3)
-        .map(|facts| facts.into_iter().map(|fact| fact.text).collect())
+fn memory_takeaways_for_date(store: &TaskStore, task_id: i64, date: &str) -> Vec<String> {
+    crate::memory::list_episodes(store, task_id, 100)
+        .map(|episodes| {
+            episodes
+                .into_iter()
+                .filter(|episode| {
+                    local_date_of_sqlite(&episode.created_at).as_deref() == Some(date)
+                        && matches!(
+                            episode.kind.as_str(),
+                            crate::memory::KIND_DECISION
+                                | crate::memory::KIND_PROPOSAL_OUTCOME
+                                | crate::memory::KIND_SESSION_SUMMARY
+                                | crate::memory::KIND_DEADLINE_MENTION
+                        )
+                })
+                .map(|episode| episode.text)
+                .take(3)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 fn pending_approvals_count(store: &TaskStore, task_id: i64) -> usize {
-    store
+    let legacy = store
         .list_pending_file_write_proposals(task_id)
         .map(|proposals| proposals.len())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    let unified = store
+        .list_action_receipts(Some(task_id), 500)
+        .map(|receipts| {
+            receipts
+                .into_iter()
+                .filter(|receipt| receipt.status == "pending_approval")
+                .count()
+        })
+        .unwrap_or(0);
+    legacy.saturating_add(unified)
 }
 
 fn last_activity_unix(store: &TaskStore, task_id: i64) -> Option<i64> {
-    let messages = store.list_recent_chat_messages(task_id, 1).ok()?;
-    let latest = messages.first()?;
-    crate::awareness_core::parse_sqlite_datetime_to_unix(&latest.created_at)
+    let chat = store
+        .list_recent_chat_messages(task_id, 1)
+        .ok()
+        .and_then(|messages| messages.first().cloned())
+        .and_then(|latest| {
+            crate::awareness_core::parse_sqlite_datetime_to_unix(&latest.created_at)
+        });
+    let focus = store
+        .get_last_task_focus(task_id)
+        .ok()
+        .flatten()
+        .and_then(|value| crate::awareness_core::parse_sqlite_datetime_to_unix(&value));
+    [chat, focus].into_iter().flatten().max()
+}
+
+fn effective_debrief_idle_seconds(
+    stored_idle_seconds: i64,
+    snapshot: &crate::awareness_core::SituationalSnapshot,
+) -> i64 {
+    if snapshot.typing_active {
+        return 0;
+    }
+    snapshot
+        .content_idle_seconds
+        .map(i64::from)
+        .map(|content_idle| stored_idle_seconds.min(content_idle))
+        .unwrap_or(stored_idle_seconds)
 }
 
 // ---- composition -------------------------------------------------------------
 
 pub fn compose_briefing(router: &ModelRouter, inputs: &BriefingInputs) -> String {
-    match compose_briefing_model(router, inputs) {
-        Ok(message) if !message.trim().is_empty() => message.trim().to_string(),
+    let message = match compose_briefing_model(router, inputs) {
+        Ok(message) if ritual_output_is_valid(&message, true) => message.trim().to_string(),
         _ => deterministic_briefing(inputs),
-    }
+    };
+    enforce_ritual_output(&message)
 }
 
 pub fn compose_debrief(router: &ModelRouter, inputs: &DebriefInputs) -> String {
-    match compose_debrief_model(router, inputs) {
-        Ok(message) if !message.trim().is_empty() => message.trim().to_string(),
+    let message = match compose_debrief_model(router, inputs) {
+        Ok(message) if ritual_output_is_valid(&message, false) => message.trim().to_string(),
         _ => deterministic_debrief(inputs),
-    }
+    };
+    enforce_ritual_output(&message)
 }
 
 #[cfg(test)]
@@ -436,6 +556,54 @@ fn deterministic_debrief(inputs: &DebriefInputs) -> String {
     parts.join(" ")
 }
 
+fn enforce_ritual_output(message: &str) -> String {
+    let mut output = String::new();
+    let mut sentence_count = 0usize;
+    let mut word_count = 0usize;
+    for token in message.split_whitespace() {
+        if word_count >= 100 || sentence_count >= 4 {
+            break;
+        }
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        output.push_str(token);
+        word_count += 1;
+        if token.ends_with(['.', '?', '!']) {
+            sentence_count += 1;
+        }
+    }
+    output.trim().to_string()
+}
+
+fn ritual_output_is_valid(message: &str, enforce_single_offer: bool) -> bool {
+    let clean = message.trim();
+    if clean.is_empty() || clean.split_whitespace().count() > 100 {
+        return false;
+    }
+    if clean
+        .lines()
+        .any(|line| matches!(line.trim_start().chars().next(), Some('-' | '*' | '•')))
+    {
+        return false;
+    }
+    let sentences = clean.matches(['.', '?', '!']).count();
+    if sentences > 4 {
+        return false;
+    }
+    if enforce_single_offer {
+        let lower = clean.to_ascii_lowercase();
+        let offer_count = ["want me to", "shall i", "can i", "would you like me to"]
+            .iter()
+            .map(|phrase| lower.matches(phrase).count())
+            .sum::<usize>();
+        if offer_count > 1 {
+            return false;
+        }
+    }
+    true
+}
+
 // ---- helpers -----------------------------------------------------------------
 
 fn is_quiet<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -445,9 +613,27 @@ fn is_quiet<R: Runtime>(app: &AppHandle<R>) -> bool {
 }
 
 fn date_of(now: i64) -> String {
-    chrono::DateTime::from_timestamp(now, 0)
+    Local
+        .timestamp_opt(now, 0)
+        .single()
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_default()
+}
+
+fn date_offset(now: i64, days: i64) -> String {
+    Local
+        .timestamp_opt(now, 0)
+        .single()
+        .map(|dt| {
+            (dt.date_naive() + Duration::days(days))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+fn local_date_of_sqlite(value: &str) -> Option<String> {
+    crate::awareness_core::parse_sqlite_datetime_to_unix(value).map(date_of)
 }
 
 fn now_unix() -> i64 {
@@ -473,8 +659,24 @@ mod tests {
             Some(date_of(now).as_str()),
             now
         ));
-        // no prior activity (fresh) -> fire.
-        assert!(should_fire_briefing(None, None, now));
+        // no prior engagement is a fresh profile, not a return.
+        assert!(!should_fire_briefing(None, None, now));
+    }
+
+    #[test]
+    fn c3_briefing_becomes_ready_only_on_real_return_engagement() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        let task = store.create_task("ritual").unwrap();
+        let now = 20 * DAY;
+        note_user_engagement(&store, task.id, now - 7 * 3600);
+        let ready_key = format!("{BRIEFING_READY_KEY_PREFIX}{}", task.id);
+        assert!(store.get_app_setting(&ready_key).unwrap().is_none());
+        note_user_engagement(&store, task.id, now);
+        assert_eq!(
+            store.get_app_setting(&ready_key).unwrap().as_deref(),
+            Some(date_of(now).as_str())
+        );
     }
 
     #[test]
@@ -511,6 +713,22 @@ mod tests {
             Some(date_of(now).as_str()),
             now
         ));
+    }
+
+    #[test]
+    fn c3_debrief_idle_uses_live_typing_and_content_activity() {
+        let mut snapshot = crate::awareness_core::SituationalSnapshot::default();
+        snapshot.typing_active = true;
+        assert_eq!(
+            effective_debrief_idle_seconds(DEBRIEF_IDLE_SECONDS + 1, &snapshot),
+            0
+        );
+        snapshot.typing_active = false;
+        snapshot.content_idle_seconds = Some(30);
+        assert_eq!(
+            effective_debrief_idle_seconds(DEBRIEF_IDLE_SECONDS + 1, &snapshot),
+            30
+        );
     }
 
     #[test]
@@ -555,5 +773,25 @@ mod tests {
         assert!(message.contains("cut the intro"));
         assert!(message.contains("2 approvals"));
         assert!(message.contains("abstract due Friday"));
+    }
+
+    #[test]
+    fn c3_output_contract_is_enforced_after_generation() {
+        let message = (0..6)
+            .map(|index| format!("Sentence {index}."))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let limited = enforce_ritual_output(&message);
+        assert_eq!(limited.matches('.').count(), 4);
+        assert!(limited.split_whitespace().count() <= 100);
+        assert!(!ritual_output_is_valid("- Item one\n- Item two", true));
+        assert!(!ritual_output_is_valid(
+            "Want me to start? Can I also email them?",
+            true
+        ));
+        assert!(ritual_output_is_valid(
+            "The review is at two. Want me to prep the notes?",
+            true
+        ));
     }
 }

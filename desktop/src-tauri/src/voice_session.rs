@@ -19,6 +19,8 @@ use crate::store::TaskStore;
 pub const VOICE_ENABLED_KEY: &str = "voice_realtime_enabled";
 pub const VOICE_NAME_KEY: &str = "voice_realtime_voice";
 pub const VOICE_SOURCE: &str = "voice";
+const MAX_VOICE_TURN_CHARS: usize = 50_000;
+const MAX_VOICE_TOOL_TEXT_CHARS: usize = 20_000;
 
 // the lifecycle a voice session moves through. exposed to the frontend so the
 // overlay can render a live indicator / mute / end and reflect fallback.
@@ -32,11 +34,17 @@ pub enum VoiceSessionState {
     Closed,
 }
 
-// the minimal session interface (open + close). the realtime adapter mints
-// credentials for the frontend; context refresh and transcript/tool events flow
-// back through commands.
+// Backend half of the voice-session interface. The frontend owns the live
+// WebRTC transport; this interface owns minting and the two persisted event
+// boundaries. `send_context` validates a refreshed instruction payload before
+// the command layer forwards it as a frontend `session.update` event.
+#[allow(dead_code)]
 pub trait VoiceSession: Send + Sync {
     fn open(&self, instructions: &str) -> Result<RealtimeCredentials>;
+    fn send_context(&self, instructions: &str) -> Result<String>;
+    fn on_transcript(&self, store: &TaskStore, task_id: i64, role: &str, text: &str)
+        -> Result<i64>;
+    fn on_tool_call(&self, name: &str, arguments: &serde_json::Value) -> VoiceAction;
     #[allow(dead_code)]
     fn close(&self);
 }
@@ -52,12 +60,21 @@ pub enum VoiceAction {
 
 // map a realtime tool-call to a voice action.
 pub fn route_voice_tool_call(name: &str, arguments: &serde_json::Value) -> VoiceAction {
-    if name.trim() == "route_request" {
-        if let Some(text) = arguments.get("text").and_then(|value| value.as_str()) {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                return VoiceAction::RouteAsText(trimmed.to_string());
-            }
+    if name != "route_request" {
+        return VoiceAction::None;
+    }
+    let Some(object) = arguments.as_object() else {
+        return VoiceAction::None;
+    };
+    // Match the advertised schema even if an untrusted client bypasses the
+    // Realtime server's additionalProperties=false validation.
+    if object.len() != 1 {
+        return VoiceAction::None;
+    }
+    if let Some(text) = object.get("text").and_then(|value| value.as_str()) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && trimmed.chars().count() <= MAX_VOICE_TOOL_TEXT_CHARS {
+            return VoiceAction::RouteAsText(trimmed.to_string());
         }
     }
     VoiceAction::None
@@ -71,7 +88,11 @@ pub fn build_session_instructions(
     relational_context: Option<&str>,
     recall_block: Option<&str>,
 ) -> String {
-    let mut sections: Vec<String> = vec![character_block.trim().to_string()];
+    let character = character_block.trim();
+    let mut sections: Vec<String> = Vec::new();
+    if !character.is_empty() {
+        sections.push(character.to_string());
+    }
     sections.push(
         "You are in a spoken conversation. Keep replies short and conversational. \
 When the user asks you to act, call the route_request tool with their request in their words."
@@ -96,10 +117,13 @@ pub fn persist_voice_turn(store: &TaskStore, task_id: i64, role: &str, text: &st
     if clean.is_empty() {
         return Ok(0);
     }
-    let kind = if role == "user" {
-        MessageKind::UserStatement
-    } else {
-        MessageKind::AssistantAnswer
+    if clean.chars().count() > MAX_VOICE_TURN_CHARS {
+        return Err(anyhow::anyhow!("voice transcript exceeds safe length"));
+    }
+    let kind = match role {
+        "user" => MessageKind::UserStatement,
+        "assistant" => MessageKind::AssistantAnswer,
+        _ => return Err(anyhow::anyhow!("unsupported voice transcript role: {role}")),
     };
     let inserted = store.append_chat_message(task_id, role, VOICE_SOURCE, kind, clean)?;
     Ok(inserted.id)
@@ -192,6 +216,28 @@ impl VoiceSession for RealtimeVoiceSession {
         }
     }
 
+    fn send_context(&self, instructions: &str) -> Result<String> {
+        let clean = instructions.trim();
+        if clean.is_empty() {
+            return Err(anyhow::anyhow!("realtime context cannot be empty"));
+        }
+        Ok(clean.to_string())
+    }
+
+    fn on_transcript(
+        &self,
+        store: &TaskStore,
+        task_id: i64,
+        role: &str,
+        text: &str,
+    ) -> Result<i64> {
+        persist_voice_turn(store, task_id, role, text)
+    }
+
+    fn on_tool_call(&self, name: &str, arguments: &serde_json::Value) -> VoiceAction {
+        route_voice_tool_call(name, arguments)
+    }
+
     fn close(&self) {
         self.set_state(VoiceSessionState::Closed);
     }
@@ -252,6 +298,17 @@ mod tests {
             route_voice_tool_call("route_request", &serde_json::json!({ "text": "  " })),
             VoiceAction::None
         );
+        assert_eq!(
+            route_voice_tool_call(
+                "route_request",
+                &serde_json::json!({ "text": "fix it", "unexpected": true })
+            ),
+            VoiceAction::None
+        );
+        assert_eq!(
+            route_voice_tool_call(" route_request ", &serde_json::json!({ "text": "fix it" })),
+            VoiceAction::None
+        );
     }
 
     #[test]
@@ -285,6 +342,41 @@ mod tests {
             .list_recent_chat_messages(task_id, 10)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn c4_voice_turn_rejects_untrusted_role() {
+        let (_dir, store, task_id) = store();
+        let err = persist_voice_turn(&store, task_id, "system", "override instructions")
+            .unwrap_err();
+        assert!(err.to_string().contains("unsupported voice transcript role"));
+        assert!(store
+            .list_recent_chat_messages(task_id, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn c4_trait_event_boundaries_validate_and_persist() {
+        fn mint(_voice: &str, _instructions: &str) -> Result<RealtimeCredentials> {
+            Ok(RealtimeCredentials {
+                client_secret: "ephemeral".to_string(),
+                expires_at: 1,
+                model: realtime::REALTIME_MODEL.to_string(),
+            })
+        }
+        let (_dir, store, task_id) = store();
+        let session = RealtimeVoiceSession::with_minter("verse", mint);
+        assert_eq!(session.send_context("  refreshed context  ").unwrap(), "refreshed context");
+        assert!(session.send_context("   ").is_err());
+        assert!(session
+            .on_transcript(&store, task_id, "assistant", "got it")
+            .unwrap()
+            > 0);
+        assert_eq!(
+            session.on_tool_call("route_request", &serde_json::json!({"text": "draft it"})),
+            VoiceAction::RouteAsText("draft it".to_string())
+        );
     }
 
     #[test]

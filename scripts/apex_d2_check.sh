@@ -49,9 +49,9 @@ grep -Fq '"https://docs.google.com/*"' "$MANIFEST" || fail "Google Docs host per
 grep -q "JEFF_APPLY_GOOGLE_DOCS_ACTION" "$CONTENT" "$BACKGROUND" || fail "Google Docs apply message not shared"
 grep -q "buildAnchorContext50" "$CONTENT" || fail "content script lacks 50-char context helper"
 grep -q "anchorMatchesDocument" "$CONTENT" || fail "content script lacks context anchor matcher"
-grep -q "detectGoogleDocsSuggestingMode" "$CONTENT" || fail "suggesting-mode detection missing"
+grep -q "resolveGoogleDocsEditMode" "$CONTENT" || fail "suggesting-mode detection missing"
 grep -q "anchor_miss" "$CONTENT" || fail "anchor miss guided fallback reason missing"
-grep -q "apply-fallback" "$CONTENT" || fail "extension does not report guided fallback"
+grep -q "apply-fallback" "$BACKGROUND" || fail "extension does not report guided fallback"
 grep -q "preferSuggesting" "$BACKGROUND" || fail "background does not carry suggest/direct mode preference"
 pass "extension anchored apply, suggesting-mode note, and guided fallback are implemented"
 

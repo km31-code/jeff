@@ -82,14 +82,14 @@ import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
     cases = json.load(handle)
-if len(cases) < 8:
-    raise SystemExit("expected at least 8 crisis cases")
+if len(cases) < 17:
+    raise SystemExit("expected at least 17 crisis cases")
 ids = {case["id"] for case in cases}
 for required in ["x001_meeting_10m_fire", "x002_meeting_40m_no_fire", "x008_mass_deletion_fire"]:
     if required not in ids:
         raise SystemExit(f"missing {required}")
 classes = {case["class"] for case in cases}
-for required in ["meeting_imminent", "deadline_collision", "data_loss_risk"]:
+for required in ["meeting_imminent", "deadline_collision", "data_loss_risk", "awaited_reply_landed", "standing_job_critical"]:
     if required not in classes:
         raise SystemExit(f"missing class {required}")
 if not any(case["expected_fire"] for case in cases):
@@ -102,7 +102,7 @@ pass "crisis eval corpus covers seeded fire/no-fire cases"
 
 test -x "$HARNESS" || fail "scripts/crisis_eval.sh missing or not executable"
 CRISIS_OUT=$("$HARNESS" 2>&1)
-echo "$CRISIS_OUT" | grep -q "11/11 passed" || { echo "$CRISIS_OUT"; fail "crisis eval failed"; }
+echo "$CRISIS_OUT" | grep -q "17/17 passed" || { echo "$CRISIS_OUT"; fail "crisis eval failed"; }
 pass "crisis eval passes"
 
 # 6. compile, tests, frontend, and adjacent gates.
