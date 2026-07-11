@@ -1467,6 +1467,45 @@ export interface PrivacyCenterDashboardDto {
   content_observation_document_title: string | null;
   local_runtime: LocalRuntimeStatusDto;
   cost_governor: CostGovernorStatusDto;
+  speculation: SpeculationStatusDto;
+}
+
+export interface SpeculationStatusDto {
+  enabled: boolean;
+  spent_today_usd: number;
+  daily_budget_usd: number;
+  within_budget: boolean;
+  hit_rate: number;
+  predicted_count: number;
+  hit_count: number;
+  miss_count: number;
+  fresh_cached: number;
+}
+
+export interface SpeculationCacheDto {
+  id: number;
+  task_id: number;
+  request_text: string;
+  request_signature: string;
+  job_id: number | null;
+  status: string;
+  created_at: string;
+}
+
+export async function getSpeculationStatus(): Promise<SpeculationStatusDto> {
+  return invoke<SpeculationStatusDto>("get_speculation_status");
+}
+
+export async function setSpeculationEnabled(enabled: boolean): Promise<SpeculationStatusDto> {
+  return invoke<SpeculationStatusDto>("set_speculation_enabled", { enabled });
+}
+
+export async function listSpeculationCache(limit?: number): Promise<SpeculationCacheDto[]> {
+  return invoke<SpeculationCacheDto[]>("list_speculation_cache", { limit: limit ?? null });
+}
+
+export async function discardSpeculationCacheEntry(cacheId: number): Promise<void> {
+  await invoke("discard_speculation_cache_entry", { cacheId });
 }
 
 export interface WakeWordStatusDto {

@@ -137,6 +137,10 @@ import {
   ProactiveAuditEntryDto,
   SynthesisLogEntryDto,
   DataClearResultDto,
+  SpeculationCacheDto,
+  setSpeculationEnabled,
+  listSpeculationCache,
+  discardSpeculationCacheEntry,
   getPrivacyCenterDashboard,
   getInterruptionAudit,
   type InterruptionAuditDto,
@@ -413,6 +417,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   // phase 21: privacy and trust control center
   const [privacyCenterOpen, setPrivacyCenterOpen] = useState(false);
   const [privacyDashboard, setPrivacyDashboard] = useState<PrivacyCenterDashboardDto | null>(null);
+  const [speculationCache, setSpeculationCache] = useState<SpeculationCacheDto[]>([]);
   const [interruptionAudit, setInterruptionAudit] = useState<InterruptionAuditDto | null>(null);
   const [debriefEnabled, setDebriefEnabledState] = useState(false);
   const [voiceEnabled, setVoiceEnabledState] = useState(false);
@@ -1148,15 +1153,18 @@ function App({ onCloseWorkspace }: AppProps = {}) {
 
   async function refreshPrivacyCenter() {
     try {
-      const [dashboard, bridgeStatus, profile, audit, debrief, voiceConfig] = await Promise.all([
-        getPrivacyCenterDashboard(),
-        getSelectionBridgeStatus(),
-        getRelationalProfile(),
-        getInterruptionAudit().catch(() => null),
-        getDebriefEnabled().catch(() => false),
-        getVoiceConfig().catch(() => null)
-      ]);
+      const [dashboard, bridgeStatus, profile, audit, debrief, voiceConfig, speculation] =
+        await Promise.all([
+          getPrivacyCenterDashboard(),
+          getSelectionBridgeStatus(),
+          getRelationalProfile(),
+          getInterruptionAudit().catch(() => null),
+          getDebriefEnabled().catch(() => false),
+          getVoiceConfig().catch(() => null),
+          listSpeculationCache(8).catch(() => [])
+        ]);
       setPrivacyDashboard(dashboard);
+      setSpeculationCache(speculation);
       setSelectionBridgeStatus(bridgeStatus);
       setRelationalProfile(profile);
       setInterruptionAudit(audit);
@@ -2690,6 +2698,24 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       await refreshActionCenterState(activeTask.id);
     } catch (error) {
       setOperationError("Failed to run due standing jobs", error);
+    }
+  }
+
+  async function handleToggleSpeculation(enabled: boolean) {
+    try {
+      const status = await setSpeculationEnabled(enabled);
+      setPrivacyDashboard((current) => (current ? { ...current, speculation: status } : current));
+    } catch (error) {
+      setOperationError("Failed to update speculation", error);
+    }
+  }
+
+  async function handleDiscardSpeculation(cacheId: number) {
+    try {
+      await discardSpeculationCacheEntry(cacheId);
+      setSpeculationCache((current) => current.filter((entry) => entry.id !== cacheId));
+    } catch (error) {
+      setOperationError("Failed to discard speculation", error);
     }
   }
 
@@ -4325,6 +4351,52 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                                   revert
                                 </button>
                               ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      </li>
+
+                      <li data-testid="privacy-surface-speculation">
+                        <label className="toggle-row">
+                          <span>Speculation</span>
+                          <input
+                            type="checkbox"
+                            checked={privacyDashboard.speculation.enabled}
+                            onChange={(event) =>
+                              void handleToggleSpeculation(event.target.checked)
+                            }
+                            data-testid="privacy-toggle-speculation"
+                          />
+                        </label>
+                        <p className="task-meta">
+                          When you are working but not talking to Jeff, it precomputes the likely
+                          next request as a read-only job. Speculative work can never make changes.
+                        </p>
+                        <p className="task-meta" data-testid="speculation-stats">
+                          Spend today: ${privacyDashboard.speculation.spent_today_usd.toFixed(2)} of $
+                          {privacyDashboard.speculation.daily_budget_usd.toFixed(2)}; hit rate{" "}
+                          {(privacyDashboard.speculation.hit_rate * 100).toFixed(0)}% (
+                          {privacyDashboard.speculation.hit_count}/
+                          {privacyDashboard.speculation.hit_count +
+                            privacyDashboard.speculation.miss_count}
+                          ); {privacyDashboard.speculation.fresh_cached} cached
+                        </p>
+                        <div className="compact-list" data-testid="speculation-cache-list">
+                          {speculationCache.map((entry) => (
+                            <div className="action-receipt-row" key={entry.id}>
+                              <div>
+                                <strong>#{entry.id}</strong>
+                                <p className="task-meta">
+                                  {entry.status}; {entry.request_text}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => void handleDiscardSpeculation(entry.id)}
+                                data-testid="speculation-discard"
+                              >
+                                discard
+                              </button>
                             </div>
                           ))}
                         </div>

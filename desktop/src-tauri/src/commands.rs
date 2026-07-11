@@ -26,6 +26,7 @@ use crate::{
         RetrievedChunkDto, RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto,
         RevisionTargetDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
         SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
+        SpeculationCacheDto, SpeculationServeResultDto, SpeculationStatusDto,
         StandingJobDto, SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto,
         SuggestionDto, SuggestionEvaluationDto, SynthesisLogEntryDto, TaskContextPackDto, TaskDto,
         TaskSummaryDto, TranscriptionResultDto, TrustLevelDto, UserProfileSignalDto,
@@ -1426,6 +1427,47 @@ pub fn set_standing_job_enabled(
 ) -> Result<StandingJobDto, String> {
     crate::agent_runtime::set_standing_job_enabled(&state.store, standing_job_id, enabled)
         .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn get_speculation_status(
+    state: State<'_, JeffState>,
+) -> Result<SpeculationStatusDto, String> {
+    crate::speculation::speculation_status(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn set_speculation_enabled(
+    state: State<'_, JeffState>,
+    enabled: bool,
+) -> Result<SpeculationStatusDto, String> {
+    crate::speculation::set_enabled(&state.store, enabled).map_err(map_jeff_error)?;
+    crate::speculation::speculation_status(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_speculation_cache(
+    state: State<'_, JeffState>,
+    limit: Option<usize>,
+) -> Result<Vec<SpeculationCacheDto>, String> {
+    crate::speculation::list_speculation_cache(&state.store, limit.unwrap_or(50))
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn discard_speculation_cache_entry(
+    state: State<'_, JeffState>,
+    cache_id: i64,
+) -> Result<(), String> {
+    crate::speculation::discard_speculation_entry(&state.store, cache_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn serve_speculation(
+    state: State<'_, JeffState>,
+    request: String,
+) -> Result<Option<SpeculationServeResultDto>, String> {
+    crate::speculation::serve_speculation(&state.store, &request).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -2909,6 +2951,7 @@ fn build_privacy_center_dashboard(
             .and_then(|g| g.source_title.clone()),
         local_runtime: state.local_runtime.status(),
         cost_governor: crate::cost_governor::status(&state.store).map_err(map_jeff_error)?,
+        speculation: crate::speculation::speculation_status(&state.store).map_err(map_jeff_error)?,
     })
 }
 

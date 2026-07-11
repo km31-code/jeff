@@ -41,6 +41,7 @@ mod revision;
 mod secrets;
 mod selection_capture;
 mod similarity;
+mod speculation;
 mod state;
 mod store;
 mod streaming;
@@ -747,6 +748,47 @@ fn main() {
                 });
             }
 
+            // apex d8: speculation scheduler (~10-minute cadence). when the user
+            // is unengaged with Jeff (no recent chat) but working, predicts the
+            // likely next request and runs it as a read-only speculative job so
+            // the answer is precomputed. gated by the speculation toggle, idle
+            // window, the dedicated speculation sub-budget, and a daily cap;
+            // speculative jobs cannot mutate (enforced in agent_runtime).
+            {
+                let speculation_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(10 * 60)).await;
+                        let quiet = speculation_handle
+                            .try_state::<AmbientState>()
+                            .map(|s| s.is_quiet_mode())
+                            .unwrap_or(false);
+                        if quiet {
+                            continue;
+                        }
+                        if let Some(state) = speculation_handle.try_state::<JeffState>() {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0);
+                            match speculation::maybe_run_for_active_task(
+                                &state.store,
+                                &state.model_router,
+                                now,
+                            ) {
+                                Ok(Some(cache_id)) => {
+                                    eprintln!("[jeff] speculation precomputed cache entry {cache_id}");
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    eprintln!("[jeff] speculation tick failed: {err:#}");
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
             // phase 19: fire a one-time native notification on the very first
             // session so users who enabled launch-at-login know jeff is running
             // in the tray without needing to look for it.
@@ -853,6 +895,11 @@ fn main() {
             commands::list_standing_jobs,
             commands::run_due_standing_jobs,
             commands::set_standing_job_enabled,
+            commands::get_speculation_status,
+            commands::set_speculation_enabled,
+            commands::list_speculation_cache,
+            commands::discard_speculation_cache_entry,
+            commands::serve_speculation,
             commands::evaluate_next_suggestions,
             commands::list_suggestions,
             commands::accept_suggestion,
@@ -1070,7 +1117,17 @@ async fn spawn_content_observation_poll(handle: tauri::AppHandle) {
         // summary crosses back out.
         let doc_summary = match text_opt.as_ref() {
             Some(text) => jeff_state.document_model.lock().ok().and_then(|mut dm| {
-                let _delta = dm.observe(task_id, text, jeff_state.embeddings.as_ref());
+                let delta = dm.observe(task_id, text, jeff_state.embeddings.as_ref());
+                // apex d8: a meaningful document delta invalidates precomputed
+                // speculation for this task -- the cached answer may no longer
+                // match the document.
+                if delta.structure_changed
+                    || !delta.added.is_empty()
+                    || !delta.removed.is_empty()
+                    || !delta.rewritten.is_empty()
+                {
+                    let _ = speculation::invalidate_for_task(&jeff_state.store, task_id);
+                }
                 dm.state(task_id)
             }),
             None => None,

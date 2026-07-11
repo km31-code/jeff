@@ -101,6 +101,31 @@ pub fn tool_registry_v1() -> Vec<ToolSpec> {
     ]
 }
 
+// apex d8: the read-only tool set carried by speculative jobs. speculation is
+// preparation for predicted requests, never autonomous action -- a speculative
+// job may only read.
+pub fn speculative_tool_registry() -> Vec<ToolSpec> {
+    tool_registry_v1()
+        .into_iter()
+        .filter(|tool| tool.read_only)
+        .collect()
+}
+
+// apex d8 invariant (Part IV): nothing running under the speculation scheduler
+// may issue an Action Bus mutation, at any trust level. This is the runtime
+// enforcement boundary -- callers that would route a job's action through the
+// bus must clear it here first. Speculative jobs are rejected unconditionally.
+pub fn guard_speculative_action(job: &AgentJobDto, action_class: &str) -> Result<()> {
+    if job.speculative {
+        return Err(anyhow!(
+            "speculative jobs are read-only: action '{}' rejected for job {}",
+            action_class,
+            job.id
+        ));
+    }
+    Ok(())
+}
+
 pub fn create_and_run_job(
     store: &TaskStore,
     task_id: i64,
@@ -693,11 +718,19 @@ fn parse_budget(raw: Option<&str>) -> Result<JobBudget> {
 }
 
 fn build_plan_json(goal_contract: &str, speculative: bool) -> serde_json::Value {
+    // apex d8: speculative jobs advertise only the read-only registry, so the
+    // scheduler boundary never hands them a mutating tool.
+    let tool_registry = if speculative {
+        speculative_tool_registry()
+    } else {
+        tool_registry_v1()
+    };
     serde_json::json!({
         "loop": JOB_PHASES,
         "goal_contract": goal_contract,
         "speculative": speculative,
-        "tool_registry": tool_registry_v1(),
+        "read_only": speculative,
+        "tool_registry": tool_registry,
         "router_tool_use": ROUTER_TOOL_CALL_PASSTHROUGH,
         "verification_required": true,
         "delivery_contract": "assessment_first_card_with_action_bus_placement_proposal"
@@ -1626,5 +1659,36 @@ mod tests {
         let details = run_due_standing_jobs(&store, Some("citation_guard")).unwrap();
         assert_eq!(details.len(), 1);
         assert_eq!(details[0].job.status, JOB_STATUS_COMPLETED);
+    }
+
+    #[test]
+    fn d8_speculative_job_is_read_only_and_rejects_mutations() {
+        let (_dir, store) = store();
+        let task = store.create_task("d8 speculative").unwrap();
+
+        // the speculative registry drops every mutating tool.
+        assert!(speculative_tool_registry().iter().all(|tool| tool.read_only));
+        assert!(speculative_tool_registry().len() < tool_registry_v1().len());
+
+        let job = create_job(&store, task.id, "Prep the methods answer.", None, true).unwrap();
+        assert!(job.speculative);
+        // runtime guard rejects any mutation class at any trust level.
+        for class in ["file.write", "doc.suggest", "doc.replace", "email.draft"] {
+            assert!(
+                guard_speculative_action(&job, class).is_err(),
+                "speculative job must reject {class}"
+            );
+        }
+
+        // a non-speculative job is unaffected.
+        let normal = create_job(&store, task.id, "Real job.", None, false).unwrap();
+        assert!(guard_speculative_action(&normal, "file.write").is_ok());
+
+        // the run plan advertises only the read-only registry.
+        let detail = run_job_to_completion(&store, job.id).unwrap();
+        assert_eq!(detail.job.status, JOB_STATUS_COMPLETED);
+        assert!(detail.job.plan_json.contains("\"read_only\":true"));
+        assert!(!detail.job.plan_json.contains(TOOL_FILE_PROPOSAL_BUS));
+        assert!(!detail.job.plan_json.contains(TOOL_ACTION_PROPOSAL_BUS));
     }
 }

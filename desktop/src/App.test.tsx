@@ -219,6 +219,7 @@ type PrivacyCenterDashboardDto = {
   content_observation_document_title: string | null;
   local_runtime: LocalRuntimeStatusDto;
   cost_governor: CostGovernorStatusDto;
+  speculation: SpeculationStatusDto;
 };
 
 type ActionReceiptDto = {
@@ -307,6 +308,18 @@ type CostGovernorStatusDto = {
   tiers: CostTierSpendDto[];
   history: Array<{ date: string; total_usd: number }>;
   last_notice: string | null;
+};
+
+type SpeculationStatusDto = {
+  enabled: boolean;
+  spent_today_usd: number;
+  daily_budget_usd: number;
+  within_budget: boolean;
+  hit_rate: number;
+  predicted_count: number;
+  hit_count: number;
+  miss_count: number;
+  fresh_cached: number;
 };
 
 type CostTierSpendDto = {
@@ -624,7 +637,18 @@ function setupInvokeMock(options?: {
     content_observation_source_origin: null,
     content_observation_document_title: null,
     local_runtime: localRuntimeStatus,
-    cost_governor: costGovernorStatus
+    cost_governor: costGovernorStatus,
+    speculation: {
+      enabled: true,
+      spent_today_usd: 0,
+      daily_budget_usd: 3,
+      within_budget: true,
+      hit_rate: 0,
+      predicted_count: 0,
+      hit_count: 0,
+      miss_count: 0,
+      fresh_cached: 0
+    }
   };
   let relationalProfile: RelationalProfileDto = {
     stated_goals: [],
@@ -870,6 +894,22 @@ function setupInvokeMock(options?: {
 
     if (command === "get_local_runtime_status") {
       return { ...privacyDashboard.local_runtime };
+    }
+
+    if (command === "list_speculation_cache") {
+      return [];
+    }
+
+    if (command === "set_speculation_enabled") {
+      privacyDashboard = {
+        ...privacyDashboard,
+        speculation: { ...privacyDashboard.speculation, enabled: Boolean(args?.enabled) }
+      };
+      return { ...privacyDashboard.speculation };
+    }
+
+    if (command === "discard_speculation_cache_entry") {
+      return null;
     }
 
     if (command === "get_cost_governor_status") {

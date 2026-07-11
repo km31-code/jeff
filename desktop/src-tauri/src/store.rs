@@ -680,6 +680,33 @@ impl TaskStore {
                 ON standing_jobs(enabled, trigger_kind, next_run_at, id ASC);
             CREATE INDEX IF NOT EXISTS idx_standing_jobs_task
                 ON standing_jobs(task_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS speculation_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                request_signature TEXT NOT NULL,
+                request_text TEXT NOT NULL,
+                job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+                artifact_json TEXT,
+                status TEXT NOT NULL DEFAULT 'fresh',
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                invalidated_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_speculation_cache_sig
+                ON speculation_cache(request_signature, status, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_speculation_cache_task
+                ON speculation_cache(task_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS speculation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                request_signature TEXT,
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_speculation_events_kind
+                ON speculation_events(kind, id DESC);
             "#,
             now = SQLITE_NOW_EXPR,
             embedding_model = crate::providers::OPENAI_EMBEDDING_MODEL_ID,
@@ -5271,8 +5298,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 43,
-            "expected 43 application tables after apex d6 (added job checkpoints, steering, and standing jobs)"
+            count, 45,
+            "expected 45 application tables after apex d8 (added speculation_cache and speculation_events)"
         );
     }
 

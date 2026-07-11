@@ -369,6 +369,38 @@ pub struct StandingJobDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SpeculationCacheDto {
+    pub id: i64,
+    pub task_id: i64,
+    pub request_text: String,
+    pub request_signature: String,
+    pub job_id: Option<i64>,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SpeculationStatusDto {
+    pub enabled: bool,
+    pub spent_today_usd: f64,
+    pub daily_budget_usd: f64,
+    pub within_budget: bool,
+    pub hit_rate: f32,
+    pub predicted_count: i64,
+    pub hit_count: i64,
+    pub miss_count: i64,
+    pub fresh_cached: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SpeculationServeResultDto {
+    pub request_text: String,
+    pub artifact_json: Option<String>,
+    pub precomputed: bool,
+    pub cache_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubTaskSuggestionDto {
     pub task_id: i64,
     pub title: String,
@@ -688,6 +720,8 @@ pub struct PrivacyCenterDashboardDto {
     pub local_runtime: LocalRuntimeStatusDto,
     // apex a4: spend metering and budget status.
     pub cost_governor: CostGovernorStatusDto,
+    // apex d8: speculation scheduler status (enabled, spend, hit rate).
+    pub speculation: SpeculationStatusDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
