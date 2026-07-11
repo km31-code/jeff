@@ -1508,6 +1508,62 @@ export async function discardSpeculationCacheEntry(cacheId: number): Promise<voi
   await invoke("discard_speculation_cache_entry", { cacheId });
 }
 
+export interface CapabilityGapDto {
+  id: number;
+  surface: string;
+  description: string;
+  occurrence_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomToolDto {
+  id: number;
+  name: string;
+  kind: string;
+  purpose: string;
+  target_allowlist: string[];
+  code: string;
+  test_transcript: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface CustomToolRunResultDto {
+  status: string;
+  output: string | null;
+  message: string;
+  receipt_id: number | null;
+}
+
+export async function listCapabilityGaps(): Promise<CapabilityGapDto[]> {
+  return invoke<CapabilityGapDto[]>("list_capability_gaps");
+}
+
+export async function listCustomTools(): Promise<CustomToolDto[]> {
+  return invoke<CustomToolDto[]>("list_custom_tools");
+}
+
+export async function proposeCustomTool(gapId: number): Promise<CustomToolDto> {
+  return invoke<CustomToolDto>("propose_custom_tool", { gapId });
+}
+
+export async function approveCustomTool(toolId: number): Promise<CustomToolDto> {
+  return invoke<CustomToolDto>("approve_custom_tool", { toolId });
+}
+
+export async function killCustomTool(toolId: number): Promise<CustomToolDto> {
+  return invoke<CustomToolDto>("kill_custom_tool", { toolId });
+}
+
+export async function runCustomTool(
+  taskId: number,
+  name: string,
+  input: string
+): Promise<CustomToolRunResultDto> {
+  return invoke<CustomToolRunResultDto>("run_custom_tool", { taskId, name, input });
+}
+
 export interface WakeWordStatusDto {
   enabled: boolean;
   configured: boolean;

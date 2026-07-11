@@ -16,8 +16,9 @@ use crate::{
     models::{
         ActionReceiptDto, ActiveWindowContextDto, AgentJobDetailDto, AgentJobDto,
         ApiKeyValidationDto, ArtifactContentDto, ArtifactDto, ArtifactVersionDto,
-        BrowserSelectionCaptureRequestDto, CalendarEventDto, ChatMessageDto,
-        ConsolidationReportDto, CostGovernorStatusDto, CoworkingStatusDto, DataClearResultDto,
+        BrowserSelectionCaptureRequestDto, CalendarEventDto, CapabilityGapDto, ChatMessageDto,
+        ConsolidationReportDto, CostGovernorStatusDto, CoworkingStatusDto, CustomToolDto,
+        CustomToolRunResultDto, DataClearResultDto,
         DriftFlagDto, EpisodeDto, EpisodeSearchResultDto, EventLogEntryDto, FactDto,
         FileWriteProposalDto, IntentClassificationDto, IntentLabel, IntentSlotsDto,
         LiveEditReceiptDto, LocalRuntimeStatusDto, MemoryPromptPreviewDto, NativeDocsStatusDto,
@@ -1471,6 +1472,52 @@ pub fn serve_speculation(
 }
 
 #[tauri::command]
+pub fn list_capability_gaps(
+    state: State<'_, JeffState>,
+) -> Result<Vec<CapabilityGapDto>, String> {
+    crate::self_extend::list_capability_gaps(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_custom_tools(state: State<'_, JeffState>) -> Result<Vec<CustomToolDto>, String> {
+    crate::self_extend::list_custom_tools(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn propose_custom_tool(
+    state: State<'_, JeffState>,
+    gap_id: i64,
+) -> Result<CustomToolDto, String> {
+    crate::self_extend::propose_tool_for_gap(&state.store, gap_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn approve_custom_tool(
+    state: State<'_, JeffState>,
+    tool_id: i64,
+) -> Result<CustomToolDto, String> {
+    crate::self_extend::approve_custom_tool(&state.store, tool_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn kill_custom_tool(
+    state: State<'_, JeffState>,
+    tool_id: i64,
+) -> Result<CustomToolDto, String> {
+    crate::self_extend::kill_custom_tool(&state.store, tool_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn run_custom_tool(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    name: String,
+    input: String,
+) -> Result<CustomToolRunResultDto, String> {
+    crate::self_extend::run_custom_tool(&state.store, task_id, &name, &input).map_err(map_jeff_error)
+}
+
+#[tauri::command]
 pub fn cancel_subtask(state: State<'_, JeffState>, subtask_id: i64) -> Result<SubTaskDto, String> {
     cancel_subtask_by_id(&state.store, state.subtasks.as_ref(), subtask_id).map_err(map_jeff_error)
 }
@@ -2656,6 +2703,15 @@ pub fn request_native_doc_write<R: Runtime>(
         },
     )
     .map_err(map_jeff_error)?;
+    // apex d9: an unsupported native-doc app is a capability gap; recording it
+    // lets self-extension propose a tool once it recurs.
+    if receipt.surface == crate::native_docs::FALLBACK_UNSUPPORTED_SURFACE {
+        let _ = crate::self_extend::record_capability_gap(
+            &state.store,
+            &app_name,
+            crate::self_extend::GAP_REASON_UNSUPPORTED_SURFACE,
+        );
+    }
     let _ = app.emit(
         crate::selection_capture::EVENT_DOCUMENT_WRITE_APPLY_REQUESTED,
         serde_json::json!({

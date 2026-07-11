@@ -72,8 +72,9 @@ pass "file-write approval and rejection flow through the action bus"
 # fails this gate. Allowlist owns legitimate non-action i/o: the bus adapter and
 # undo cache (action_bus), model downloads (local_runtime), db/workspace/undo
 # management (store), the revision version store (revision), the transient
-# clipboard snippet (watcher), and the native scripting adapter (native_docs).
-MUTATION_ALLOWLIST="action_bus.rs local_runtime.rs store.rs revision.rs watcher.rs native_docs.rs"
+# clipboard snippet (watcher), the native scripting adapter (native_docs), and
+# the self-built tool staging/installed store (self_extend).
+MUTATION_ALLOWLIST="action_bus.rs local_runtime.rs store.rs revision.rs watcher.rs native_docs.rs self_extend.rs"
 MUTATION_RE='fs::write\(|fs::remove_(file|dir)|fs::rename\(|File::create\('
 for src_file in "$SRC"/*.rs; do
   base=$(basename "$src_file")

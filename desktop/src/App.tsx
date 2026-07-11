@@ -141,6 +141,13 @@ import {
   setSpeculationEnabled,
   listSpeculationCache,
   discardSpeculationCacheEntry,
+  CapabilityGapDto,
+  CustomToolDto,
+  listCapabilityGaps,
+  listCustomTools,
+  proposeCustomTool,
+  approveCustomTool,
+  killCustomTool,
   getPrivacyCenterDashboard,
   getInterruptionAudit,
   type InterruptionAuditDto,
@@ -418,6 +425,8 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [privacyCenterOpen, setPrivacyCenterOpen] = useState(false);
   const [privacyDashboard, setPrivacyDashboard] = useState<PrivacyCenterDashboardDto | null>(null);
   const [speculationCache, setSpeculationCache] = useState<SpeculationCacheDto[]>([]);
+  const [capabilityGaps, setCapabilityGaps] = useState<CapabilityGapDto[]>([]);
+  const [customTools, setCustomTools] = useState<CustomToolDto[]>([]);
   const [interruptionAudit, setInterruptionAudit] = useState<InterruptionAuditDto | null>(null);
   const [debriefEnabled, setDebriefEnabledState] = useState(false);
   const [voiceEnabled, setVoiceEnabledState] = useState(false);
@@ -1153,7 +1162,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
 
   async function refreshPrivacyCenter() {
     try {
-      const [dashboard, bridgeStatus, profile, audit, debrief, voiceConfig, speculation] =
+      const [dashboard, bridgeStatus, profile, audit, debrief, voiceConfig, speculation, gaps, tools] =
         await Promise.all([
           getPrivacyCenterDashboard(),
           getSelectionBridgeStatus(),
@@ -1161,10 +1170,14 @@ function App({ onCloseWorkspace }: AppProps = {}) {
           getInterruptionAudit().catch(() => null),
           getDebriefEnabled().catch(() => false),
           getVoiceConfig().catch(() => null),
-          listSpeculationCache(8).catch(() => [])
+          listSpeculationCache(8).catch(() => []),
+          listCapabilityGaps().catch(() => []),
+          listCustomTools().catch(() => [])
         ]);
       setPrivacyDashboard(dashboard);
       setSpeculationCache(speculation);
+      setCapabilityGaps(gaps);
+      setCustomTools(tools);
       setSelectionBridgeStatus(bridgeStatus);
       setRelationalProfile(profile);
       setInterruptionAudit(audit);
@@ -2716,6 +2729,33 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setSpeculationCache((current) => current.filter((entry) => entry.id !== cacheId));
     } catch (error) {
       setOperationError("Failed to discard speculation", error);
+    }
+  }
+
+  async function handleProposeCustomTool(gapId: number) {
+    try {
+      const tool = await proposeCustomTool(gapId);
+      setCustomTools((current) => [tool, ...current.filter((t) => t.id !== tool.id)]);
+    } catch (error) {
+      setOperationError("Failed to propose tool", error);
+    }
+  }
+
+  async function handleApproveCustomTool(toolId: number) {
+    try {
+      const tool = await approveCustomTool(toolId);
+      setCustomTools((current) => current.map((t) => (t.id === tool.id ? tool : t)));
+    } catch (error) {
+      setOperationError("Failed to approve tool", error);
+    }
+  }
+
+  async function handleKillCustomTool(toolId: number) {
+    try {
+      const tool = await killCustomTool(toolId);
+      setCustomTools((current) => current.map((t) => (t.id === tool.id ? tool : t)));
+    } catch (error) {
+      setOperationError("Failed to kill tool", error);
     }
   }
 
@@ -4397,6 +4437,66 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                               >
                                 discard
                               </button>
+                            </div>
+                          ))}
+                        </div>
+                      </li>
+
+                      <li data-testid="privacy-surface-self-extend">
+                        <label className="toggle-row">
+                          <span>Self-built tools</span>
+                        </label>
+                        <p className="task-meta">
+                          When Jeff hits a capability wall repeatedly, it can propose a tool.
+                          Self-built tools are propose-only (capped at L1) and individually killable.
+                        </p>
+                        <div className="compact-list" data-testid="capability-gap-list">
+                          {capabilityGaps.slice(0, 6).map((gap) => (
+                            <div className="action-receipt-row" key={gap.id}>
+                              <div>
+                                <strong>{gap.surface}</strong>
+                                <p className="task-meta">
+                                  {gap.description}; seen {gap.occurrence_count}x
+                                </p>
+                              </div>
+                              {gap.occurrence_count >= 2 ? (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleProposeCustomTool(gap.id)}
+                                  data-testid="capability-gap-propose"
+                                >
+                                  propose tool
+                                </button>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                        <div className="compact-list" data-testid="custom-tool-list">
+                          {customTools.slice(0, 6).map((tool) => (
+                            <div className="action-receipt-row" key={tool.id}>
+                              <div>
+                                <strong>#{tool.id} {tool.name}</strong>
+                                <p className="task-meta">
+                                  {tool.kind}; L1; {tool.status}; {tool.purpose}
+                                </p>
+                              </div>
+                              {tool.status === "staged" ? (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleApproveCustomTool(tool.id)}
+                                  data-testid="custom-tool-approve"
+                                >
+                                  approve
+                                </button>
+                              ) : tool.status === "installed" ? (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleKillCustomTool(tool.id)}
+                                  data-testid="custom-tool-kill"
+                                >
+                                  kill
+                                </button>
+                              ) : null}
                             </div>
                           ))}
                         </div>

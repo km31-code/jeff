@@ -900,6 +900,14 @@ function setupInvokeMock(options?: {
       return [];
     }
 
+    if (command === "list_capability_gaps") {
+      return [];
+    }
+
+    if (command === "list_custom_tools") {
+      return [];
+    }
+
     if (command === "set_speculation_enabled") {
       privacyDashboard = {
         ...privacyDashboard,

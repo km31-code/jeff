@@ -228,6 +228,21 @@ impl TaskStore {
             .join("undo")
     }
 
+    // apex d9: root for self-built tool staging/installed directories.
+    pub fn custom_tools_root(&self) -> PathBuf {
+        self.paths
+            .db_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.paths.workspace_root.clone())
+            .join("tools")
+    }
+
+    // apex d9: the workspace root confines self-built text-script execution.
+    pub fn workspace_root_path(&self) -> PathBuf {
+        self.paths.workspace_root.clone()
+    }
+
     fn initialize_schema(&self) -> Result<()> {
         let conn = self.connect()?;
         conn.execute_batch(&format!(
@@ -707,6 +722,37 @@ impl TaskStore {
 
             CREATE INDEX IF NOT EXISTS idx_speculation_events_kind
                 ON speculation_events(kind, id DESC);
+
+            CREATE TABLE IF NOT EXISTS capability_gaps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                surface TEXT NOT NULL,
+                description TEXT NOT NULL,
+                occurrence_count INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                updated_at TEXT NOT NULL DEFAULT ({now}),
+                UNIQUE(surface, description)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_capability_gaps_count
+                ON capability_gaps(occurrence_count DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS custom_tools (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                target_allowlist_json TEXT NOT NULL DEFAULT '[]',
+                spec_json TEXT NOT NULL,
+                code TEXT NOT NULL,
+                test_transcript TEXT,
+                status TEXT NOT NULL DEFAULT 'staged',
+                gap_id INTEGER REFERENCES capability_gaps(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_custom_tools_status
+                ON custom_tools(status, id DESC);
             "#,
             now = SQLITE_NOW_EXPR,
             embedding_model = crate::providers::OPENAI_EMBEDDING_MODEL_ID,
@@ -5298,8 +5344,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 45,
-            "expected 45 application tables after apex d8 (added speculation_cache and speculation_events)"
+            count, 47,
+            "expected 47 application tables after apex d9 (added capability_gaps and custom_tools)"
         );
     }
 

@@ -40,6 +40,7 @@ mod retrieval;
 mod revision;
 mod secrets;
 mod selection_capture;
+mod self_extend;
 mod similarity;
 mod speculation;
 mod state;
@@ -900,6 +901,12 @@ fn main() {
             commands::list_speculation_cache,
             commands::discard_speculation_cache_entry,
             commands::serve_speculation,
+            commands::list_capability_gaps,
+            commands::list_custom_tools,
+            commands::propose_custom_tool,
+            commands::approve_custom_tool,
+            commands::kill_custom_tool,
+            commands::run_custom_tool,
             commands::evaluate_next_suggestions,
             commands::list_suggestions,
             commands::accept_suggestion,

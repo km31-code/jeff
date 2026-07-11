@@ -401,6 +401,37 @@ pub struct SpeculationServeResultDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CapabilityGapDto {
+    pub id: i64,
+    pub surface: String,
+    pub description: String,
+    pub occurrence_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustomToolDto {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub purpose: String,
+    pub target_allowlist: Vec<String>,
+    pub code: String,
+    pub test_transcript: Option<String>,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustomToolRunResultDto {
+    pub status: String,
+    pub output: Option<String>,
+    pub message: String,
+    pub receipt_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubTaskSuggestionDto {
     pub task_id: i64,
     pub title: String,
