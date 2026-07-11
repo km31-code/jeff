@@ -78,7 +78,8 @@ import {
   validateOpenAiApiKey,
   startVoiceSession,
   persistVoiceTranscript,
-  handleVoiceToolCall
+  handleVoiceToolCall,
+  setInferenceMode
 } from "./tauriClient";
 import { connectRealtimeVoice, type RealtimeConnection } from "./voiceRealtime";
 
@@ -2359,6 +2360,21 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                       Cancel
                     </button>
                   </div>
+                  <p className="overlay-meta">
+                    No key? Use bundled inference — Jeff provides metered access, no key entry.
+                  </p>
+                  <button
+                    type="button"
+                    className="overlay-secondary"
+                    data-testid="onboarding-inference-bundled"
+                    disabled={onboardingBusy}
+                    onClick={() => {
+                      void setInferenceMode("bundled");
+                      setOnboardingStep(3);
+                    }}
+                  >
+                    Use bundled inference (no key)
+                  </button>
                 </div>
               ) : null}
 

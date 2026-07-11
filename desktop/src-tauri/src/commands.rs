@@ -198,11 +198,26 @@ pub fn get_onboarding_status(state: State<'_, JeffState>) -> Result<OnboardingSt
         has_stored_api_key: resolved.api_key.is_some(),
         api_key_source: resolved.source.to_string(),
         preferred_workspace_folder,
+        inference_mode: crate::onboarding::get_inference_mode(&state.store),
+        bundled_inference_configured: crate::onboarding::bundled_inference_configured(&state.store),
     })
 }
 
 #[tauri::command]
+pub fn set_inference_mode(state: State<'_, JeffState>, mode: String) -> Result<(), String> {
+    crate::onboarding::set_inference_mode(&state.store, &mode).map_err(map_jeff_error)
+}
+
+#[tauri::command]
 pub fn complete_onboarding(state: State<'_, JeffState>) -> Result<(), String> {
+    // apex e6: onboarding completes with a key (byok) or with bundled inference
+    // chosen (no key entry). Guard so a half-configured setup can't complete.
+    let has_key = crate::secrets::resolve_openai_api_key().api_key.is_some();
+    if !crate::onboarding::onboarding_ready(&state.store, has_key) {
+        return Err(
+            "onboarding needs an API key or the bundled inference option".to_string(),
+        );
+    }
     state
         .store
         .set_onboarding_complete(true)

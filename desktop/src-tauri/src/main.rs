@@ -937,6 +937,7 @@ fn main() {
             commands::ingest_remote_doc,
             commands::list_remote_docs,
             commands::remove_remote_doc,
+            commands::set_inference_mode,
             commands::evaluate_next_suggestions,
             commands::list_suggestions,
             commands::accept_suggestion,

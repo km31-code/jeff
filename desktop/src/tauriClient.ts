@@ -451,6 +451,12 @@ export interface OnboardingStatusDto {
   has_stored_api_key: boolean;
   api_key_source: "keychain" | "env" | "none" | string;
   preferred_workspace_folder: string | null;
+  inference_mode: "bundled" | "byok" | string;
+  bundled_inference_configured: boolean;
+}
+
+export async function setInferenceMode(mode: "bundled" | "byok"): Promise<void> {
+  await invoke("set_inference_mode", { mode });
 }
 
 export interface ApiKeyValidationDto {

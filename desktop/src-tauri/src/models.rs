@@ -741,6 +741,9 @@ pub struct OnboardingStatusDto {
     pub has_stored_api_key: bool,
     pub api_key_source: String,
     pub preferred_workspace_folder: Option<String>,
+    // apex e6: bundled vs bring-your-own-key inference choice.
+    pub inference_mode: String,
+    pub bundled_inference_configured: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

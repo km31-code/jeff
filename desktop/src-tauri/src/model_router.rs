@@ -243,6 +243,13 @@ impl ProviderKind {
     }
 }
 
+// apex e6: bundled inference is delivered as an OpenAI-compatible metered relay.
+// When bundled mode is selected and the relay endpoint is configured, the router
+// points its OpenAI provider at the relay with a scoped token (no user key).
+// Live relay dispatch + token issuance are env-gated.
+#[allow(dead_code)]
+pub const BUNDLED_PROVIDER_LABEL: &str = "bundled";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TierConfig {
     pub provider: ProviderKind,
