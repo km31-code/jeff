@@ -432,6 +432,35 @@ pub struct CustomToolRunResultDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolConnectionDto {
+    pub id: i64,
+    pub name: String,
+    pub transport: String,
+    pub endpoint: String,
+    pub scopes: Vec<String>,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolDescriptorDto {
+    pub id: i64,
+    pub connection_id: i64,
+    pub tool_name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolCallLogDto {
+    pub id: i64,
+    pub connection_name: String,
+    pub tool_name: String,
+    pub argument_summary: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubTaskSuggestionDto {
     pub task_id: i64,
     pub title: String,

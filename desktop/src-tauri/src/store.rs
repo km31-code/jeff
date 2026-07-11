@@ -756,6 +756,39 @@ impl TaskStore {
 
             CREATE INDEX IF NOT EXISTS idx_custom_tools_status
                 ON custom_tools(status, id DESC);
+
+            CREATE TABLE IF NOT EXISTS tool_connections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                transport TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                scopes_json TEXT NOT NULL DEFAULT '[]',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE TABLE IF NOT EXISTS tool_connection_tools (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                connection_id INTEGER NOT NULL REFERENCES tool_connections(id) ON DELETE CASCADE,
+                tool_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                UNIQUE(connection_id, tool_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS tool_call_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                connection_id INTEGER REFERENCES tool_connections(id) ON DELETE SET NULL,
+                connection_name TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                argument_summary TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tool_call_log_recent
+                ON tool_call_log(id DESC);
             "#,
             now = SQLITE_NOW_EXPR,
             embedding_model = crate::providers::OPENAI_EMBEDDING_MODEL_ID,
@@ -5566,8 +5599,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 47,
-            "expected 47 application tables after apex d9 (added capability_gaps and custom_tools)"
+            count, 50,
+            "expected 50 application tables after apex e1 (added tool_connections, tool_connection_tools, tool_call_log)"
         );
     }
 

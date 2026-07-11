@@ -28,6 +28,7 @@ use crate::{
         RevisionTargetDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
         SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
         SpeculationCacheDto, SpeculationServeResultDto, SpeculationStatusDto,
+        ToolCallLogDto, ToolConnectionDto, ToolDescriptorDto,
         StandingJobDto, SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto,
         SuggestionDto, SuggestionEvaluationDto, SynthesisLogEntryDto, TaskContextPackDto, TaskDto,
         TaskSummaryDto, TranscriptionResultDto, TrustLevelDto, UserProfileSignalDto,
@@ -1515,6 +1516,82 @@ pub fn run_custom_tool(
     input: String,
 ) -> Result<CustomToolRunResultDto, String> {
     crate::self_extend::run_custom_tool(&state.store, task_id, &name, &input).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_tool_connections(
+    state: State<'_, JeffState>,
+) -> Result<Vec<ToolConnectionDto>, String> {
+    crate::tool_bus::list_tool_connections(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn add_tool_connection(
+    state: State<'_, JeffState>,
+    name: String,
+    transport: String,
+    endpoint: String,
+    scopes: Vec<String>,
+) -> Result<ToolConnectionDto, String> {
+    crate::tool_bus::add_tool_connection(&state.store, &name, &transport, &endpoint, &scopes)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn set_tool_connection_enabled(
+    state: State<'_, JeffState>,
+    connection_id: i64,
+    enabled: bool,
+) -> Result<ToolConnectionDto, String> {
+    crate::tool_bus::set_tool_connection_enabled(&state.store, connection_id, enabled)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn remove_tool_connection(
+    state: State<'_, JeffState>,
+    connection_id: i64,
+) -> Result<(), String> {
+    crate::tool_bus::remove_tool_connection(&state.store, connection_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_connection_tools(
+    state: State<'_, JeffState>,
+    connection_id: i64,
+) -> Result<Vec<ToolDescriptorDto>, String> {
+    crate::tool_bus::list_connection_tools(&state.store, connection_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_tool_call_log(
+    state: State<'_, JeffState>,
+    limit: Option<usize>,
+) -> Result<Vec<ToolCallLogDto>, String> {
+    crate::tool_bus::list_tool_call_log(&state.store, limit.unwrap_or(50)).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn discover_connection_tools(
+    state: State<'_, JeffState>,
+    connection_id: i64,
+    tools: Vec<(String, String)>,
+) -> Result<Vec<ToolDescriptorDto>, String> {
+    crate::tool_bus::register_connection_tools(&state.store, connection_id, &tools)
+        .map_err(map_jeff_error)?;
+    crate::tool_bus::list_connection_tools(&state.store, connection_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn invoke_tool(
+    state: State<'_, JeffState>,
+    connection_name: String,
+    tool_name: String,
+    arguments: serde_json::Value,
+) -> Result<crate::tool_bus::ToolInvocationResult, String> {
+    let args = crate::tool_bus::ToolArguments::from_value(arguments).map_err(map_jeff_error)?;
+    crate::tool_bus::invoke_tool(&state.store, &connection_name, &tool_name, &args)
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]

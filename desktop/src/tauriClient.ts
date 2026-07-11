@@ -1564,6 +1564,44 @@ export async function runCustomTool(
   return invoke<CustomToolRunResultDto>("run_custom_tool", { taskId, name, input });
 }
 
+export interface ToolConnectionDto {
+  id: number;
+  name: string;
+  transport: string;
+  endpoint: string;
+  scopes: string[];
+  enabled: boolean;
+  created_at: string;
+}
+
+export interface ToolCallLogDto {
+  id: number;
+  connection_name: string;
+  tool_name: string;
+  argument_summary: string;
+  status: string;
+  created_at: string;
+}
+
+export async function listToolConnections(): Promise<ToolConnectionDto[]> {
+  return invoke<ToolConnectionDto[]>("list_tool_connections");
+}
+
+export async function setToolConnectionEnabled(
+  connectionId: number,
+  enabled: boolean
+): Promise<ToolConnectionDto> {
+  return invoke<ToolConnectionDto>("set_tool_connection_enabled", { connectionId, enabled });
+}
+
+export async function removeToolConnection(connectionId: number): Promise<void> {
+  await invoke("remove_tool_connection", { connectionId });
+}
+
+export async function listToolCallLog(limit?: number): Promise<ToolCallLogDto[]> {
+  return invoke<ToolCallLogDto[]>("list_tool_call_log", { limit: limit ?? null });
+}
+
 export interface WakeWordStatusDto {
   enabled: boolean;
   configured: boolean;

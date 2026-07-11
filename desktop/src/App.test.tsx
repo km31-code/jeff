@@ -908,6 +908,14 @@ function setupInvokeMock(options?: {
       return [];
     }
 
+    if (command === "list_tool_connections") {
+      return [];
+    }
+
+    if (command === "list_tool_call_log") {
+      return [];
+    }
+
     if (command === "set_speculation_enabled") {
       privacyDashboard = {
         ...privacyDashboard,

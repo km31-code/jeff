@@ -48,6 +48,7 @@ mod store;
 mod streaming;
 mod subtask;
 mod synthesis;
+mod tool_bus;
 mod trust;
 mod typing_activity;
 mod user_model;
@@ -907,6 +908,14 @@ fn main() {
             commands::approve_custom_tool,
             commands::kill_custom_tool,
             commands::run_custom_tool,
+            commands::list_tool_connections,
+            commands::add_tool_connection,
+            commands::set_tool_connection_enabled,
+            commands::remove_tool_connection,
+            commands::list_connection_tools,
+            commands::list_tool_call_log,
+            commands::discover_connection_tools,
+            commands::invoke_tool,
             commands::evaluate_next_suggestions,
             commands::list_suggestions,
             commands::accept_suggestion,

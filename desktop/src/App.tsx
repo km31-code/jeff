@@ -148,6 +148,12 @@ import {
   proposeCustomTool,
   approveCustomTool,
   killCustomTool,
+  ToolConnectionDto,
+  ToolCallLogDto,
+  listToolConnections,
+  setToolConnectionEnabled,
+  removeToolConnection,
+  listToolCallLog,
   getPrivacyCenterDashboard,
   getInterruptionAudit,
   type InterruptionAuditDto,
@@ -427,6 +433,8 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [speculationCache, setSpeculationCache] = useState<SpeculationCacheDto[]>([]);
   const [capabilityGaps, setCapabilityGaps] = useState<CapabilityGapDto[]>([]);
   const [customTools, setCustomTools] = useState<CustomToolDto[]>([]);
+  const [toolConnections, setToolConnections] = useState<ToolConnectionDto[]>([]);
+  const [toolCallLog, setToolCallLog] = useState<ToolCallLogDto[]>([]);
   const [interruptionAudit, setInterruptionAudit] = useState<InterruptionAuditDto | null>(null);
   const [debriefEnabled, setDebriefEnabledState] = useState(false);
   const [voiceEnabled, setVoiceEnabledState] = useState(false);
@@ -1174,10 +1182,16 @@ function App({ onCloseWorkspace }: AppProps = {}) {
           listCapabilityGaps().catch(() => []),
           listCustomTools().catch(() => [])
         ]);
+      const [connections, callLog] = await Promise.all([
+        listToolConnections().catch(() => []),
+        listToolCallLog(8).catch(() => [])
+      ]);
       setPrivacyDashboard(dashboard);
       setSpeculationCache(speculation);
       setCapabilityGaps(gaps);
       setCustomTools(tools);
+      setToolConnections(connections);
+      setToolCallLog(callLog);
       setSelectionBridgeStatus(bridgeStatus);
       setRelationalProfile(profile);
       setInterruptionAudit(audit);
@@ -2729,6 +2743,24 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setSpeculationCache((current) => current.filter((entry) => entry.id !== cacheId));
     } catch (error) {
       setOperationError("Failed to discard speculation", error);
+    }
+  }
+
+  async function handleToggleToolConnection(connectionId: number, enabled: boolean) {
+    try {
+      const updated = await setToolConnectionEnabled(connectionId, enabled);
+      setToolConnections((current) => current.map((c) => (c.id === updated.id ? updated : c)));
+    } catch (error) {
+      setOperationError("Failed to update connection", error);
+    }
+  }
+
+  async function handleRemoveToolConnection(connectionId: number) {
+    try {
+      await removeToolConnection(connectionId);
+      setToolConnections((current) => current.filter((c) => c.id !== connectionId));
+    } catch (error) {
+      setOperationError("Failed to disconnect", error);
     }
   }
 
@@ -4437,6 +4469,58 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                               >
                                 discard
                               </button>
+                            </div>
+                          ))}
+                        </div>
+                      </li>
+
+                      <li data-testid="privacy-surface-tool-bus">
+                        <label className="toggle-row">
+                          <span>Connections</span>
+                        </label>
+                        <p className="task-meta">
+                          External tools (email, calendar, web, drive) connect through one governed
+                          layer. Connections receive only the specific query, never your context.
+                          Disconnecting stops calls immediately.
+                        </p>
+                        <div className="compact-list" data-testid="tool-connection-list">
+                          {toolConnections.slice(0, 6).map((connection) => (
+                            <div className="action-receipt-row" key={connection.id}>
+                              <div>
+                                <strong>{connection.name}</strong>
+                                <p className="task-meta">
+                                  {connection.transport}; {connection.enabled ? "connected" : "disconnected"};
+                                  scopes: {connection.scopes.join(", ") || "none"}
+                                </p>
+                              </div>
+                              <div className="row-actions">
+                                <button
+                                  type="button"
+                                  data-testid="tool-connection-toggle"
+                                  onClick={() =>
+                                    void handleToggleToolConnection(connection.id, !connection.enabled)
+                                  }
+                                >
+                                  {connection.enabled ? "disconnect" : "reconnect"}
+                                </button>
+                                <button
+                                  type="button"
+                                  data-testid="tool-connection-remove"
+                                  onClick={() => void handleRemoveToolConnection(connection.id)}
+                                >
+                                  remove
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <p className="task-meta">Recent tool calls</p>
+                        <div className="compact-list" data-testid="tool-call-log">
+                          {toolCallLog.slice(0, 6).map((entry) => (
+                            <div key={entry.id}>
+                              <p className="task-meta">
+                                {entry.connection_name}.{entry.tool_name} {entry.argument_summary} [{entry.status}]
+                              </p>
                             </div>
                           ))}
                         </div>
