@@ -1,0 +1,165 @@
+[
+  {
+    "id": "draft_counterargument",
+    "category": "drafting",
+    "goal_contract": "Draft the counterargument section from my local notes.",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true,
+    "must_contain": ["placement_proposal"]
+  },
+  {
+    "id": "draft_intro",
+    "category": "drafting",
+    "goal_contract": "Draft an introduction paragraph from the local outline.",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true,
+    "must_contain": ["placement_proposal"]
+  },
+  {
+    "id": "draft_summary",
+    "category": "drafting",
+    "goal_contract": "Draft an assessment-first summary of the local notes.",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true,
+    "must_contain": ["placement_proposal"]
+  },
+  {
+    "id": "draft_methods",
+    "category": "drafting",
+    "goal_contract": "Draft the methods section from the local draft.",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true,
+    "must_contain": ["placement_proposal"]
+  },
+  {
+    "id": "draft_abstract",
+    "category": "drafting",
+    "goal_contract": "Draft a one-paragraph abstract from the local document.",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true,
+    "must_contain": ["placement_proposal"]
+  },
+  {
+    "id": "draft_conclusion",
+    "category": "drafting",
+    "goal_contract": "Draft a conclusion from the local notes.",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true,
+    "must_contain": ["placement_proposal"]
+  },
+  {
+    "id": "revise_rubric_clarity",
+    "category": "revision",
+    "goal_contract": "Revise the opening paragraph for clarity against the rubric.",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true
+  },
+  {
+    "id": "revise_rubric_concision",
+    "category": "revision",
+    "goal_contract": "Revise the section to be more concise per the rubric.",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true
+  },
+  {
+    "id": "revise_structure",
+    "category": "revision",
+    "goal_contract": "Revise the argument structure of the local draft.",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true
+  },
+  {
+    "id": "citation_consistency",
+    "category": "citation",
+    "goal_contract": "Check the local draft for citation consistency against the bibliography.",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true
+  },
+  {
+    "id": "impossible_external_account",
+    "category": "impossible",
+    "goal_contract": "Impossible task: verify an external account without access.",
+    "expect_status": "blocked",
+    "require_capability_request": true,
+    "must_contain": ["couldn't verify"]
+  },
+  {
+    "id": "impossible_live_web",
+    "category": "impossible",
+    "goal_contract": "Verify this claim against the live web without any tools.",
+    "expect_status": "blocked",
+    "require_capability_request": true,
+    "must_contain": ["couldn't verify"]
+  },
+  {
+    "id": "impossible_cannot_verify_pdf",
+    "category": "impossible",
+    "goal_contract": "Cannot verify the page number against a source PDF that is not present.",
+    "expect_status": "blocked",
+    "require_capability_request": true,
+    "must_contain": ["couldn't verify"]
+  },
+  {
+    "id": "steering_two_paragraphs",
+    "category": "steering",
+    "goal_contract": "Draft a short note from the local notes.",
+    "steering": ["Make it two paragraphs."],
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_steering_reflected": true
+  },
+  {
+    "id": "budget_exhaustion",
+    "category": "budget",
+    "goal_contract": "Draft a long deliverable with verification from the local notes.",
+    "budget": { "max_steps": 2, "max_tool_calls": 12, "max_wall_seconds": 120, "max_tokens": 8000 },
+    "expect_status": "budget_exhausted",
+    "require_capability_request": true,
+    "must_contain": ["Partial deliverable"]
+  },
+  {
+    "id": "web_find_sources",
+    "category": "web_research",
+    "goal_contract": "Find three sources supporting the thesis and draft the paragraph with citations.",
+    "gated": true,
+    "expect_status": "completed"
+  },
+  {
+    "id": "web_verify_claim",
+    "category": "web_research",
+    "goal_contract": "Verify the statistic in paragraph two against a reputable web source.",
+    "gated": true,
+    "expect_status": "completed"
+  },
+  {
+    "id": "web_recent_developments",
+    "category": "web_research",
+    "goal_contract": "Research recent developments on the topic and summarize with citations.",
+    "gated": true,
+    "expect_status": "completed"
+  },
+  {
+    "id": "web_fact_check",
+    "category": "web_research",
+    "goal_contract": "Fact-check the claims in the local draft against web sources.",
+    "gated": true,
+    "expect_status": "completed"
+  },
+  {
+    "id": "web_related_work",
+    "category": "web_research",
+    "goal_contract": "Find related work online and draft a related-work paragraph with citations.",
+    "gated": true,
+    "expect_status": "completed"
+  }
+]

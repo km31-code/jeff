@@ -56,6 +56,9 @@ jobs:
       - name: crisis override-channel eval
         run: bash scripts/crisis_eval.sh
 
+      - name: agent eval
+        run: bash scripts/agent_eval.sh
+
       - name: phase 17 latency regression gate
         run: bash scripts/phase17_check.sh
 

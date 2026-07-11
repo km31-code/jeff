@@ -1,6 +1,7 @@
 // library target: exposes internal modules for integration tests.
 // only modules needed by tests are declared here.
 pub mod action_bus;
+pub mod agent_eval_core;
 pub mod agent_runtime;
 pub mod character;
 pub mod classifier;
