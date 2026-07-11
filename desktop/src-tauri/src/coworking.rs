@@ -534,7 +534,11 @@ fn build_nudge_prompt(
         "Session mode: {}\n\nTask summary:\n{}\n\nRecent messages:\n{}\n\nRetrieved context:\n{}\n\nReturn NO_NUDGE if context is weak.",
         session_mode.as_str(),
         task_summary,
-        if transcript.is_empty() { "<none>" } else { &transcript },
+        if transcript.is_empty() {
+            "<none>"
+        } else {
+            &transcript
+        },
         chunks
     )
 }

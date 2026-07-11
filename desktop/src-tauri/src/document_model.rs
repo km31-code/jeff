@@ -210,10 +210,8 @@ impl DocumentModel {
             || !removed.is_empty()
             || heading_signature(&prior) != heading_signature(&new_paragraphs);
 
-        let churn_map: HashMap<ParaId, u32> = new_paragraphs
-            .iter()
-            .map(|p| (p.id, p.churn))
-            .collect();
+        let churn_map: HashMap<ParaId, u32> =
+            new_paragraphs.iter().map(|p| (p.id, p.churn)).collect();
         let word_count = new_paragraphs.iter().map(|p| p.word_count).sum();
 
         let delta = DocumentDelta {
@@ -270,18 +268,17 @@ impl DocumentModel {
 
     #[cfg(test)]
     pub fn history_len(&self, task_id: i64) -> usize {
-        self.tasks.get(&task_id).map(|d| d.history.len()).unwrap_or(0)
+        self.tasks
+            .get(&task_id)
+            .map(|d| d.history.len())
+            .unwrap_or(0)
     }
 
     fn evict_if_needed(&mut self, incoming: i64) {
         if self.tasks.len() < MAX_TASKS || self.tasks.contains_key(&incoming) {
             return;
         }
-        if let Some((&oldest, _)) = self
-            .tasks
-            .iter()
-            .min_by_key(|(_, doc)| doc.touched_at)
-        {
+        if let Some((&oldest, _)) = self.tasks.iter().min_by_key(|(_, doc)| doc.touched_at) {
             self.tasks.remove(&oldest);
         }
     }
@@ -478,12 +475,7 @@ fn hash_text(text: &str) -> u64 {
 }
 
 fn first_line(text: &str) -> String {
-    text.lines()
-        .next()
-        .unwrap_or("")
-        .chars()
-        .take(80)
-        .collect()
+    text.lines().next().unwrap_or("").chars().take(80).collect()
 }
 
 fn unix_now() -> i64 {
@@ -496,8 +488,8 @@ fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::local::{hash_embedding, LocalEmbeddingProvider};
     use crate::local_runtime::LocalRuntime;
+    use crate::providers::local::{hash_embedding, LocalEmbeddingProvider};
     use std::sync::Arc;
     use std::time::Instant;
 
@@ -557,8 +549,15 @@ mod tests {
         let mut churny: Vec<(&ParaId, &u32)> =
             delta.churn_map.iter().filter(|(_, c)| **c > 0).collect();
         churny.sort_by_key(|(id, _)| **id);
-        assert_eq!(churny.len(), 1, "churn should be localized to one paragraph");
-        assert_eq!(*churny[0].1, 5, "the rewritten paragraph should have churn 5");
+        assert_eq!(
+            churny.len(),
+            1,
+            "churn should be localized to one paragraph"
+        );
+        assert_eq!(
+            *churny[0].1, 5,
+            "the rewritten paragraph should have churn 5"
+        );
         // the other two paragraphs never changed.
         let zero = delta.churn_map.values().filter(|c| **c == 0).count();
         assert_eq!(zero, 2, "the untouched paragraphs keep zero churn");
@@ -576,10 +575,7 @@ mod tests {
 
         model.observe(
             task_id,
-            &doc(&[
-                "# Overview",
-                "The overview paragraph introduces the piece.",
-            ]),
+            &doc(&["# Overview", "The overview paragraph introduces the piece."]),
             &provider,
         );
         let delta = model.observe(
@@ -593,7 +589,10 @@ mod tests {
             &provider,
         );
 
-        assert!(delta.structure_changed, "adding a section flips structure_changed");
+        assert!(
+            delta.structure_changed,
+            "adding a section flips structure_changed"
+        );
         assert!(
             delta.added.iter().any(|p| p.first_line.contains("Methods")),
             "the new heading is listed in added"
@@ -609,7 +608,10 @@ mod tests {
 
         model.observe(
             task_id,
-            &doc(&["First paragraph stands alone.", "Second paragraph to be removed."]),
+            &doc(&[
+                "First paragraph stands alone.",
+                "Second paragraph to be removed.",
+            ]),
             &provider,
         );
         let delta = model.observe(task_id, "First paragraph stands alone.", &provider);
@@ -689,7 +691,11 @@ mod tests {
         let provider = hash_provider();
         let task_id = 6;
         for i in 0..150 {
-            model.observe(task_id, &format!("Paragraph revision number {i}."), &provider);
+            model.observe(
+                task_id,
+                &format!("Paragraph revision number {i}."),
+                &provider,
+            );
         }
         assert_eq!(model.history_len(task_id), MAX_DELTA_HISTORY);
     }
@@ -710,6 +716,9 @@ mod tests {
         );
         // sanity: identical text is maximally similar under the same embedder.
         let same = cosine(&car, &hash_embedding("automobile vehicle sedan"));
-        assert!(same > 0.99, "identical text should be self-similar, got {same}");
+        assert!(
+            same > 0.99,
+            "identical text should be self-similar, got {same}"
+        );
     }
 }

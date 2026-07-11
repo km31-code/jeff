@@ -14,8 +14,8 @@ use crate::chunking::{chunk_text, DEFAULT_CHUNK_OVERLAP_CHARS, DEFAULT_CHUNK_SIZ
 use crate::store::ChunkEmbeddingInput;
 
 use crate::{
-    embedding::EmbeddingProvider, models::WatcherStatusDto, retrieval::auto_ingest_file_for_task,
-    store::TaskStore,
+    crisis_core, embedding::EmbeddingProvider, models::WatcherStatusDto,
+    retrieval::auto_ingest_file_for_task, store::TaskStore,
 };
 
 // debounce window: ingest fires 500 ms after last event for a path.
@@ -44,6 +44,7 @@ pub struct WatcherState {
     clipboard_polls: HashMap<i64, tauri::async_runtime::JoinHandle<()>>,
     // optional callback set at startup; fires workspace://file-indexed events.
     file_indexed_notify: Option<Arc<dyn Fn(i64, String) + Send + Sync + 'static>>,
+    mass_deletion_notify: Option<Arc<dyn Fn(i64, usize, usize) + Send + Sync + 'static>>,
 }
 
 struct ActiveWatcher {
@@ -60,6 +61,7 @@ impl WatcherState {
             active: HashMap::new(),
             clipboard_polls: HashMap::new(),
             file_indexed_notify: None,
+            mass_deletion_notify: None,
         }
     }
 
@@ -68,6 +70,13 @@ impl WatcherState {
         notify: Arc<dyn Fn(i64, String) + Send + Sync + 'static>,
     ) {
         self.file_indexed_notify = Some(notify);
+    }
+
+    pub fn set_mass_deletion_notify(
+        &mut self,
+        notify: Arc<dyn Fn(i64, usize, usize) + Send + Sync + 'static>,
+    ) {
+        self.mass_deletion_notify = Some(notify);
     }
 
     pub fn get_status(&self, task_id: i64) -> WatcherStatusDto {
@@ -112,7 +121,14 @@ fn initial_scan_recursive(
                     .unwrap_or(false)
             });
             if !ignored {
-                initial_scan_recursive(&child, watch_root, store, embeddings, task_id, file_indexed_notify);
+                initial_scan_recursive(
+                    &child,
+                    watch_root,
+                    store,
+                    embeddings,
+                    task_id,
+                    file_indexed_notify,
+                );
             }
         } else if !should_ignore_file(&child, watch_root) {
             match auto_ingest_file_for_task(store, embeddings.as_ref(), task_id, &child) {
@@ -155,6 +171,10 @@ pub fn start_watcher(
             old.debounce_task.abort();
         }
         state.file_indexed_notify.clone()
+    };
+    let mass_deletion_notify: Option<Arc<dyn Fn(i64, usize, usize) + Send + Sync + 'static>> = {
+        let state = watcher_state.lock().expect("watcher state lock poisoned");
+        state.mass_deletion_notify.clone()
     };
 
     let canonical = folder_path.canonicalize().with_context(|| {
@@ -260,6 +280,8 @@ pub fn start_watcher(
                     match event {
                         Some(Ok(ev)) => {
                             if matches!(ev.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
+                                let known_before = store.count_watched_files(task_id).unwrap_or(0).max(0) as usize;
+                                let mut removed_count = 0usize;
                                 for path in ev.paths {
                                     if path.is_file() {
                                         pending.insert(path, Instant::now());
@@ -272,9 +294,15 @@ pub fn start_watcher(
                                     if !treat_as_removed {
                                         continue;
                                     }
+                                    removed_count += 1;
 
                                     if let Err(err) = handle_removed_path(&store, task_id, &path) {
                                         eprintln!("[jeff watcher] remove handling error {}: {err}", path.display());
+                                    }
+                                }
+                                if crisis_core::is_mass_deletion_signal(removed_count, known_before) {
+                                    if let Some(ref notify) = mass_deletion_notify {
+                                        notify(task_id, removed_count, known_before);
                                     }
                                 }
                             }

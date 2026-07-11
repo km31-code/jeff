@@ -44,6 +44,8 @@ pub enum CompanionEvent {
 // phase 16: multi-step chain constants and prompts
 
 pub const MAX_SUBTASK_STEPS: usize = 5;
+#[allow(dead_code)]
+pub const SUBTASK_CHAIN_RETIRED_BY_D5: &str = crate::agent_runtime::SUBTASK_CHAIN_RETIRED_BY_D5;
 const MAX_CHAIN_STEP_DESCRIPTION_CHARS: usize = 600;
 const MAX_CHAIN_CONTEXT_CHARS: usize = 10_000;
 const MAX_CHAIN_STEP_OUTPUT_CHARS: usize = 8_000;

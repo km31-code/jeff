@@ -15,6 +15,7 @@ export interface AmbientStateDto {
   notification_permission: string;
   single_instance: boolean;
   quiet_mode: boolean;
+  wake_word_armed: boolean;
 }
 
 export interface NotificationPayload {

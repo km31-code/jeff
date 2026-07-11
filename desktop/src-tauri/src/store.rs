@@ -10,11 +10,11 @@ use serde_json::json;
 use crate::{
     message_kind::MessageKind,
     models::{
-        ArtifactContentDto, ArtifactDto, ArtifactVersionDto, ChatMessageDto, EventLogEntryDto,
-        FileWriteProposalDto, OpenResourceDto, ProactiveAuditEntryDto, RecentlyLearnedItemDto,
-        RevisionProposalDto, SessionModeStateDto, SubTaskDto, SubTaskStepDto, SuggestionDto,
-        SynthesisLogEntryDto, TaskDto, TaskSummaryDto, WatchedFileRegistryEntry, WatchedFolderDto,
-        WorkspaceInfoDto, WriteAuditEntryDto,
+        ActionReceiptDto, ArtifactContentDto, ArtifactDto, ArtifactVersionDto, ChatMessageDto,
+        EventLogEntryDto, FileWriteProposalDto, OpenResourceDto, ProactiveAuditEntryDto,
+        RecentlyLearnedItemDto, RevisionProposalDto, SessionModeStateDto, SubTaskDto,
+        SubTaskStepDto, SuggestionDto, SynthesisLogEntryDto, TaskDto, TaskSummaryDto,
+        WatchedFileRegistryEntry, WatchedFolderDto, WorkspaceInfoDto, WriteAuditEntryDto,
     },
     onboarding::{
         APP_SETTING_ONBOARDING_COMPLETE, APP_SETTING_ONBOARDING_LAST_COMPLETED_AT,
@@ -217,6 +217,15 @@ impl TaskStore {
         )
         .context("failed to initialize sqlite pragmas")?;
         Ok(conn)
+    }
+
+    pub fn action_undo_root(&self) -> PathBuf {
+        self.paths
+            .db_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.paths.workspace_root.clone())
+            .join("undo")
     }
 
     fn initialize_schema(&self) -> Result<()> {
@@ -536,6 +545,141 @@ impl TaskStore {
             );
 
             CREATE INDEX IF NOT EXISTS idx_write_audit_task ON subtask_write_audit_log(task_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS action_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                class TEXT NOT NULL,
+                surface TEXT NOT NULL,
+                level TEXT NOT NULL DEFAULT 'L1',
+                description TEXT NOT NULL,
+                payload_excerpt TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                failure_reason TEXT,
+                undo_ref TEXT,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                resolved_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_action_receipts_task
+                ON action_receipts(task_id, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_action_receipts_class
+                ON action_receipts(class, status, id DESC);
+
+            CREATE TABLE IF NOT EXISTS trust_levels (
+                class TEXT PRIMARY KEY,
+                level TEXT NOT NULL DEFAULT 'L1',
+                approval_streak INTEGER NOT NULL DEFAULT 0,
+                graduation_offered_at TEXT,
+                sticky_l1 INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE TABLE IF NOT EXISTS jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                goal_contract TEXT NOT NULL,
+                plan_json TEXT NOT NULL DEFAULT '[]',
+                budget_json TEXT NOT NULL DEFAULT '{{}}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                speculative INTEGER NOT NULL DEFAULT 0,
+                deliverable_json TEXT,
+                verification_transcript TEXT,
+                capability_request_json TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_jobs_task_status
+                ON jobs(task_id, status, id DESC);
+
+            CREATE TABLE IF NOT EXISTS job_steps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                step_index INTEGER NOT NULL,
+                phase TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                title TEXT NOT NULL,
+                input_json TEXT NOT NULL DEFAULT '{{}}',
+                output_json TEXT,
+                error_message TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                UNIQUE(job_id, step_index)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_job_steps_job
+                ON job_steps(job_id, step_index);
+
+            CREATE TABLE IF NOT EXISTS job_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                artifact_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_job_artifacts_job
+                ON job_artifacts(job_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS job_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_job_events_job
+                ON job_events(job_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS job_checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                step_index INTEGER NOT NULL,
+                phase TEXT NOT NULL,
+                state_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                UNIQUE(job_id, step_index)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_job_checkpoints_job
+                ON job_checkpoints(job_id, step_index);
+
+            CREATE TABLE IF NOT EXISTS job_steering (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                message TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                boundary_step_index INTEGER,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                applied_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_job_steering_job
+                ON job_steering(job_id, status, id ASC);
+
+            CREATE TABLE IF NOT EXISTS standing_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                goal_contract TEXT NOT NULL,
+                schedule_spec TEXT NOT NULL,
+                trigger_kind TEXT NOT NULL,
+                next_run_at TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                critical INTEGER NOT NULL DEFAULT 0,
+                last_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                updated_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_standing_jobs_due
+                ON standing_jobs(enabled, trigger_kind, next_run_at, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_standing_jobs_task
+                ON standing_jobs(task_id, id DESC);
             "#,
             now = SQLITE_NOW_EXPR,
             embedding_model = crate::providers::OPENAI_EMBEDDING_MODEL_ID,
@@ -559,6 +703,7 @@ impl TaskStore {
             CREATE TABLE IF NOT EXISTS live_edit_receipts (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id        INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+                action_receipt_id INTEGER REFERENCES action_receipts(id) ON DELETE SET NULL,
                 editor_surface TEXT NOT NULL,
                 document_title TEXT NOT NULL,
                 before_hash    TEXT NOT NULL,
@@ -573,6 +718,7 @@ impl TaskStore {
 
         // idempotent migration for databases created by the first phase 23 pass.
         let _ = conn.execute_batch("ALTER TABLE live_edit_receipts ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL;");
+        let _ = conn.execute_batch("ALTER TABLE live_edit_receipts ADD COLUMN action_receipt_id INTEGER REFERENCES action_receipts(id) ON DELETE SET NULL;");
         let _ = conn.execute_batch(
             "ALTER TABLE live_edit_receipts ADD COLUMN before_text TEXT NOT NULL DEFAULT '';",
         );
@@ -595,8 +741,7 @@ impl TaskStore {
 
         // apex c1: two-stage judgment. the stage 2 decision (speak/hold/drop),
         // chosen channel, and its reason are recorded alongside the stage 1 log.
-        let _ = conn
-            .execute_batch("ALTER TABLE synthesis_log ADD COLUMN stage2_decision TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE synthesis_log ADD COLUMN stage2_decision TEXT;");
         let _ = conn.execute_batch("ALTER TABLE synthesis_log ADD COLUMN stage2_channel TEXT;");
         let _ = conn.execute_batch("ALTER TABLE synthesis_log ADD COLUMN stage2_reason TEXT;");
 
@@ -2549,6 +2694,144 @@ impl TaskStore {
         Ok(entries)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_action_receipt(
+        &self,
+        task_id: i64,
+        class: &str,
+        surface: &str,
+        level: &str,
+        description: &str,
+        payload_excerpt: &str,
+        status: &str,
+        failure_reason: Option<&str>,
+        undo_ref: Option<&str>,
+    ) -> Result<ActionReceiptDto> {
+        let conn = self.connect()?;
+        let mark_resolved = matches!(
+            status,
+            "applied" | "rejected" | "reverted" | "failed" | "guided"
+        );
+        let resolved_expr = if mark_resolved {
+            format!("({SQLITE_NOW_EXPR})")
+        } else {
+            "NULL".to_string()
+        };
+        conn.execute(
+            &format!(
+                "INSERT INTO action_receipts
+                 (task_id, class, surface, level, description, payload_excerpt, status, failure_reason, undo_ref, created_at, resolved_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ({now}), {resolved})",
+                now = SQLITE_NOW_EXPR,
+                resolved = resolved_expr,
+            ),
+            params![
+                task_id,
+                class.trim(),
+                surface.trim(),
+                level.trim(),
+                description.trim(),
+                payload_excerpt,
+                status.trim(),
+                failure_reason,
+                undo_ref,
+            ],
+        )
+        .context("failed to insert action receipt")?;
+
+        let receipt_id = conn.last_insert_rowid();
+        self.get_action_receipt(receipt_id)?
+            .ok_or_else(|| anyhow!("action receipt id={} missing after insert", receipt_id))
+    }
+
+    pub fn update_action_receipt_status(
+        &self,
+        receipt_id: i64,
+        status: &str,
+        failure_reason: Option<&str>,
+        undo_ref: Option<&str>,
+    ) -> Result<ActionReceiptDto> {
+        let conn = self.connect()?;
+        let changed = conn
+            .execute(
+                &format!(
+                    "UPDATE action_receipts
+                     SET status = ?1,
+                         failure_reason = ?2,
+                         undo_ref = COALESCE(?3, undo_ref),
+                         resolved_at = ({now})
+                     WHERE id = ?4",
+                    now = SQLITE_NOW_EXPR,
+                ),
+                params![status.trim(), failure_reason, undo_ref, receipt_id],
+            )
+            .context("failed to update action receipt")?;
+        if changed == 0 {
+            return Err(anyhow!("action receipt id={} not found", receipt_id));
+        }
+        self.get_action_receipt(receipt_id)?
+            .ok_or_else(|| anyhow!("action receipt disappeared after update"))
+    }
+
+    pub fn get_action_receipt(&self, receipt_id: i64) -> Result<Option<ActionReceiptDto>> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT id, task_id, class, surface, level, description, payload_excerpt,
+                    status, failure_reason, undo_ref, created_at, resolved_at
+             FROM action_receipts
+             WHERE id = ?1",
+            params![receipt_id],
+            action_receipt_from_row,
+        )
+        .optional()
+        .context("failed to query action receipt")
+    }
+
+    pub fn list_action_receipts(
+        &self,
+        task_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<ActionReceiptDto>> {
+        let conn = self.connect()?;
+        let max = limit.min(500) as i64;
+        let mut receipts = Vec::new();
+        if let Some(task_id) = task_id {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, task_id, class, surface, level, description, payload_excerpt,
+                            status, failure_reason, undo_ref, created_at, resolved_at
+                     FROM action_receipts
+                     WHERE task_id = ?1
+                     ORDER BY id DESC
+                     LIMIT ?2",
+                )
+                .context("failed to prepare task action receipt query")?;
+            let rows = stmt
+                .query_map(params![task_id, max], action_receipt_from_row)
+                .context("failed to query task action receipts")?;
+            for row in rows {
+                receipts.push(row.context("failed to map action receipt row")?);
+            }
+        } else {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, task_id, class, surface, level, description, payload_excerpt,
+                            status, failure_reason, undo_ref, created_at, resolved_at
+                     FROM action_receipts
+                     ORDER BY id DESC
+                     LIMIT ?1",
+                )
+                .context("failed to prepare action receipt query")?;
+            let rows = stmt
+                .query_map(params![max], action_receipt_from_row)
+                .context("failed to query action receipts")?;
+            for row in rows {
+                receipts.push(row.context("failed to map action receipt row")?);
+            }
+        }
+        Ok(receipts)
+    }
+
     // ---------------------------------------------------------------------
     // flow/session mode/suggestions
     // ---------------------------------------------------------------------
@@ -3228,6 +3511,16 @@ impl TaskStore {
             entries.push(row.context("failed to map event log row")?);
         }
         Ok(entries)
+    }
+
+    pub fn record_event(&self, task_id: i64, event_type: &str, payload_json: &str) -> Result<()> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction()
+            .context("failed to start record_event tx")?;
+        Self::record_event_tx(&tx, task_id, event_type, payload_json)?;
+        tx.commit().context("failed to commit record_event tx")?;
+        Ok(())
     }
 
     // ---------------------------------------------------------------------
@@ -3914,14 +4207,71 @@ impl TaskStore {
         before_text: &str,
         after_text: &str,
     ) -> Result<i64> {
+        let action_receipt_id = if let Some(task_id) = task_id {
+            Some(
+                self.create_action_receipt(
+                    task_id,
+                    "doc.replace",
+                    editor_surface,
+                    "L1",
+                    &format!("Live edit request for {}", document_title.trim()),
+                    &format!("{} -> {}", before_hash, after_hash),
+                    "pending_approval",
+                    None,
+                    None,
+                )?
+                .id,
+            )
+        } else {
+            None
+        };
         let conn = self.connect()?;
         conn.execute(
             "INSERT INTO live_edit_receipts
-             (task_id, editor_surface, document_title, before_hash, after_hash, before_text, after_text)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![task_id, editor_surface, document_title, before_hash, after_hash, before_text, after_text],
+             (task_id, action_receipt_id, editor_surface, document_title, before_hash, after_hash, before_text, after_text)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                task_id,
+                action_receipt_id,
+                editor_surface,
+                document_title,
+                before_hash,
+                after_hash,
+                before_text,
+                after_text
+            ],
         )
         .context("failed to create live edit receipt")?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn create_guided_live_edit_receipt(
+        &self,
+        task_id: Option<i64>,
+        action_receipt_id: i64,
+        editor_surface: &str,
+        document_title: &str,
+        fallback_reason: &str,
+        before_text: &str,
+        after_text: &str,
+    ) -> Result<i64> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO live_edit_receipts
+             (task_id, action_receipt_id, editor_surface, document_title, before_hash, after_hash, before_text, after_text, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'fallback')",
+            params![
+                task_id,
+                action_receipt_id,
+                editor_surface,
+                document_title,
+                fallback_reason,
+                "guided",
+                before_text,
+                after_text
+            ],
+        )
+        .context("failed to create guided live edit receipt")?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -3937,6 +4287,15 @@ impl TaskStore {
             return Err(anyhow!("invalid live edit status: {status}"));
         }
         let conn = self.connect()?;
+        let action_receipt_id: Option<i64> = conn
+            .query_row(
+                "SELECT action_receipt_id FROM live_edit_receipts WHERE id = ?1",
+                params![receipt_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to query live edit action receipt id")?
+            .flatten();
         let changed = conn
             .execute(
                 "UPDATE live_edit_receipts SET status = ?1 WHERE id = ?2",
@@ -3945,6 +4304,13 @@ impl TaskStore {
             .context("failed to update live edit receipt status")?;
         if changed == 0 {
             return Err(anyhow!("live edit receipt id={receipt_id} not found"));
+        }
+        if let Some(action_receipt_id) = action_receipt_id {
+            let mapped = match status {
+                "fallback" => "guided",
+                other => other,
+            };
+            let _ = self.update_action_receipt_status(action_receipt_id, mapped, None, None);
         }
         let receipt = conn
             .query_row(
@@ -4065,6 +4431,11 @@ impl TaskStore {
         )
         .context("failed to clear subtask write audit")?;
         tx.execute(
+            "DELETE FROM action_receipts WHERE task_id = ?1",
+            params![task_id],
+        )
+        .context("failed to clear action receipts")?;
+        tx.execute(
             "DELETE FROM subtask_file_write_proposals WHERE task_id = ?1",
             params![task_id],
         )
@@ -4077,6 +4448,48 @@ impl TaskStore {
         .context("failed to clear subtask steps")?;
         tx.execute("DELETE FROM subtasks WHERE task_id = ?1", params![task_id])
             .context("failed to clear subtasks")?;
+        if Self::table_exists_tx(&tx, "jobs")? {
+            if Self::table_exists_tx(&tx, "standing_jobs")? {
+                tx.execute("DELETE FROM standing_jobs WHERE task_id = ?1", params![task_id])
+                    .context("failed to clear standing jobs")?;
+            }
+            if Self::table_exists_tx(&tx, "job_steering")? {
+                tx.execute(
+                    "DELETE FROM job_steering
+                     WHERE job_id IN (SELECT id FROM jobs WHERE task_id = ?1)",
+                    params![task_id],
+                )
+                .context("failed to clear job steering")?;
+            }
+            if Self::table_exists_tx(&tx, "job_checkpoints")? {
+                tx.execute(
+                    "DELETE FROM job_checkpoints
+                     WHERE job_id IN (SELECT id FROM jobs WHERE task_id = ?1)",
+                    params![task_id],
+                )
+                .context("failed to clear job checkpoints")?;
+            }
+            tx.execute(
+                "DELETE FROM job_events
+                 WHERE job_id IN (SELECT id FROM jobs WHERE task_id = ?1)",
+                params![task_id],
+            )
+            .context("failed to clear job events")?;
+            tx.execute(
+                "DELETE FROM job_artifacts
+                 WHERE job_id IN (SELECT id FROM jobs WHERE task_id = ?1)",
+                params![task_id],
+            )
+            .context("failed to clear job artifacts")?;
+            tx.execute(
+                "DELETE FROM job_steps
+                 WHERE job_id IN (SELECT id FROM jobs WHERE task_id = ?1)",
+                params![task_id],
+            )
+            .context("failed to clear job steps")?;
+            tx.execute("DELETE FROM jobs WHERE task_id = ?1", params![task_id])
+                .context("failed to clear jobs")?;
+        }
         tx.execute(
             "DELETE FROM artifact_versions WHERE task_id = ?1",
             params![task_id],
@@ -4211,6 +4624,10 @@ impl TaskStore {
         if Self::table_exists_tx(&tx, "trust_metrics")? {
             tx.execute("DELETE FROM trust_metrics", [])
                 .context("failed to clear trust metrics")?;
+        }
+        if Self::table_exists_tx(&tx, "trust_levels")? {
+            tx.execute("DELETE FROM trust_levels", [])
+                .context("failed to clear trust levels")?;
         }
         if Self::table_exists_tx(&tx, "episodes")? {
             tx.execute("DELETE FROM episodes", [])
@@ -4691,6 +5108,24 @@ fn write_audit_from_row(row: &Row<'_>) -> rusqlite::Result<WriteAuditEntryDto> {
         proposed_path: row.get(5)?,
         resolved_at: row.get(6)?,
         resolved_path: None,
+        action_receipt_id: None,
+    })
+}
+
+fn action_receipt_from_row(row: &Row<'_>) -> rusqlite::Result<ActionReceiptDto> {
+    Ok(ActionReceiptDto {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        class: row.get(2)?,
+        surface: row.get(3)?,
+        level: row.get(4)?,
+        description: row.get(5)?,
+        payload_excerpt: row.get(6)?,
+        status: row.get(7)?,
+        failure_reason: row.get(8)?,
+        undo_ref: row.get(9)?,
+        created_at: row.get(10)?,
+        resolved_at: row.get(11)?,
     })
 }
 
@@ -4836,8 +5271,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 34,
-            "expected 34 application tables after apex c2 (added interruption_ledger)"
+            count, 43,
+            "expected 43 application tables after apex d6 (added job checkpoints, steering, and standing jobs)"
         );
     }
 

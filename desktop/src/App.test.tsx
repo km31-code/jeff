@@ -72,6 +72,86 @@ type SubTaskDto = {
   error_message: string | null;
 };
 
+type AgentJobDto = {
+  id: number;
+  task_id: number;
+  goal_contract: string;
+  plan_json: string;
+  budget_json: string;
+  status: string;
+  speculative: boolean;
+  deliverable_json: string | null;
+  verification_transcript: string | null;
+  capability_request_json: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type AgentJobDetailDto = {
+  job: AgentJobDto;
+  steps: Array<{
+    id: number;
+    job_id: number;
+    step_index: number;
+    phase: string;
+    status: string;
+    title: string;
+    input_json: string;
+    output_json: string | null;
+    error_message: string | null;
+    started_at: string | null;
+    completed_at: string | null;
+  }>;
+  artifacts: Array<{
+    id: number;
+    job_id: number;
+    artifact_type: string;
+    title: string;
+    content: string;
+    metadata_json: string;
+    created_at: string;
+  }>;
+  events: Array<{
+    id: number;
+    job_id: number;
+    event_type: string;
+    payload_json: string;
+    created_at: string;
+  }>;
+  checkpoints: Array<{
+    id: number;
+    job_id: number;
+    step_index: number;
+    phase: string;
+    state_json: string;
+    created_at: string;
+  }>;
+  steering: Array<{
+    id: number;
+    job_id: number;
+    message: string;
+    status: string;
+    boundary_step_index: number | null;
+    created_at: string;
+    applied_at: string | null;
+  }>;
+};
+
+type StandingJobDto = {
+  id: number;
+  task_id: number;
+  goal_contract: string;
+  schedule_spec: string;
+  trigger_kind: string;
+  next_run_at: string;
+  enabled: boolean;
+  critical: boolean;
+  last_job_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
 type SessionModeStateDto = {
   task_id: number;
   current_mode: string;
@@ -126,6 +206,11 @@ type PrivacyCenterDashboardDto = {
   typing_activity_enabled: boolean;
   tts_voice: string;
   available_tts_voices: string[];
+  wake_word: WakeWordStatusDto;
+  crisis_controls: CrisisClassControlDto[];
+  action_receipts: ActionReceiptDto[];
+  native_docs: NativeDocsStatusDto;
+  trust_ladder: TrustLevelDto[];
   content_observation_enabled: boolean;
   content_observation_last_captured_at: string | null;
   content_observation_capture_failed: boolean;
@@ -134,6 +219,61 @@ type PrivacyCenterDashboardDto = {
   content_observation_document_title: string | null;
   local_runtime: LocalRuntimeStatusDto;
   cost_governor: CostGovernorStatusDto;
+};
+
+type ActionReceiptDto = {
+  id: number;
+  task_id: number;
+  class: string;
+  surface: string;
+  level: string;
+  description: string;
+  payload_excerpt: string;
+  status: string;
+  failure_reason: string | null;
+  undo_ref: string | null;
+  created_at: string;
+  resolved_at: string | null;
+};
+
+type NativeDocsStatusDto = {
+  pages_supported: boolean;
+  word_supported: boolean;
+  automation_permission_status: string;
+  automation_permission_explainer: string;
+  ax_buffer_writeback_enabled: boolean;
+};
+
+type TrustLevelDto = {
+  class: string;
+  level: string;
+  max_level: string;
+  approval_streak: number;
+  graduation_offer: string | null;
+  graduation_offered_at: string | null;
+  sticky_l1: boolean;
+  updated_at: string;
+  recent_history: ActionReceiptDto[];
+};
+
+type WakeWordStatusDto = {
+  enabled: boolean;
+  configured: boolean;
+  armed: boolean;
+  running: boolean;
+  sidecar_pid: number | null;
+  phrase: string;
+  last_detected_at: number | null;
+  last_error: string | null;
+  no_raw_audio_ipc: boolean;
+};
+
+type CrisisClassControlDto = {
+  class: string;
+  label: string;
+  enabled: boolean;
+  severity_threshold: string;
+  routes_to_provider: boolean;
 };
 
 type LocalRuntimeStatusDto = {
@@ -319,6 +459,7 @@ function setupInvokeMock(options?: {
   let nextVersionId = 1;
   let proactiveMode = true;
   let nextSubtaskId = 1;
+  let nextAgentJobId = 1;
   let persistedActiveArtifactId: number | null = 10;
   let nextEventId = 1;
   let nextStreamingTurnId = 1;
@@ -431,6 +572,51 @@ function setupInvokeMock(options?: {
     typing_activity_enabled: true,
     tts_voice: "alloy",
     available_tts_voices: ["alloy", "nova", "shimmer"],
+    wake_word: {
+      enabled: false,
+      configured: false,
+      armed: false,
+      running: false,
+      sidecar_pid: null,
+      phrase: "hey jeff",
+      last_detected_at: null,
+      last_error: null,
+      no_raw_audio_ipc: true
+    },
+    crisis_controls: [],
+    action_receipts: [],
+    native_docs: {
+      pages_supported: true,
+      word_supported: true,
+      automation_permission_status: "macos_automation_permission_required",
+      automation_permission_explainer:
+        "Native Pages and Word edits use macOS Apple Events automation. macOS may ask you to allow Jeff to control Pages or Microsoft Word; Jeff does not use Accessibility buffer writeback unless the explicit native-docs AX fallback flag is enabled.",
+      ax_buffer_writeback_enabled: false
+    },
+    trust_ladder: [
+      {
+        class: "file.write",
+        level: "L1",
+        max_level: "L3",
+        approval_streak: 0,
+        graduation_offer: null,
+        graduation_offered_at: null,
+        sticky_l1: false,
+        updated_at: "",
+        recent_history: []
+      },
+      {
+        class: "email.send",
+        level: "L1",
+        max_level: "L1",
+        approval_streak: 0,
+        graduation_offer: null,
+        graduation_offered_at: null,
+        sticky_l1: false,
+        updated_at: "",
+        recent_history: []
+      }
+    ],
     content_observation_enabled: false,
     content_observation_last_captured_at: null,
     content_observation_capture_failed: false,
@@ -467,6 +653,8 @@ function setupInvokeMock(options?: {
   const pendingRevisions: RevisionDto[] = [];
   const versions: ArtifactVersionDto[] = [];
   const subtasks: SubTaskDto[] = [];
+  const agentJobs: AgentJobDetailDto[] = [];
+  const standingJobs: StandingJobDto[] = [];
   const events: EventLogEntryDto[] = [];
   const subtaskPollCountdown = new Map<number, number>();
   const completedAnnounced = new Set<number>();
@@ -1100,6 +1288,69 @@ function setupInvokeMock(options?: {
         .sort((left, right) => right.subtask_id - left.subtask_id);
     }
 
+    if (command === "list_agent_jobs") {
+      return agentJobs.map((detail) => detail.job).sort((left, right) => right.id - left.id);
+    }
+
+    if (command === "get_agent_job_detail") {
+      const jobId = Number(args?.jobId ?? 0);
+      return agentJobs.find((detail) => detail.job.id === jobId) ?? null;
+    }
+
+    if (command === "send_job_steering") {
+      const jobId = Number(args?.jobId ?? 0);
+      const detail = agentJobs.find((item) => item.job.id === jobId);
+      if (!detail) return null;
+      detail.steering.push({
+        id: detail.steering.length + 1,
+        job_id: jobId,
+        message: String(args?.message ?? ""),
+        status: "pending",
+        boundary_step_index: null,
+        created_at: "now",
+        applied_at: null
+      });
+      return detail;
+    }
+
+    if (command === "cancel_agent_job") {
+      const jobId = Number(args?.jobId ?? 0);
+      const detail = agentJobs.find((item) => item.job.id === jobId);
+      if (!detail) return null;
+      detail.job.status = "cancelled_partial";
+      detail.job.deliverable_json = JSON.stringify({ partial_work_available: true });
+      return detail;
+    }
+
+    if (command === "list_standing_jobs") {
+      return standingJobs.slice().sort((left, right) => right.id - left.id);
+    }
+
+    if (command === "create_standing_job") {
+      const id = standingJobs.length + 1;
+      const standing: StandingJobDto = {
+        id,
+        task_id: Number(args?.taskId ?? 1),
+        goal_contract: String(args?.goalContract ?? ""),
+        schedule_spec: String(args?.scheduleSpec ?? "daily 18:00"),
+        trigger_kind: String(args?.scheduleSpec ?? "").startsWith("on-event") ? "on-event" : "daily",
+        next_run_at: String(args?.scheduleSpec ?? "").startsWith("on-event")
+          ? `on-event:${String(args?.scheduleSpec ?? "").replace("on-event ", "")}`
+          : "2026-07-10T18:00:00Z",
+        enabled: true,
+        critical: Boolean(args?.critical ?? false),
+        last_job_id: null,
+        created_at: "now",
+        updated_at: "now"
+      };
+      standingJobs.push(standing);
+      return standing;
+    }
+
+    if (command === "run_due_standing_jobs") {
+      return [];
+    }
+
     if (command === "list_file_write_proposals") {
       return [];
     }
@@ -1342,6 +1593,64 @@ function setupInvokeMock(options?: {
         },
         subtask: null
       };
+    }
+
+    if (command === "create_agent_job") {
+      const goalContract = String(args?.goalContract ?? "");
+      const job: AgentJobDto = {
+        id: nextAgentJobId,
+        task_id: 1,
+        goal_contract: goalContract,
+        plan_json: JSON.stringify({ loop: ["plan", "act", "observe", "revise", "verify", "deliver"] }),
+        budget_json: JSON.stringify({ max_steps: 8, max_tool_calls: 12, max_wall_seconds: 120, max_tokens: 8000 }),
+        status: "completed",
+        speculative: Boolean(args?.speculative ?? false),
+        deliverable_json: JSON.stringify({ assessment: "I can complete this.", verified: true }),
+        verification_transcript: "fresh-context Craft verification: satisfied",
+        capability_request_json: null,
+        error_message: null,
+        created_at: now,
+        updated_at: now
+      };
+      const detail: AgentJobDetailDto = {
+        job,
+        steps: ["plan", "act", "observe", "revise", "verify", "deliver"].map((phase, index) => ({
+          id: index + 1,
+          job_id: job.id,
+          step_index: index,
+          phase,
+          status: "completed",
+          title: phase,
+          input_json: "{}",
+          output_json: "{}",
+          error_message: null,
+          started_at: now,
+          completed_at: now
+        })),
+        artifacts: [],
+        events: [
+          {
+            id: 1,
+            job_id: job.id,
+            event_type: "conversation_delivery",
+            payload_json: "{}",
+            created_at: now
+          }
+        ],
+        checkpoints: ["plan", "act", "observe", "revise", "verify", "deliver"].map((phase, index) => ({
+          id: index + 1,
+          job_id: job.id,
+          step_index: index,
+          phase,
+          state_json: "{}",
+          created_at: now
+        })),
+        steering: []
+      };
+      agentJobs.push(detail);
+      nextAgentJobId += 1;
+      appendEvent("agent_job_created", { job_id: job.id });
+      return detail;
     }
 
     if (command === "create_subtask" || command === "start_subtask_chain") {
@@ -2089,7 +2398,7 @@ describe("App", () => {
     }
   });
 
-  it("supports bounded subtask lifecycle, parallel chat, and result-to-revision conversion", async () => {
+  it("supports bounded agent job lifecycle and parallel chat", async () => {
     setupInvokeMock();
     const audioMocks = installAudioAndUrlMocks();
 
@@ -2104,33 +2413,21 @@ describe("App", () => {
       await userEvent.type(screen.getByTestId("subtask-instruction-input"), "draft a better intro");
       await userEvent.click(screen.getByRole("button", { name: /create subtask/i }));
 
-      expect(await screen.findByTestId("active-subtasks-list")).toHaveTextContent("draft a better intro");
+      expect(await screen.findByTestId("suggestion-action-message")).toHaveTextContent("agent job");
+      expect(invokeMock).toHaveBeenCalledWith("create_agent_job", expect.any(Object));
 
       const chatInput = screen.getByLabelText(/chat input/i);
       await userEvent.type(chatInput, "what are the requirements");
       await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
       expect(await screen.findByTestId("chat-history")).toHaveTextContent("Answer");
-
-      await waitFor(
-        async () => {
-          expect(await screen.findByTestId("completed-subtasks-list")).toHaveTextContent("Completed");
-        },
-        { timeout: 3500 }
-      );
-
-      await userEvent.click(screen.getByRole("button", { name: /convert to revision/i }));
-      expect(await screen.findByTestId("pending-revisions-list")).toHaveTextContent("Converted from subtask");
-      expect(await screen.findByTestId("chat-history")).toHaveTextContent("Revision Proposal");
     } finally {
       audioMocks.restore();
     }
   });
 
-  it("supports canceling running subtasks via UI and voice controls", async () => {
+  it("creates agent jobs from the manual delegation form and leaves legacy cancel disabled without subtasks", async () => {
     setupInvokeMock();
-    const mediaMocks = installMediaRecorderMocks();
     const audioMocks = installAudioAndUrlMocks();
-    const blobPolyfill = installBlobArrayBufferPolyfill();
 
     try {
       render(<App />);
@@ -2142,26 +2439,11 @@ describe("App", () => {
 
       await userEvent.type(screen.getByTestId("subtask-instruction-input"), "expand this outline");
       await userEvent.click(screen.getByRole("button", { name: /create subtask/i }));
-      expect(await screen.findByTestId("active-subtasks-list")).toHaveTextContent("expand this outline");
-
-      await userEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
-      expect(await screen.findByTestId("completed-subtasks-list")).toHaveTextContent("cancelled");
-
-      await userEvent.type(screen.getByTestId("subtask-instruction-input"), "draft another intro");
-      await userEvent.click(screen.getByRole("button", { name: /create subtask/i }));
-      expect(await screen.findByTestId("active-subtasks-list")).toHaveTextContent("draft another intro");
-
-      await userEvent.click(screen.getByTestId("voice-cancel-subtask-button"));
-      expect(await screen.findByTestId("recording-indicator")).toHaveTextContent("cancel_subtask");
-      await userEvent.click(screen.getByTestId("record-toggle"));
-
-      expect(invokeMock).toHaveBeenCalledWith("cancel_subtask", expect.any(Object));
-      expect(mediaMocks.getUserMediaMock).toHaveBeenCalled();
-      expect(mediaMocks.trackStopMock).toHaveBeenCalled();
+      expect(await screen.findByTestId("suggestion-action-message")).toHaveTextContent("agent job");
+      expect(screen.getByTestId("voice-cancel-subtask-button")).toBeDisabled();
+      expect(invokeMock).toHaveBeenCalledWith("create_agent_job", expect.any(Object));
     } finally {
-      mediaMocks.restore();
       audioMocks.restore();
-      blobPolyfill.restore();
     }
   });
 
@@ -2290,9 +2572,9 @@ describe("App", () => {
     expect(await screen.findByTestId("companion-revision-card")).toBeInTheDocument();
     expect(invokeMock).toHaveBeenCalledWith("propose_artifact_revision", expect.any(Object));
 
-      await userEvent.type(screen.getByLabelText(/chat input/i), "draft better intro");
-      await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
-      expect(invokeMock).toHaveBeenCalledWith("start_subtask_chain", expect.any(Object));
+    await userEvent.type(screen.getByLabelText(/chat input/i), "draft better intro");
+    await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    expect(invokeMock).toHaveBeenCalledWith("create_agent_job", expect.any(Object));
     });
 
   it("uses clarify path when classifier returns unknown intent", async () => {

@@ -1,3 +1,5 @@
+mod action_bus;
+mod agent_runtime;
 mod ambient;
 mod artifact_parser;
 mod awareness_core;
@@ -13,11 +15,14 @@ mod consolidation;
 mod context_observer;
 mod cost_governor;
 mod coworking;
+mod crisis;
+mod crisis_core;
 mod document_model;
 mod embedding;
 mod errors;
 mod flow;
 mod goal_extraction;
+mod judgment_eval_core;
 mod latency;
 mod local_runtime;
 mod login_item;
@@ -25,6 +30,7 @@ mod memory;
 mod message_kind;
 mod model_router;
 mod models;
+mod native_docs;
 mod onboarding;
 mod proactive;
 mod providers;
@@ -40,11 +46,13 @@ mod store;
 mod streaming;
 mod subtask;
 mod synthesis;
+mod trust;
 mod typing_activity;
 mod user_model;
 mod voice;
 mod voice_naturalness;
 mod voice_session;
+mod wake_word;
 mod watcher;
 mod work_understanding;
 mod workload;
@@ -177,6 +185,23 @@ fn main() {
                 ));
             }
             {
+                let emit_app = app.handle().clone();
+                let mut watcher = jeff_state
+                    .watcher
+                    .lock()
+                    .expect("watcher state lock poisoned");
+                watcher.set_mass_deletion_notify(std::sync::Arc::new(
+                    move |task_id: i64, removed_count: usize, known_file_count: usize| {
+                        crisis::fire_data_loss_risk(
+                            &emit_app,
+                            task_id,
+                            removed_count,
+                            known_file_count,
+                        );
+                    },
+                ));
+            }
+            {
                 let (companion_tx, companion_rx) =
                     mpsc::sync_channel::<subtask::CompanionEvent>(64);
                 jeff_state.subtasks.set_companion_notify(companion_tx);
@@ -294,6 +319,12 @@ fn main() {
             // the first paint rather than waiting for a user interaction.
             ambient::install_tray(&handle, launch_at_login, quiet_mode)
                 .map_err(|error| format!("failed to install tray icon: {error}"))?;
+
+            if let Some(state) = handle.try_state::<JeffState>() {
+                wake_word::maybe_start_from_settings(&state.wake_word, &state.store, &handle);
+                let armed = state.wake_word.status(&state.store).armed;
+                ambient::update_wake_word_armed(&handle, armed);
+            }
 
             // register the global hotkey. registration may fail if the combo
             // is already owned by another app; we surface the conflict via an
@@ -519,6 +550,21 @@ fn main() {
                             cs.update(next_event.clone());
                         }
 
+                        let movement_toward_event = next_event
+                            .as_ref()
+                            .and_then(|event| {
+                                cal_poll_handle
+                                    .try_state::<ContextState>()
+                                    .and_then(|ctx| ctx.current())
+                                    .map(|ctx| {
+                                        crisis_event_matches_context(
+                                            &event.title,
+                                            &ctx.document_title,
+                                        )
+                                    })
+                            })
+                            .unwrap_or(false);
+
                         use tauri::Emitter;
                         let _ = cal_poll_handle.emit(
                             "calendar://event-updated",
@@ -533,6 +579,39 @@ fn main() {
                                 awareness_core::SnapshotTrigger::CalendarEvent,
                                 task.id,
                             );
+                            if let Some(event) = next_event.as_ref() {
+                                crisis::maybe_fire_meeting_imminent(
+                                    &cal_poll_handle,
+                                    task.id,
+                                    event,
+                                    movement_toward_event,
+                                );
+                                let far_from_done = cal_poll_handle
+                                    .try_state::<JeffState>()
+                                    .map(|state| {
+                                        state
+                                            .awareness_core
+                                            .snapshot_immediate()
+                                            .work_understanding
+                                            .as_ref()
+                                            .map(|understanding| {
+                                                !understanding.weak_points.is_empty()
+                                                    || understanding
+                                                        .stuck_signal
+                                                        .as_deref()
+                                                        .map(|value| !value.trim().is_empty())
+                                                        .unwrap_or(false)
+                                            })
+                                            .unwrap_or(false)
+                                    })
+                                    .unwrap_or(false);
+                                crisis::maybe_fire_deadline_collision(
+                                    &cal_poll_handle,
+                                    task.id,
+                                    event.minutes_until,
+                                    far_from_done,
+                                );
+                            }
                         }
 
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -663,6 +742,10 @@ fn main() {
             commands::get_voice_config,
             commands::set_voice_config,
             commands::start_voice_session,
+            commands::get_wake_word_status,
+            commands::set_wake_word_enabled,
+            commands::set_crisis_class_enabled,
+            commands::record_crisis_feedback,
             commands::persist_voice_transcript,
             commands::handle_voice_tool_call,
             commands::set_llm_daily_budget,
@@ -704,6 +787,16 @@ fn main() {
             commands::suggest_subtask,
             commands::refine_subtask,
             commands::convert_subtask_to_revision,
+            commands::create_agent_job,
+            commands::list_agent_jobs,
+            commands::get_agent_job_detail,
+            commands::run_agent_job,
+            commands::send_job_steering,
+            commands::cancel_agent_job,
+            commands::resume_agent_jobs,
+            commands::create_standing_job,
+            commands::list_standing_jobs,
+            commands::run_due_standing_jobs,
             commands::evaluate_next_suggestions,
             commands::list_suggestions,
             commands::accept_suggestion,
@@ -750,6 +843,14 @@ fn main() {
             commands::approve_subtask_file_write,
             commands::reject_subtask_file_write,
             commands::list_write_audit_log,
+            commands::list_action_receipts,
+            commands::revert_action_receipt,
+            commands::request_google_docs_write,
+            commands::get_native_docs_status,
+            commands::request_native_doc_write,
+            commands::list_trust_ladder,
+            commands::set_trust_level,
+            commands::demote_trust_class,
             commands::start_subtask_chain,
             // phase 19
             commands::get_launch_at_login,
@@ -811,6 +912,15 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Jeff desktop app");
+}
+
+fn crisis_event_matches_context(event_title: &str, document_title: &str) -> bool {
+    let document = document_title.to_ascii_lowercase();
+    event_title
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| token.len() >= 4)
+        .any(|token| document.contains(&token))
 }
 
 // phase 24: silent background update check. runs after a short startup

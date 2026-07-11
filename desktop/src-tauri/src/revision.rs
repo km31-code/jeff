@@ -7,6 +7,7 @@ use crate::{
     character::{self, RevisionContext},
     chunking::{chunk_text, DEFAULT_CHUNK_OVERLAP_CHARS, DEFAULT_CHUNK_SIZE_CHARS},
     embedding::EmbeddingProvider,
+    memory,
     message_kind::MessageKind,
     model_router::SystemBlock,
     models::{
@@ -14,7 +15,6 @@ use crate::{
         RevisionProposalResultDto, RevisionTargetDto,
     },
     reasoning::ReasoningProvider,
-    memory,
     relational_model,
     retrieval::build_task_context_pack,
     store::{ChunkEmbeddingInput, NewArtifactVersionInput, NewRevisionProposalInput, TaskStore},
@@ -472,7 +472,11 @@ fn build_revision_prompt(
         target.start_offset,
         target.end_offset,
         target.original_text,
-        if recent_messages.is_empty() { "<none>" } else { recent_messages },
+        if recent_messages.is_empty() {
+            "<none>"
+        } else {
+            recent_messages
+        },
         if retrieved_chunks.is_empty() {
             "<none>"
         } else {
@@ -508,8 +512,11 @@ fn build_revision_system_blocks(
     } else {
         None
     };
-    let recall_query =
-        memory::build_recall_query(Some(task_summary), Some(target_description), Some(instruction));
+    let recall_query = memory::build_recall_query(
+        Some(task_summary),
+        Some(target_description),
+        Some(instruction),
+    );
     let memory_recall = if store
         .get_privacy_user_profile_memory_enabled()
         .unwrap_or(false)
@@ -798,9 +805,7 @@ pub fn generate_revision_alternative(
 
     let user_prompt = format!(
         "Original text:\n{}\n\nPrior proposed revision:\n{}\n\nPrior assessment: {}\n\nNow produce an alternative approach. Return strict JSON only.",
-        original.original_text,
-        original.proposed_text,
-        prior_rationale
+        original.original_text, original.proposed_text, prior_rationale
     );
 
     let raw_candidate = reasoning.generate_response_blocks(&system_blocks, &user_prompt)?;

@@ -129,10 +129,11 @@ grep -q "file-write-proposal-card" "$APP_TSX" || fail "file-write-proposal-card 
 grep -q "file-write-approve-button" "$APP_TSX" || fail "file-write-approve-button missing from App.tsx"
 grep -q "file-write-reject-button" "$APP_TSX" || fail "file-write-reject-button missing from App.tsx"
 grep -q "subtask-step-list\|subtask-steps-" "$APP_TSX" || fail "subtask step progress ui missing from App.tsx"
-grep -q "startSubtaskChain" "$APP_TSX" || fail "startSubtaskChain not used in App.tsx"
+grep -q "createAgentJob" "$APP_TSX" || fail "D5 agent job routing not used in App.tsx"
+grep -q "SUBTASK_CHAIN_RETIRED_BY_D5" "$SUBTASK_RS" || fail "subtask chain retirement marker missing after D5"
 grep -q "fileWriteProposals" "$APP_TSX" || fail "fileWriteProposals state missing from App.tsx"
 grep -q "subtaskStepsById" "$APP_TSX" || fail "subtaskStepsById state missing from App.tsx"
-pass "phase 16 ui surfaces, state, and chain routing present in App.tsx (m16.4)"
+pass "phase 16 ui surfaces/state present; D5 agent job routing supersedes chain routing in App.tsx (m16.4)"
 
 # 15. safety boundary: approval path must use explicit apply state machine and ordered write.
 APPROVE_START=$(grep -n "pub fn approve_subtask_file_write" "$COMMANDS_RS" | head -1 | cut -d: -f1)
@@ -142,21 +143,21 @@ if [ -n "$APPROVE_START" ] && [ -n "$APPROVE_END" ]; then
   echo "$APPROVE_SECTION" | grep -q "begin_file_write_proposal_apply" || fail "approve command does not begin apply state transition"
   echo "$APPROVE_SECTION" | grep -q "complete_file_write_proposal_apply" || fail "approve command does not complete apply state transition"
   echo "$APPROVE_SECTION" | grep -q "rollback_file_write_proposal_apply" || fail "approve command missing rollback on write failure"
-  echo "$APPROVE_SECTION" | grep -q "fs::write" || fail "approve command does not perform explicit filesystem write"
+  echo "$APPROVE_SECTION" | grep -q "FileWriteAdapter::execute_file_write" || fail "approve command does not route mutation through action bus file adapter"
 fi
 
 BEGIN_LINE=$(grep -n "begin_file_write_proposal_apply" "$COMMANDS_RS" | head -1 | cut -d: -f1)
-WRITE_LINE=$(grep -n "fs::write(&dest" "$COMMANDS_RS" | head -1 | cut -d: -f1)
+WRITE_LINE=$(grep -n "FileWriteAdapter::execute_file_write" "$COMMANDS_RS" | head -1 | cut -d: -f1)
 COMPLETE_LINE=$(grep -n "complete_file_write_proposal_apply" "$COMMANDS_RS" | head -1 | cut -d: -f1)
 if [ -n "${BEGIN_LINE:-}" ] && [ -n "${WRITE_LINE:-}" ] && [ -n "${COMPLETE_LINE:-}" ]; then
   if [ "$BEGIN_LINE" -ge "$WRITE_LINE" ]; then
-    fail "approve ordering invalid: begin apply transition must happen before filesystem write"
+    fail "approve ordering invalid: begin apply transition must happen before action bus write"
   fi
   if [ "$WRITE_LINE" -ge "$COMPLETE_LINE" ]; then
-    fail "approve ordering invalid: filesystem write must happen before complete apply transition"
+    fail "approve ordering invalid: action bus write must happen before complete apply transition"
   fi
 fi
-pass "approve command enforces apply state machine with ordered begin/write/complete and rollback (m16.3)"
+pass "approve command enforces apply state machine with ordered begin/action-bus-write/complete and rollback (m16.3)"
 
 # 16. regression: phase 13 watcher symbols still present
 grep -q "fn start_workspace_watcher" "$COMMANDS_RS" || fail "phase 13 regression: start_workspace_watcher missing"

@@ -541,7 +541,10 @@ pub fn build_relational_context(store: &TaskStore) -> Result<Option<String>> {
 
     let mut parts = Vec::new();
     if let Some(goal) = active_goal {
-        parts.push(format!("stated goal: {}", truncate_chars(&goal.goal_text, 100)));
+        parts.push(format!(
+            "stated goal: {}",
+            truncate_chars(&goal.goal_text, 100)
+        ));
     }
     if let Some(pattern) = recent_pattern {
         parts.push(format!(
@@ -631,8 +634,8 @@ fn update_style_signal(store: &TaskStore, key: &str, target: f32) -> Result<()> 
         .optional()
         .context("failed to read collaboration style signal")?
         .unwrap_or(0.5);
-    let next = ((current * (1.0 - EMA_ALPHA)) + (target.clamp(0.0, 1.0) * EMA_ALPHA))
-        .clamp(0.0, 1.0);
+    let next =
+        ((current * (1.0 - EMA_ALPHA)) + (target.clamp(0.0, 1.0) * EMA_ALPHA)).clamp(0.0, 1.0);
     conn.execute(
         &format!(
             "INSERT INTO collaboration_style_signals (key, value, updated_at)

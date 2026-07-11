@@ -7,9 +7,7 @@ use std::{
 use anyhow::{anyhow, Result};
 
 use crate::{
-    local_runtime::{
-        LocalRuntime, LOCAL_EMBEDDING_MODEL_ID, LOCAL_SEMANTIC_EMBEDDING_MODEL_ID,
-    },
+    local_runtime::{LocalRuntime, LOCAL_EMBEDDING_MODEL_ID, LOCAL_SEMANTIC_EMBEDDING_MODEL_ID},
     model_router::LlmUsage,
     models::{IntentClassificationDto, IntentLabel, IntentSlotsDto},
     providers::{EmbeddingsProvider, ReasoningModelProvider},
@@ -304,10 +302,7 @@ fn estimate_tokens(input: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        classifier,
-        local_runtime::LOCAL_REASONING_MODEL_ID,
-    };
+    use crate::{classifier, local_runtime::LOCAL_REASONING_MODEL_ID};
 
     #[test]
     fn a3_local_reflex_classifier_handles_revision_without_api_key() {

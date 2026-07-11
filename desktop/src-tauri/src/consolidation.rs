@@ -9,6 +9,8 @@ use rusqlite::{params, Row};
 #[cfg(not(test))]
 use serde::Deserialize;
 
+#[cfg(not(test))]
+use crate::model_router::{GenerateOptions, ModelRequest, Tier};
 use crate::{
     cost_governor::CONSOLIDATION_BUDGET_KEY,
     embedding::EmbeddingProvider,
@@ -18,8 +20,6 @@ use crate::{
     similarity::cosine_similarity,
     store::{LlmUsageLogInput, TaskStore},
 };
-#[cfg(not(test))]
-use crate::model_router::{GenerateOptions, ModelRequest, Tier};
 
 pub const FACT_KIND_PREFERENCE: &str = "preference";
 pub const FACT_KIND_CONSTRAINT: &str = "constraint";

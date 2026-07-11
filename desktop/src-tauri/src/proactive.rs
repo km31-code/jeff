@@ -11,8 +11,8 @@ use crate::{
     ambient::AmbientState,
     character::{self, ReorientationContext},
     embedding::EmbeddingProvider,
-    message_kind::MessageKind,
     memory,
+    message_kind::MessageKind,
     models::{DriftFlagDto, ReorientationDto, SubTaskDto},
     reasoning::ReasoningProvider,
     retrieval::retrieve_relevant_chunks,
@@ -31,8 +31,7 @@ pub const STUCK_SILENCE_THRESHOLD_SECONDS: i64 = 600;
 pub const DRIFT_SIMILARITY_THRESHOLD: f32 = 0.6;
 pub const EVENT_PROACTIVE_MESSAGE_INSERTED: &str = "proactive://message_inserted";
 
-const DRIFT_SYSTEM_PROMPT: &str =
-    "You are Jeff's drift detector. Given the task goal and current text, determine if the current text diverges from the stated task goal. Return strict JSON only: {\"is_drifting\": bool, \"reason\": string, \"confidence\": number}";
+const DRIFT_SYSTEM_PROMPT: &str = "You are Jeff's drift detector. Given the task goal and current text, determine if the current text diverges from the stated task goal. Return strict JSON only: {\"is_drifting\": bool, \"reason\": string, \"confidence\": number}";
 
 // phase 22 voice rule for reorientation: No filler phrases. The shared
 // character prompt carries the instruction and strip_filler_phrases cleans the

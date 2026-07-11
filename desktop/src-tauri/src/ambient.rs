@@ -76,6 +76,7 @@ pub struct AmbientStateDto {
     pub notification_permission: String,
     pub single_instance: bool,
     pub quiet_mode: bool,
+    pub wake_word_armed: bool,
 }
 
 // ambient state is independent from the rest of JeffState on purpose:
@@ -94,6 +95,7 @@ struct AmbientStateInner {
     hotkey_registered: bool,
     notification_permission: String,
     quiet_mode: bool,
+    wake_word_armed: bool,
 }
 
 impl AmbientState {
@@ -107,6 +109,7 @@ impl AmbientState {
                 hotkey_registered: false,
                 notification_permission: "unknown".to_string(),
                 quiet_mode: false,
+                wake_word_armed: false,
             }),
         }
     }
@@ -122,6 +125,7 @@ impl AmbientState {
             notification_permission: guard.notification_permission.clone(),
             single_instance: true,
             quiet_mode: guard.quiet_mode,
+            wake_word_armed: guard.wake_word_armed,
         }
     }
 
@@ -153,6 +157,11 @@ impl AmbientState {
     pub fn set_quiet_mode(&self, quiet: bool) {
         let mut guard = self.inner.lock().expect("ambient state lock poisoned");
         guard.quiet_mode = quiet;
+    }
+
+    pub fn set_wake_word_armed(&self, armed: bool) {
+        let mut guard = self.inner.lock().expect("ambient state lock poisoned");
+        guard.wake_word_armed = armed;
     }
 
     pub fn is_quiet_mode(&self) -> bool {
@@ -502,8 +511,8 @@ pub fn ambient_set_tray_status<R: Runtime>(
     status: TrayStatus,
 ) -> Result<AmbientStateDto, String> {
     state.set_tray_status(status);
-    apply_tray_tooltip(&app, status);
     let snapshot = state.snapshot();
+    apply_tray_tooltip(&app, snapshot.tray_status, snapshot.wake_word_armed);
     let _ = app.emit("ambient://state-changed", &snapshot);
     Ok(snapshot)
 }
@@ -545,9 +554,26 @@ pub fn ambient_mark_notification_permission(
 
 // ---- tray -------------------------------------------------------------------
 
-fn apply_tray_tooltip<R: Runtime>(app: &AppHandle<R>, status: TrayStatus) {
+fn apply_tray_tooltip<R: Runtime>(app: &AppHandle<R>, status: TrayStatus, wake_word_armed: bool) {
     if let Some(tray) = app.tray_by_id("jeff-tray") {
-        let _ = tray.set_tooltip(Some(status.tooltip()));
+        let _ = tray.set_tooltip(Some(tray_tooltip(status, wake_word_armed)));
+    }
+}
+
+fn tray_tooltip(status: TrayStatus, wake_word_armed: bool) -> String {
+    if wake_word_armed {
+        format!("{} - wake word armed", status.tooltip())
+    } else {
+        status.tooltip().to_string()
+    }
+}
+
+pub fn update_wake_word_armed<R: Runtime>(app: &AppHandle<R>, armed: bool) {
+    if let Some(state) = app.try_state::<AmbientState>() {
+        state.set_wake_word_armed(armed);
+        let snapshot = state.snapshot();
+        apply_tray_tooltip(app, snapshot.tray_status, armed);
+        let _ = app.emit("ambient://state-changed", &snapshot);
     }
 }
 

@@ -3,11 +3,11 @@ use anyhow::{anyhow, Result};
 use crate::{
     character::{self, ChatContext},
     embedding::EmbeddingProvider,
+    memory,
     message_kind::{classify_user_message_kind, MessageKind},
     model_router::SystemBlock,
     models::{SendMessageResponseDto, TaskContextPackDto},
     reasoning::ReasoningProvider,
-    memory,
     relational_model,
     retrieval::build_task_context_pack,
     store::TaskStore,

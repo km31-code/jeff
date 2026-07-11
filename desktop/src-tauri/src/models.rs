@@ -270,6 +270,104 @@ pub struct SubTaskDto {
     pub error_message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentJobDto {
+    pub id: i64,
+    pub task_id: i64,
+    pub goal_contract: String,
+    pub plan_json: String,
+    pub budget_json: String,
+    pub status: String,
+    pub speculative: bool,
+    pub deliverable_json: Option<String>,
+    pub verification_transcript: Option<String>,
+    pub capability_request_json: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentJobStepDto {
+    pub id: i64,
+    pub job_id: i64,
+    pub step_index: i64,
+    pub phase: String,
+    pub status: String,
+    pub title: String,
+    pub input_json: String,
+    pub output_json: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentJobArtifactDto {
+    pub id: i64,
+    pub job_id: i64,
+    pub artifact_type: String,
+    pub title: String,
+    pub content: String,
+    pub metadata_json: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentJobEventDto {
+    pub id: i64,
+    pub job_id: i64,
+    pub event_type: String,
+    pub payload_json: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentJobCheckpointDto {
+    pub id: i64,
+    pub job_id: i64,
+    pub step_index: i64,
+    pub phase: String,
+    pub state_json: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentJobSteeringDto {
+    pub id: i64,
+    pub job_id: i64,
+    pub message: String,
+    pub status: String,
+    pub boundary_step_index: Option<i64>,
+    pub created_at: String,
+    pub applied_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentJobDetailDto {
+    pub job: AgentJobDto,
+    pub steps: Vec<AgentJobStepDto>,
+    pub artifacts: Vec<AgentJobArtifactDto>,
+    pub events: Vec<AgentJobEventDto>,
+    pub checkpoints: Vec<AgentJobCheckpointDto>,
+    pub steering: Vec<AgentJobSteeringDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StandingJobDto {
+    pub id: i64,
+    pub task_id: i64,
+    pub goal_contract: String,
+    pub schedule_spec: String,
+    pub trigger_kind: String,
+    pub next_run_at: String,
+    pub enabled: bool,
+    pub critical: bool,
+    pub last_job_id: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubTaskSuggestionDto {
     pub task_id: i64,
@@ -474,6 +572,46 @@ pub struct WriteAuditEntryDto {
     pub resolved_at: String,
     // populated at runtime on approve; None when loaded from DB
     pub resolved_path: Option<String>,
+    // apex d1: populated at runtime when a legacy write audit row maps to the action bus.
+    pub action_receipt_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionReceiptDto {
+    pub id: i64,
+    pub task_id: i64,
+    pub class: String,
+    pub surface: String,
+    pub level: String,
+    pub description: String,
+    pub payload_excerpt: String,
+    pub status: String,
+    pub failure_reason: Option<String>,
+    pub undo_ref: Option<String>,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeDocsStatusDto {
+    pub pages_supported: bool,
+    pub word_supported: bool,
+    pub automation_permission_status: String,
+    pub automation_permission_explainer: String,
+    pub ax_buffer_writeback_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrustLevelDto {
+    pub class: String,
+    pub level: String,
+    pub max_level: String,
+    pub approval_streak: i64,
+    pub graduation_offer: Option<String>,
+    pub graduation_offered_at: Option<String>,
+    pub sticky_l1: bool,
+    pub updated_at: String,
+    pub recent_history: Vec<ActionReceiptDto>,
 }
 
 // phase 18: onboarding and secure key setup
@@ -534,6 +672,11 @@ pub struct PrivacyCenterDashboardDto {
     pub typing_activity_enabled: bool,
     pub tts_voice: String,
     pub available_tts_voices: Vec<String>,
+    pub wake_word: WakeWordStatusDto,
+    pub crisis_controls: Vec<CrisisClassControlDto>,
+    pub action_receipts: Vec<ActionReceiptDto>,
+    pub native_docs: NativeDocsStatusDto,
+    pub trust_ladder: Vec<TrustLevelDto>,
     // phase 31: content observation status fields
     pub content_observation_enabled: bool,
     pub content_observation_last_captured_at: Option<String>,
@@ -545,6 +688,38 @@ pub struct PrivacyCenterDashboardDto {
     pub local_runtime: LocalRuntimeStatusDto,
     // apex a4: spend metering and budget status.
     pub cost_governor: CostGovernorStatusDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WakeWordStatusDto {
+    pub enabled: bool,
+    pub configured: bool,
+    pub armed: bool,
+    pub running: bool,
+    pub sidecar_pid: Option<u32>,
+    pub phrase: String,
+    pub last_detected_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub no_raw_audio_ipc: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CrisisClassControlDto {
+    pub class: String,
+    pub label: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CrisisCardDto {
+    pub task_id: i64,
+    pub class: String,
+    pub title: String,
+    pub message: String,
+    pub evidence: String,
+    pub delivery_channel: String,
+    pub quiet_downgraded: bool,
+    pub voice_if_session_open: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

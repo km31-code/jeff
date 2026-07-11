@@ -50,6 +50,12 @@ jobs:
       - name: cargo test
         run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
 
+      - name: judgment eval
+        run: bash scripts/judgment_eval.sh
+
+      - name: crisis override-channel eval
+        run: bash scripts/crisis_eval.sh
+
       - name: phase 17 latency regression gate
         run: bash scripts/phase17_check.sh
 
@@ -119,6 +125,29 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           JEFF_CHARACTER_EVAL_SEED: release
         run: bash scripts/character_eval.sh
+
+      - name: voice transcript character eval
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          JEFF_CHARACTER_EVAL_SEED: release-voice
+        run: |
+          python3 - <<'PY'
+          import json
+
+          with open("eval/character_eval.json", "r", encoding="utf-8") as handle:
+              cases = json.load(handle)
+          voice_cases = [
+              case for case in cases
+              if str(case.get("id", "")).startswith("c6_voice_transcript_")
+          ]
+          if len(voice_cases) != 10:
+              raise SystemExit(f"expected 10 c6 voice cases, got {len(voice_cases)}")
+          with open("/tmp/jeff_voice_character_eval.json", "w", encoding="utf-8") as handle:
+              json.dump(voice_cases, handle, indent=2)
+              handle.write("\n")
+          PY
+          JEFF_CHARACTER_EVAL_SAMPLE_SIZE=10 JEFF_CHARACTER_EVAL_PASS_BAR=9 \
+            bash scripts/character_eval.sh /tmp/jeff_voice_character_eval.json
 
   sign:
     needs: [build, character-eval]

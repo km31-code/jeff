@@ -381,7 +381,9 @@ impl ModelRouter {
             _ => RouterConfig::default(),
         };
         match local_runtime {
-            Some(local_runtime) => Self::with_local_runtime_and_store(config, local_runtime, store.clone()),
+            Some(local_runtime) => {
+                Self::with_local_runtime_and_store(config, local_runtime, store.clone())
+            }
             None => Self {
                 config: RwLock::new(config),
                 local_runtime: None,
@@ -734,7 +736,10 @@ impl ModelRouter {
                 budget_decision.requested_tier.as_str(),
                 budget_decision.effective_tier.as_str(),
                 purpose,
-                budget_decision.notice.as_deref().unwrap_or("<already-sent>")
+                budget_decision
+                    .notice
+                    .as_deref()
+                    .unwrap_or("<already-sent>")
             );
         }
         let effective_tier = budget_decision.effective_tier;
@@ -817,7 +822,10 @@ impl ModelRouter {
                 budget_decision.requested_tier.as_str(),
                 budget_decision.effective_tier.as_str(),
                 purpose,
-                budget_decision.notice.as_deref().unwrap_or("<already-sent>")
+                budget_decision
+                    .notice
+                    .as_deref()
+                    .unwrap_or("<already-sent>")
             );
         }
         let effective_tier = budget_decision.effective_tier;

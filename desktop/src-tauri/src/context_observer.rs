@@ -490,8 +490,8 @@ mod inner {
 }
 
 pub use inner::{
-    get_frontmost_pid, is_accessibility_trusted, poll_active_window,
-    read_ax_document_text, request_accessibility_permission,
+    get_frontmost_pid, is_accessibility_trusted, poll_active_window, read_ax_document_text,
+    request_accessibility_permission,
 };
 
 // strip common app-name suffixes from window titles so the document name
@@ -556,7 +556,11 @@ pub fn summarize_content_observation(
         }
     };
 
-    let new_stable = if content_changed { 0 } else { stable_for_ticks + 1 };
+    let new_stable = if content_changed {
+        0
+    } else {
+        stable_for_ticks + 1
+    };
 
     ContentObservation {
         word_count,

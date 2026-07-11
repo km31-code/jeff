@@ -40,6 +40,37 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
 
+  // apex d2: Google Docs tracked/suggested write-back. This path anchors by
+  // 50-char surrounding context and reports guided fallback before touching the
+  // document when the anchor has drifted.
+  if (message.type === "JEFF_APPLY_GOOGLE_DOCS_ACTION") {
+    applyGoogleDocsAction(message).then(result => {
+      if (!result.ok && result.anchorMismatch) {
+        fetch(`http://127.0.0.1:${message.port}/apply-fallback`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: message.token,
+            receipt_id: message.receiptId,
+            reason: result.reason || "anchor_miss"
+          })
+        }).catch(() => {});
+      } else {
+        fetch(`http://127.0.0.1:${message.port}/apply-result`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: message.token,
+            receipt_id: message.receiptId,
+            status: result.ok ? "applied" : "failed",
+            error: result.reason || result.mode || null
+          })
+        }).catch(() => {});
+      }
+    });
+    return false;
+  }
+
   return false;
 });
 
@@ -218,4 +249,88 @@ async function applyEditInPlace(message) {
   } catch (error) {
     return { ok: false, reason: String(error && error.message ? error.message : error) };
   }
+}
+
+function normalizeAnchorText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function buildAnchorContext50(fullText, beforeText) {
+  const text = String(fullText || "");
+  const target = String(beforeText || "");
+  const index = text.indexOf(target);
+  if (index < 0) {
+    return { anchorBefore: "", anchorAfter: "" };
+  }
+  return {
+    anchorBefore: text.slice(Math.max(0, index - 50), index),
+    anchorAfter: text.slice(index + target.length, index + target.length + 50)
+  };
+}
+
+function anchorMatchesDocument(documentText, beforeText, anchorBefore, anchorAfter) {
+  const exactNeedle = `${anchorBefore || ""}${beforeText || ""}${anchorAfter || ""}`;
+  if (exactNeedle.trim() && documentText.includes(exactNeedle)) {
+    return true;
+  }
+  const normalizedDoc = normalizeAnchorText(documentText);
+  const normalizedNeedle = normalizeAnchorText(exactNeedle);
+  if (normalizedNeedle && normalizedDoc.includes(normalizedNeedle)) {
+    return true;
+  }
+  const normalizedBefore = normalizeAnchorText(beforeText);
+  return Boolean(normalizedBefore && normalizedDoc.includes(normalizedBefore));
+}
+
+function detectGoogleDocsSuggestingMode() {
+  const controls = [
+    ...document.querySelectorAll("[aria-label]"),
+    ...document.querySelectorAll("[data-tooltip]")
+  ];
+  return controls.some((node) => {
+    const label = `${node.getAttribute("aria-label") || ""} ${node.getAttribute("data-tooltip") || ""}`.toLowerCase();
+    const pressed = node.getAttribute("aria-pressed") === "true";
+    return pressed && (label.includes("suggest") || label.includes("suggesting"));
+  });
+}
+
+function selectTextWithWindowFind(text) {
+  if (!text || typeof window.find !== "function") {
+    return false;
+  }
+  window.getSelection()?.removeAllRanges();
+  return window.find(text, false, false, true, false, false, false);
+}
+
+async function applyGoogleDocsAction(message) {
+  if (window.location.origin !== "https://docs.google.com") {
+    return { ok: false, reason: "unsupported_origin" };
+  }
+
+  const beforeText = String(message.beforeText || "");
+  const afterText = String(message.afterText || "");
+  const documentText = extractGoogleDocsText();
+  const fallbackContext = buildAnchorContext50(documentText, beforeText);
+  const anchorBefore = String(message.anchorBefore ?? fallbackContext.anchorBefore);
+  const anchorAfter = String(message.anchorAfter ?? fallbackContext.anchorAfter);
+
+  if (!anchorMatchesDocument(documentText, beforeText, anchorBefore, anchorAfter)) {
+    return { ok: false, anchorMismatch: true, reason: "anchor_miss" };
+  }
+
+  const selected = window.getSelection ? window.getSelection().toString() : "";
+  if (normalizeAnchorText(selected) !== normalizeAnchorText(beforeText)) {
+    const found = selectTextWithWindowFind(beforeText);
+    if (!found) {
+      return { ok: false, anchorMismatch: true, reason: "anchor_miss" };
+    }
+  }
+
+  const mode = detectGoogleDocsSuggestingMode() ? "suggesting" : "direct";
+  const result = await applyEditInPlace({
+    beforeText,
+    afterText,
+    anchorHash: message.anchorHash
+  });
+  return result.ok ? { ok: true, mode } : result;
 }

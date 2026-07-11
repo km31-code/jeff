@@ -28,6 +28,7 @@ pub const KIND_USER_FACT: &str = "user_fact";
 const MAX_EPISODE_TEXT_CHARS: usize = 900;
 const MAX_SESSION_SUMMARY_WORDS: usize = 120;
 const MEMORY_TAG_TIMEOUT_MS: u64 = 4000;
+#[cfg_attr(test, allow(dead_code))]
 const SESSION_SUMMARY_TIMEOUT_MS: u64 = 8000;
 const SESSION_SUMMARY_KEY_PREFIX: &str = "memory:last_session_summary_message_id:";
 
@@ -36,6 +37,7 @@ Return JSON only: {\"episodes\":[{\"kind\":\"decision|deadline_mention|user_fact
 Only include explicit user decisions, deadline/date mentions, and durable user/work facts. \
 Do not include chit-chat, thanks, compliments, jokes, or generic requests.";
 
+#[cfg_attr(test, allow(dead_code))]
 pub const SESSION_SUMMARY_SYSTEM_PROMPT: &str = "Summarize this work session for future memory. \
 Write at most 120 words. Capture concrete decisions, progress, blockers, deadlines, and user preferences. \
 Do not flatter, do not narrate the summarization, and do not invent details.";
@@ -361,6 +363,12 @@ fn extract_memory_tags(
     parse_memory_tag_json(&raw, 0)
 }
 
+#[cfg(test)]
+fn summarize_session_with_fallback(_router: &ModelRouter, messages: &[ChatMessageDto]) -> String {
+    deterministic_session_summary(messages)
+}
+
+#[cfg(not(test))]
 fn summarize_session_with_fallback(router: &ModelRouter, messages: &[ChatMessageDto]) -> String {
     let prompt = build_transcript_prompt(messages);
     if prompt.trim().is_empty() {
@@ -589,7 +597,11 @@ fn list_episode_embeddings(
         .context("failed to collect episode embeddings")
 }
 
-fn recall_result(store: &TaskStore, query_embedding: &[f32], k: usize) -> Result<Vec<RecalledItem>> {
+fn recall_result(
+    store: &TaskStore,
+    query_embedding: &[f32],
+    k: usize,
+) -> Result<Vec<RecalledItem>> {
     let now = chrono::Utc::now().timestamp();
     let mut items = Vec::new();
     items.extend(list_recall_facts(store, query_embedding, now)?);
@@ -1172,16 +1184,12 @@ mod tests {
             .unwrap();
         let recalled = recall(&store, &query, 3);
         assert!(!recalled.is_empty());
-        assert!(
-            recalled
-                .iter()
-                .any(|item| item.text.contains("direct first-person assessment"))
-        );
-        assert!(
-            recalled
-                .iter()
-                .any(|item| item.source_type == "episode" && item.text.contains("assessment"))
-        );
+        assert!(recalled
+            .iter()
+            .any(|item| item.text.contains("direct first-person assessment")));
+        assert!(recalled
+            .iter()
+            .any(|item| item.source_type == "episode" && item.text.contains("assessment")));
         assert!(
             recalled[0].text.contains("assessment"),
             "top recall should match the revision assessment query: {recalled:?}"
@@ -1200,13 +1208,8 @@ mod tests {
             0.95,
             "2026-01-09T00:00:00.000Z",
         );
-        let block = build_recall_block(
-            &store,
-            &provider,
-            "direct assessment tradeoff revision",
-            4,
-        )
-        .unwrap();
+        let block = build_recall_block(&store, &provider, "direct assessment tradeoff revision", 4)
+            .unwrap();
         assert!(block.starts_with("Memory recall:"));
         assert!(
             block.split_whitespace().count() <= MAX_RECALL_BLOCK_WORDS,

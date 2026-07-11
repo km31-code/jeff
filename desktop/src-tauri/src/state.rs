@@ -19,6 +19,7 @@ use crate::{
     store::TaskStore,
     streaming::SharedRegistry,
     subtask::SubTaskRunner,
+    wake_word::WakeWordManager,
     watcher::WatcherState,
 };
 
@@ -51,6 +52,9 @@ pub struct JeffState {
     // apex b2: dedup guard for the lull-triggered goal extractor so it fires at
     // most once per (task, latest user message).
     pub goal_extraction: Arc<GoalExtractionState>,
+    // apex c5: wake-word sidecar lifecycle. armed means the detector process is
+    // alive; raw microphone audio never enters this process.
+    pub wake_word: Arc<WakeWordManager>,
 }
 
 impl JeffState {
@@ -85,6 +89,7 @@ impl JeffState {
             content_observation: Arc::new(Mutex::new(ContentObservationState::default())),
             document_model: Arc::new(Mutex::new(crate::document_model::DocumentModel::new())),
             goal_extraction: Arc::new(GoalExtractionState::new()),
+            wake_word: Arc::new(WakeWordManager::new()),
         }
     }
 

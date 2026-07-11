@@ -436,10 +436,7 @@ pub fn should_speak_proactively(
     select_base_reason(snapshot, now)
 }
 
-fn select_base_reason(
-    snapshot: &SituationalSnapshot,
-    now: i64,
-) -> Option<ProactiveSpeechReason> {
+fn select_base_reason(snapshot: &SituationalSnapshot, now: i64) -> Option<ProactiveSpeechReason> {
     // use the most recent of last_focus_at or last_meaningful_turn as "last active" time
     // so idle_seconds reflects actual disengagement, not just conversational silence.
     let last_active_at = [snapshot.last_focus_at, snapshot.last_meaningful_turn]
@@ -450,9 +447,7 @@ fn select_base_reason(
     let idle_seconds = last_active_at.map(|t| now.saturating_sub(t)).unwrap_or(0);
     // apex c2: trigger_weight down-weighting is retired in favor of the ledger.
     // the user_model keys remain for the "Jeff remembers" panel.
-    let idle_threshold = {
-        DEFAULT_RETURN_IDLE_THRESHOLD_SECONDS
-    };
+    let idle_threshold = { DEFAULT_RETURN_IDLE_THRESHOLD_SECONDS };
 
     if snapshot.attention_state == AttentionState::Returning && idle_seconds > idle_threshold {
         return Some(ProactiveSpeechReason::TaskReturn {
@@ -679,7 +674,10 @@ fn assemble_snapshot(
 // apex c2: focus depth in 0-1. attention state provides the base (typing
 // cadence feeds attention_state since phase 22), sharpened by how recently the
 // document changed: actively editing raises focus, long content idle lowers it.
-pub fn compute_focus_score(attention_state: AttentionState, content_idle_seconds: Option<u32>) -> f32 {
+pub fn compute_focus_score(
+    attention_state: AttentionState,
+    content_idle_seconds: Option<u32>,
+) -> f32 {
     let base: f32 = match attention_state {
         AttentionState::Focused => 0.7,
         AttentionState::Drifting => 0.45,
@@ -1061,7 +1059,7 @@ mod tests {
             argument_summary: "The draft argues that citizenship policy needs clearer evidence."
                 .to_string(),
             weak_points: vec![
-                "Section 2: the causal link is asserted without evidence.".to_string(),
+                "Section 2: the causal link is asserted without evidence.".to_string()
             ],
             stuck_signal: None,
             candidate_observation: Some("Ask for evidence in section 2.".to_string()),
@@ -1172,8 +1170,7 @@ mod tests {
             description: "proposal".to_string(),
             created_at: now - 3600,
         }];
-        let candidate =
-            generate_proactive_candidate(&snapshot, &UserProfile::default(), None, now);
+        let candidate = generate_proactive_candidate(&snapshot, &UserProfile::default(), None, now);
         // Option is inherently a single candidate; the highest-priority base
         // reason (task return) wins over the later sources.
         assert_eq!(
@@ -1226,7 +1223,10 @@ mod tests {
     fn c2_focus_score_high_when_typing_low_when_idle() {
         // typing burst: focused attention, content actively changing -> high.
         let typing = compute_focus_score(AttentionState::Focused, Some(0));
-        assert!(typing >= 0.8, "typing burst should be high focus, got {typing}");
+        assert!(
+            typing >= 0.8,
+            "typing burst should be high focus, got {typing}"
+        );
         // idle: idle attention, long content pause -> low.
         let idle = compute_focus_score(AttentionState::Idle, Some(600));
         assert!(idle <= 0.2, "idle should be low focus, got {idle}");

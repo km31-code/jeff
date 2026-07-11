@@ -91,12 +91,7 @@ When the user asks you to act, call the route_request tool with their request in
 
 // persist one side of a voice turn as a normal chat message so memory,
 // episodes, and evals see voice sessions exactly like typed ones.
-pub fn persist_voice_turn(
-    store: &TaskStore,
-    task_id: i64,
-    role: &str,
-    text: &str,
-) -> Result<i64> {
+pub fn persist_voice_turn(store: &TaskStore, task_id: i64, role: &str, text: &str) -> Result<i64> {
     let clean = text.trim();
     if clean.is_empty() {
         return Ok(0);
@@ -148,13 +143,22 @@ pub fn load_voice_config(store: &TaskStore) -> VoiceConfigDto {
 pub struct RealtimeVoiceSession {
     voice: String,
     state: std::sync::Mutex<VoiceSessionState>,
+    mint_session: fn(&str, &str) -> Result<RealtimeCredentials>,
 }
 
 impl RealtimeVoiceSession {
     pub fn new(voice: impl Into<String>) -> Self {
+        Self::with_minter(voice, realtime::mint_realtime_session)
+    }
+
+    fn with_minter(
+        voice: impl Into<String>,
+        mint_session: fn(&str, &str) -> Result<RealtimeCredentials>,
+    ) -> Self {
         Self {
             voice: voice.into(),
             state: std::sync::Mutex::new(VoiceSessionState::Idle),
+            mint_session,
         }
     }
 
@@ -176,7 +180,7 @@ impl RealtimeVoiceSession {
 impl VoiceSession for RealtimeVoiceSession {
     fn open(&self, instructions: &str) -> Result<RealtimeCredentials> {
         self.set_state(VoiceSessionState::Connecting);
-        match realtime::mint_realtime_session(&self.voice, instructions) {
+        match (self.mint_session)(&self.voice, instructions) {
             Ok(credentials) => {
                 self.set_state(VoiceSessionState::Live);
                 Ok(credentials)
@@ -234,7 +238,10 @@ mod tests {
         assert_eq!(action, VoiceAction::RouteAsText("fix it".to_string()));
         // "fix it" spoken == "fix it" typed.
         assert_eq!(
-            route_voice_tool_call("route_request", &serde_json::json!({ "text": "  fix it  " })),
+            route_voice_tool_call(
+                "route_request",
+                &serde_json::json!({ "text": "  fix it  " })
+            ),
             VoiceAction::RouteAsText("fix it".to_string())
         );
         assert_eq!(
@@ -250,11 +257,15 @@ mod tests {
     #[test]
     fn c4_voice_turns_persist_as_normal_chat_messages() {
         let (_dir, store, task_id) = store();
-        let user_id = persist_voice_turn(&store, task_id, "user", "where is my argument weakest?")
-            .unwrap();
-        let assistant_id =
-            persist_voice_turn(&store, task_id, "assistant", "section two, it lacks evidence")
-                .unwrap();
+        let user_id =
+            persist_voice_turn(&store, task_id, "user", "where is my argument weakest?").unwrap();
+        let assistant_id = persist_voice_turn(
+            &store,
+            task_id,
+            "assistant",
+            "section two, it lacks evidence",
+        )
+        .unwrap();
         assert!(user_id > 0 && assistant_id > 0);
         let messages = store.list_recent_chat_messages(task_id, 10).unwrap();
         assert_eq!(messages.len(), 2);
@@ -266,8 +277,14 @@ mod tests {
     #[test]
     fn c4_empty_voice_turn_is_not_persisted() {
         let (_dir, store, task_id) = store();
-        assert_eq!(persist_voice_turn(&store, task_id, "user", "   ").unwrap(), 0);
-        assert!(store.list_recent_chat_messages(task_id, 10).unwrap().is_empty());
+        assert_eq!(
+            persist_voice_turn(&store, task_id, "user", "   ").unwrap(),
+            0
+        );
+        assert!(store
+            .list_recent_chat_messages(task_id, 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -278,9 +295,12 @@ mod tests {
     }
 
     #[test]
-    fn c4_session_state_moves_to_fallback_without_key() {
-        // no key configured in the test env -> mint fails -> fallback state.
-        let session = RealtimeVoiceSession::new("verse");
+    fn c4_session_state_moves_to_fallback_on_mint_error() {
+        fn fail_mint(_voice: &str, _instructions: &str) -> Result<RealtimeCredentials> {
+            Err(anyhow::anyhow!("simulated mint failure"))
+        }
+
+        let session = RealtimeVoiceSession::with_minter("verse", fail_mint);
         assert_eq!(session.state(), VoiceSessionState::Idle);
         let result = session.open("be a coworker");
         assert!(result.is_err());

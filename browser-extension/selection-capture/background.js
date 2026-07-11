@@ -100,7 +100,7 @@ async function setActiveSiteObservationEnabled(enabled) {
 // phase 23: poll for approval of a pending live edit and dispatch to the
 // active content script when approved. falls back to guided apply on rejection
 // or anchor mismatch.
-async function pollForLiveEditApproval(receiptId, beforeText, afterText, anchorHash, tabId, port, token) {
+async function pollForLiveEditApproval(receiptId, beforeText, afterText, anchorHash, tabId, port, token, options = {}) {
   const MAX_POLLS = 40; // 20 seconds at 500ms intervals
   for (let i = 0; i < MAX_POLLS; i++) {
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -110,12 +110,16 @@ async function pollForLiveEditApproval(receiptId, beforeText, afterText, anchorH
       const data = await resp.json();
       if (data.status === "approved") {
         // dispatch the apply command to the content script
+        const googleDocs = options.editorSurface === "google_docs" || options.editorSurface === "Google Docs";
         chrome.tabs.sendMessage(tabId, {
-          type: "JEFF_APPLY_EDIT",
+          type: googleDocs ? "JEFF_APPLY_GOOGLE_DOCS_ACTION" : "JEFF_APPLY_EDIT",
           receiptId,
           beforeText,
           afterText,
           anchorHash,
+          anchorBefore: options.anchorBefore || "",
+          anchorAfter: options.anchorAfter || "",
+          preferSuggesting: options.preferSuggesting !== false,
           token,
           port
         });
@@ -168,7 +172,13 @@ async function handleLiveEditProposal(proposal) {
       anchorHash,
       proposal.tabId,
       config.port,
-      config.token
+      config.token,
+      {
+        editorSurface: proposal.editorSurface || "",
+        anchorBefore: proposal.anchorBefore || "",
+        anchorAfter: proposal.anchorAfter || "",
+        preferSuggesting: proposal.preferSuggesting !== false
+      }
     );
   }
 }

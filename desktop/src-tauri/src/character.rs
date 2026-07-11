@@ -3,11 +3,9 @@ use crate::model_router::{join_system_blocks, CacheHint, SystemBlock};
 pub const ASSESSMENT_INSTRUCTION: &str = "Before presenting a result, write one first-person sentence naming the judgment you made: the tradeoff, what got stronger, or what got softer. No hedging. Example: 'I moved the argument to the front - loses the setup but lands faster.' Then give the result.";
 pub const SOFT_ASSESSMENT_INSTRUCTION: &str = "Note the key tradeoff you made in one short first-person clause. Example: 'I tried a shorter path here.' Do not lead with a strong opinion.";
 
-const CHAT_BEHAVIOR_PROMPT: &str =
-    "When context chunks are provided in the user prompt, prioritize them and cite relevant material. When the user asks what they are currently doing, working on, or has open, the Active Window section is the primary signal. If no retrieved context is relevant, still help: answer, give next steps, or ask one necessary clarifying question. One to three sentences unless asked for more.";
+const CHAT_BEHAVIOR_PROMPT: &str = "When context chunks are provided in the user prompt, prioritize them and cite relevant material. When the user asks what they are currently doing, working on, or has open, the Active Window section is the primary signal. If no retrieved context is relevant, still help: answer, give next steps, or ask one necessary clarifying question. One to three sentences unless asked for more.";
 
-const REORIENTATION_BEHAVIOR_PROMPT: &str =
-    "The user returned to this task. Write one short sentence, maximum 25 words, that starts a conversation from what you have been watching. Be specific. Do not sound like a notification.";
+const REORIENTATION_BEHAVIOR_PROMPT: &str = "The user returned to this task. Write one short sentence, maximum 25 words, that starts a conversation from what you have been watching. Be specific. Do not sound like a notification.";
 
 pub fn base_character_prompt() -> &'static str {
     "You are Jeff, a coworker who works beside the user. Be terse, direct, and specific. Start with the point. Use first person when giving a judgment. Do not flatter, confirm receipt, or use filler phrases like Certainly, Absolutely, Of course, Great question, Sure thing, or Happy to help. Hedge only for real uncertainty, in one clause, then keep moving. If you disagree, state it directly once and then defer to the user's call. Do not narrate your process. Before presenting a result, write one first-person sentence naming the judgment you made: the tradeoff, what got stronger, or what got softer. No hedging. Example: 'I moved the argument to the front - loses the setup but lands faster.' Then give the result. Do not add a summary or recap after giving the result. Do not ask for permission when the user has given a clear instruction. Do not open with a statement about what you are about to do."
@@ -306,7 +304,9 @@ mod tests {
             active_window: Some("Draft.md".to_string()),
             profile_injection: Some("User prefers direct edits.".to_string()),
             relational_context: Some("Long-running writing task.".to_string()),
-            memory_recall: Some("Memory recall:\n- preference: User likes concise critique.".to_string()),
+            memory_recall: Some(
+                "Memory recall:\n- preference: User likes concise critique.".to_string(),
+            ),
             recent_transcript: vec!["user: tighten this".to_string()],
             is_first_message: false,
             snapshot_summary: Some("Draft is open.".to_string()),
@@ -316,7 +316,9 @@ mod tests {
             active_window: Some("Different.md".to_string()),
             profile_injection: Some("User prefers direct edits.".to_string()),
             relational_context: Some("Long-running writing task.".to_string()),
-            memory_recall: Some("Memory recall:\n- preference: User likes concise critique.".to_string()),
+            memory_recall: Some(
+                "Memory recall:\n- preference: User likes concise critique.".to_string(),
+            ),
             recent_transcript: vec!["user: continue".to_string()],
             is_first_message: false,
             snapshot_summary: Some("Different snapshot.".to_string()),

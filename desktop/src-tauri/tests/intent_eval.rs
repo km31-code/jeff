@@ -321,10 +321,7 @@ fn slot_match_accepts_equivalent_phrasings() {
         "mutex vs semaphore",
         Some("difference between a mutex and a semaphore")
     ));
-    assert!(slot_matches(
-        "rephrase it",
-        Some("needs to be rephrased")
-    ));
+    assert!(slot_matches("rephrase it", Some("needs to be rephrased")));
     assert!(slot_matches(
         "overlay focus model",
         Some("focus model for the overlay window")
@@ -337,6 +334,9 @@ fn slot_match_rejects_missing_or_unrelated_content() {
         "generate action items from meeting transcript",
         Some("list")
     ));
-    assert!(!slot_matches("project next steps", Some("retrieval performance")));
+    assert!(!slot_matches(
+        "project next steps",
+        Some("retrieval performance")
+    ));
     assert!(!slot_matches("write a summary", None));
 }

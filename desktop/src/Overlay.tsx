@@ -30,6 +30,7 @@ import {
   ActiveWindowContextDto,
   ApiKeyValidationDto,
   ChatMessageDto,
+  CrisisCardDto,
   FileWriteProposalDto,
   IntentSlotsDto,
   OnboardingStatusDto,
@@ -61,6 +62,7 @@ import {
   listMessages,
   listTaskPendingRevisions,
   recordTaskFocus,
+  recordCrisisFeedback,
   rejectRevision,
   rejectSubtaskResult,
   rejectSubtaskFileWrite,
@@ -296,6 +298,30 @@ function deriveOverlaySubtaskTitle(description: string): string {
   return description.replace(/\s+/g, " ").trim().slice(0, 64) || "background task";
 }
 
+function playWakeWordAckCue(): void {
+  const win = window as unknown as { webkitAudioContext?: typeof AudioContext };
+  const AudioContextCtor = window.AudioContext ?? win.webkitAudioContext;
+  if (!AudioContextCtor) return;
+
+  try {
+    const context = new AudioContextCtor();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.value = 880;
+    gain.gain.value = 0.04;
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start();
+    oscillator.stop(context.currentTime + 0.08);
+    oscillator.onended = () => {
+      void context.close().catch(() => undefined);
+    };
+  } catch {
+    // best-effort only; the wake flow still opens voice without the cue.
+  }
+}
+
 async function classifyOverlayMessageIntentWithFallback(
   taskId: number,
   message: string
@@ -340,6 +366,7 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   const voiceConnRef = useRef<RealtimeConnection | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoNotice, setInfoNotice] = useState<string | null>(null);
+  const [crisisCard, setCrisisCard] = useState<CrisisCardDto | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -740,6 +767,16 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
           taskId: event.payload.task_id,
           title: event.payload.title || "background task"
         });
+      })
+    );
+
+    unsubscribers.push(
+      listen<CrisisCardDto>("crisis://fired", (event) => {
+        const active = activeTaskRef.current;
+        if (active && active.id !== event.payload.task_id) return;
+        setCrisisCard(event.payload);
+        setMode("expanded");
+        void setOverlayMode("expanded").catch(() => undefined);
       })
     );
 
@@ -1865,6 +1902,17 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     }
   }, []);
 
+  const handleCrisisNotUrgent = useCallback(async () => {
+    const card = crisisCard;
+    if (!card) return;
+    try {
+      await recordCrisisFeedback(card.task_id, card.class, card.evidence);
+    } catch {
+      // feedback logging should not keep an incorrect card on screen.
+    }
+    setCrisisCard(null);
+  }, [crisisCard]);
+
   // apex c4: end an active realtime voice session.
   const handleEndVoiceSession = useCallback(() => {
     voiceConnRef.current?.close();
@@ -1924,6 +1972,13 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     });
   }, []);
 
+  const openVoiceSessionFromWakeWord = useCallback(async () => {
+    if (voiceConnRef.current) {
+      return;
+    }
+    await handleStartVoiceSession();
+  }, [handleStartVoiceSession]);
+
   // apex c4: push-to-talk — Cmd/Ctrl+Shift+V opens (or closes) a voice session.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1949,6 +2004,20 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
       unsub.then((fn) => fn()).catch(() => undefined);
     };
   }, [recording, handleStopVoiceRecording, handleStartVoiceRecording]);
+
+  // apex c5: wake-word detector only sends a wake token; the overlay plays a
+  // local acknowledgement cue and opens voice without toggling off an open session.
+  useEffect(() => {
+    const unsub = listen("wake_word://detected", () => {
+      playWakeWordAckCue();
+      setMode("expanded");
+      void setOverlayMode("expanded").catch(() => undefined);
+      void openVoiceSessionFromWakeWord();
+    });
+    return () => {
+      unsub.then((fn) => fn()).catch(() => undefined);
+    };
+  }, [openVoiceSessionFromWakeWord]);
 
   const hotkeyLabel = useMemo(
     () => (ambient ? formatHotkey(ambient.hotkey) : ""),
@@ -1976,6 +2045,11 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
             aria-hidden
           />
           <span className="overlay-status-label">jeff</span>
+          {ambient?.wake_word_armed ? (
+            <span className="overlay-wake-word-armed" data-testid="wake-word-armed">
+              wake word armed
+            </span>
+          ) : null}
         </div>
         <div className="overlay-controls">
           {ambient?.quiet_mode ? (
@@ -2109,6 +2183,35 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
               >
                 cancel
               </button>
+            </div>
+          ) : null}
+
+          {crisisCard ? (
+            <div className="overlay-crisis-card" data-testid="overlay-crisis-card">
+              <div className="overlay-crisis-header">
+                <span>{crisisCard.title}</span>
+                <button
+                  type="button"
+                  onClick={() => setCrisisCard(null)}
+                  aria-label="dismiss crisis card"
+                >
+                  dismiss
+                </button>
+              </div>
+              <p>{crisisCard.message}</p>
+              <p className="overlay-crisis-evidence">{crisisCard.evidence}</p>
+              {crisisCard.quiet_downgraded ? (
+                <p className="overlay-crisis-evidence">quiet mode: persistent card only</p>
+              ) : null}
+              <div className="overlay-banner-actions">
+                <button
+                  type="button"
+                  onClick={() => void handleCrisisNotUrgent()}
+                  data-testid="crisis-not-urgent"
+                >
+                  this wasn't urgent
+                </button>
+              </div>
             </div>
           ) : null}
 

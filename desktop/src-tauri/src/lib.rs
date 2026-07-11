@@ -1,13 +1,17 @@
 // library target: exposes internal modules for integration tests.
 // only modules needed by tests are declared here.
+pub mod action_bus;
+pub mod agent_runtime;
 pub mod character;
 pub mod classifier;
 pub mod consolidation;
 pub mod context_observer;
 pub mod cost_governor;
+pub mod crisis_core;
 pub mod embedding;
 pub mod errors;
 pub mod goal_extraction;
+pub mod judgment_eval_core;
 pub mod latency;
 pub mod local_runtime;
 pub mod login_item;
@@ -15,6 +19,7 @@ pub mod memory;
 pub mod message_kind;
 pub mod model_router;
 pub mod models;
+pub mod native_docs;
 pub mod onboarding;
 pub mod providers;
 pub mod reasoning;
@@ -22,5 +27,6 @@ pub mod relational_model;
 pub mod secrets;
 pub mod similarity;
 pub mod store;
+pub mod trust;
 pub mod voice_naturalness;
 pub mod workspace;

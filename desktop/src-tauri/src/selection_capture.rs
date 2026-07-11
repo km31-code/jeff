@@ -35,6 +35,8 @@ pub const EVENT_SELECTION_CLEARED: &str = "selection://cleared";
 pub const EVENT_LIVE_ACTION_APPROVED: &str = "live_action://approved";
 pub const EVENT_LIVE_ACTION_FALLBACK: &str = "live_action://fallback_triggered";
 pub const EVENT_LIVE_ACTION_RESULT: &str = "live_action://result";
+pub const EVENT_DOCUMENT_WRITE_APPLY_REQUESTED: &str = "document_write://apply_requested";
+pub const EVENT_DOCUMENT_WRITE_RESULT: &str = "document_write://result";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedSelection {
@@ -602,6 +604,7 @@ struct ApplyEditRequest {
 struct ApplyFallbackRequest {
     token: String,
     receipt_id: i64,
+    reason: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -692,6 +695,14 @@ fn handle_apply_edit_request<R: Runtime>(app: &AppHandle<R>, stream: &mut TcpStr
         "live_action://apply_requested",
         serde_json::json!({ "receipt_id": receipt_id }),
     );
+    let _ = app.emit(
+        EVENT_DOCUMENT_WRITE_APPLY_REQUESTED,
+        serde_json::json!({
+            "receipt_id": receipt_id,
+            "surface": parsed.editor_surface,
+            "document_title": parsed.document_title
+        }),
+    );
 
     let _ = write_http_response(
         stream,
@@ -745,7 +756,7 @@ fn handle_apply_fallback_request<R: Runtime>(
         .update_live_edit_status(parsed.receipt_id, "fallback");
     let _ = app.emit(
         EVENT_LIVE_ACTION_FALLBACK,
-        serde_json::json!({ "receipt_id": parsed.receipt_id }),
+        serde_json::json!({ "receipt_id": parsed.receipt_id, "reason": parsed.reason }),
     );
 
     let _ = write_http_response(stream, 200, &serde_json::json!({ "ok": true }));
@@ -805,6 +816,14 @@ fn handle_apply_result_request<R: Runtime>(
         Ok(_) => {
             let _ = app.emit(
                 EVENT_LIVE_ACTION_RESULT,
+                serde_json::json!({
+                    "receipt_id": parsed.receipt_id,
+                    "status": status,
+                    "error": parsed.error,
+                }),
+            );
+            let _ = app.emit(
+                EVENT_DOCUMENT_WRITE_RESULT,
                 serde_json::json!({
                     "receipt_id": parsed.receipt_id,
                     "status": status,
@@ -1389,8 +1408,12 @@ mod tests {
     #[test]
     fn b6_content_observation_origin_is_allowlisted() {
         assert!(is_browser_content_origin_allowed("https://docs.google.com"));
-        assert!(is_browser_content_origin_allowed("https://docs.google.com/"));
-        assert!(!is_browser_content_origin_allowed("https://mail.google.com"));
+        assert!(is_browser_content_origin_allowed(
+            "https://docs.google.com/"
+        ));
+        assert!(!is_browser_content_origin_allowed(
+            "https://mail.google.com"
+        ));
         assert!(!is_browser_content_origin_allowed("https://evil.example"));
     }
 
@@ -1414,8 +1437,7 @@ mod tests {
         let provider = TestEmbeddingProvider;
         let task_id = 7;
         let first = "# Thesis\n\nThe draft argues that citizenship changed through local pressure.";
-        let second =
-            "# Thesis\n\nThe draft argues that citizenship changed through local organizing pressure.";
+        let second = "# Thesis\n\nThe draft argues that citizenship changed through local organizing pressure.";
 
         let mut ax_model = DocumentModel::new();
         ax_model.observe(task_id, first, &provider);

@@ -122,8 +122,7 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
 
     match decision.verdict {
         Stage2Verdict::Speak if !decision.message.trim().is_empty() => {
-            let delivered =
-                deliver_by_channel(handle, &jeff, task.id, &reason, &decision).await;
+            let delivered = deliver_by_channel(handle, &jeff, task.id, &reason, &decision).await;
             if delivered {
                 // apex c2: record the interjection and the focus it landed in;
                 // the reaction is filled in later (reply, dismissal, or ignored).
@@ -134,7 +133,9 @@ pub async fn run_synthesis_check<R: Runtime>(handle: &AppHandle<R>) {
                     snapshot.focus_score,
                 );
             }
-            log_stage2(&jeff, task.id, &reason, &snapshot, &decision, None, delivered);
+            log_stage2(
+                &jeff, task.id, &reason, &snapshot, &decision, None, delivered,
+            );
         }
         Stage2Verdict::Speak => {
             // model chose speak but produced no message; record as a drop.
@@ -276,11 +277,7 @@ pub fn parse_stage2_json(raw: &str) -> Option<Stage2Decision> {
         verdict: Stage2Verdict::parse(value["decision"].as_str().unwrap_or("speak")),
         channel: Stage2Channel::parse(value["channel"].as_str().unwrap_or("bubble")),
         message: value["message"].as_str().unwrap_or("").trim().to_string(),
-        reason: value["reason"]
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string(),
+        reason: value["reason"].as_str().unwrap_or("").trim().to_string(),
     })
 }
 
@@ -301,7 +298,9 @@ async fn decide_proactive_stage2(
         reason,
         snapshot,
         recall_block.as_deref(),
-        ledger_summary.as_deref().unwrap_or("no interruption history yet"),
+        ledger_summary
+            .as_deref()
+            .unwrap_or("no interruption history yet"),
     );
 
     match jeff
@@ -338,14 +337,16 @@ async fn fallback_stage2(
     ledger: &[crate::store::InterruptionLedgerRow],
     now: i64,
 ) -> Stage2Decision {
+    let economics = fallback_stage2_economics(snapshot, reason, ledger, now);
     let repeatedly_ignored =
         reason_band_is_ignored(ledger, reason.reason_type(), snapshot.focus_score, now);
-    let verdict = fallback_verdict(snapshot, reason.reason_type(), ledger, now);
+    let verdict = Stage2Verdict::parse(&economics.decision);
     let should_hold = verdict == Stage2Verdict::Hold;
-    let message = awareness_core::synthesize_proactive_message(reason, snapshot, &jeff.model_router)
-        .await
-        .map(|value| value.trim().to_string())
-        .unwrap_or_default();
+    let message =
+        awareness_core::synthesize_proactive_message(reason, snapshot, &jeff.model_router)
+            .await
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
     let reason_text = if should_hold && repeatedly_ignored {
         "held: this cue has been ignored at this focus level"
     } else if should_hold {
@@ -355,7 +356,7 @@ async fn fallback_stage2(
     };
     Stage2Decision {
         verdict,
-        channel: Stage2Channel::Bubble,
+        channel: Stage2Channel::parse(&economics.channel),
         message,
         reason: reason_text.to_string(),
     }
@@ -366,18 +367,75 @@ async fn fallback_stage2(
 // pure hold/speak decision for the deterministic fallback: hold during deep
 // focus or a repeatedly-ignored cue at this focus band, unless we are at a
 // natural boundary (which releases the hold).
+#[cfg(test)]
 fn fallback_verdict(
     snapshot: &SituationalSnapshot,
     reason_type: &str,
     ledger: &[crate::store::InterruptionLedgerRow],
     now: i64,
 ) -> Stage2Verdict {
-    let at_boundary = awareness_core::is_at_natural_boundary(snapshot);
-    let repeatedly_ignored = reason_band_is_ignored(ledger, reason_type, snapshot.focus_score, now);
-    if (is_deep_focus(snapshot) || repeatedly_ignored) && !at_boundary {
-        Stage2Verdict::Hold
-    } else {
-        Stage2Verdict::Speak
+    let (ignored_count, engaged_count) =
+        reason_band_stats(ledger, reason_type, snapshot.focus_score, now);
+    let economics = crate::judgment_eval_core::evaluate_stage2_economics(
+        &crate::judgment_eval_core::JudgmentStage2Input {
+            attention_state: snapshot.attention_state.as_str().to_string(),
+            focus_score: snapshot.focus_score,
+            content_idle_seconds: snapshot.content_idle_seconds,
+            snapshot_confidence: 1.0,
+            quiet_mode: false,
+            natural_boundary: awareness_core::is_at_natural_boundary(snapshot),
+            reason_type: reason_type.to_string(),
+            candidate_confidence: 1.0,
+            candidate_importance: 0.6,
+            deadline_minutes: None,
+            ignored_count,
+            engaged_count,
+        },
+    );
+    Stage2Verdict::parse(&economics.decision)
+}
+
+fn fallback_stage2_economics(
+    snapshot: &SituationalSnapshot,
+    reason: &ProactiveSpeechReason,
+    ledger: &[crate::store::InterruptionLedgerRow],
+    now: i64,
+) -> crate::judgment_eval_core::JudgmentStage2Output {
+    let (ignored_count, engaged_count) =
+        reason_band_stats(ledger, reason.reason_type(), snapshot.focus_score, now);
+    crate::judgment_eval_core::evaluate_stage2_economics(
+        &crate::judgment_eval_core::JudgmentStage2Input {
+            attention_state: snapshot.attention_state.as_str().to_string(),
+            focus_score: snapshot.focus_score,
+            content_idle_seconds: snapshot.content_idle_seconds,
+            snapshot_confidence: snapshot.snapshot_confidence.max(0.3),
+            quiet_mode: false,
+            natural_boundary: awareness_core::is_at_natural_boundary(snapshot),
+            reason_type: reason.reason_type().to_string(),
+            candidate_confidence: 1.0,
+            candidate_importance: reason_importance(reason),
+            deadline_minutes: reason_deadline_minutes(reason),
+            ignored_count,
+            engaged_count,
+        },
+    )
+}
+
+fn reason_deadline_minutes(reason: &ProactiveSpeechReason) -> Option<i64> {
+    match reason {
+        ProactiveSpeechReason::DeadlinePressure { minutes_until, .. } => Some(*minutes_until),
+        _ => None,
+    }
+}
+
+fn reason_importance(reason: &ProactiveSpeechReason) -> f32 {
+    match reason {
+        ProactiveSpeechReason::DeadlinePressure { .. } => 0.9,
+        ProactiveSpeechReason::BlockerDetected { .. } => 0.7,
+        ProactiveSpeechReason::PendingApprovalAging { .. } => 0.6,
+        ProactiveSpeechReason::ComprehensionObservation { .. } => 0.55,
+        ProactiveSpeechReason::WorkQualityObservation { .. } => 0.5,
+        ProactiveSpeechReason::TaskReturn { .. } => 0.45,
     }
 }
 
@@ -412,7 +470,10 @@ fn settled_outcome(row: &crate::store::InterruptionLedgerRow, now: i64) -> Optio
 }
 
 // a compact (~60 token) engagement summary bucketed by focus band and reason.
-fn build_ledger_summary(ledger: &[crate::store::InterruptionLedgerRow], now: i64) -> Option<String> {
+fn build_ledger_summary(
+    ledger: &[crate::store::InterruptionLedgerRow],
+    now: i64,
+) -> Option<String> {
     use std::collections::BTreeMap;
     let mut buckets: BTreeMap<(String, &str), (u32, u32)> = BTreeMap::new();
     for row in ledger {
@@ -447,6 +508,16 @@ fn reason_band_is_ignored(
     focus_score: f32,
     now: i64,
 ) -> bool {
+    let (delivered, engaged) = reason_band_stats(ledger, reason_type, focus_score, now);
+    delivered >= 3 && engaged == 0
+}
+
+fn reason_band_stats(
+    ledger: &[crate::store::InterruptionLedgerRow],
+    reason_type: &str,
+    focus_score: f32,
+    now: i64,
+) -> (u32, u32) {
     let band = focus_band(focus_score);
     let mut delivered = 0u32;
     let mut engaged = 0u32;
@@ -461,7 +532,7 @@ fn reason_band_is_ignored(
             }
         }
     }
-    delivered >= 3 && engaged == 0
+    (delivered, engaged)
 }
 
 // ---- apex c2: reaction capture ----------------------------------------------
@@ -497,13 +568,6 @@ fn is_explicit_negative(message: &str) -> bool {
     ]
     .iter()
     .any(|phrase| lower.contains(phrase))
-}
-
-// deep focus: actively engaged (focused, content changing) — a high bar for
-// interruption. a stand-in for the C2 focus-depth model.
-fn is_deep_focus(snapshot: &SituationalSnapshot) -> bool {
-    snapshot.attention_state == crate::awareness_core::AttentionState::Focused
-        && snapshot.content_idle_seconds.map(|s| s < 30).unwrap_or(false)
 }
 
 fn build_stage2_recall(
@@ -751,7 +815,12 @@ mod tests {
         // one engaged breaks the ignored pattern.
         let mut with_engaged = three.clone();
         with_engaged[0].reaction = Some("engaged".to_string());
-        assert!(!reason_band_is_ignored(&with_engaged, "task_return", 0.8, now));
+        assert!(!reason_band_is_ignored(
+            &with_engaged,
+            "task_return",
+            0.8,
+            now
+        ));
         // a different focus band does not count.
         assert!(!reason_band_is_ignored(&three, "task_return", 0.2, now));
     }

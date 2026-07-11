@@ -269,6 +269,96 @@ export interface SubTaskDto {
   error_message: string | null;
 }
 
+export interface AgentJobDto {
+  id: number;
+  task_id: number;
+  goal_contract: string;
+  plan_json: string;
+  budget_json: string;
+  status: string;
+  speculative: boolean;
+  deliverable_json: string | null;
+  verification_transcript: string | null;
+  capability_request_json: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentJobStepDto {
+  id: number;
+  job_id: number;
+  step_index: number;
+  phase: string;
+  status: string;
+  title: string;
+  input_json: string;
+  output_json: string | null;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface AgentJobArtifactDto {
+  id: number;
+  job_id: number;
+  artifact_type: string;
+  title: string;
+  content: string;
+  metadata_json: string;
+  created_at: string;
+}
+
+export interface AgentJobEventDto {
+  id: number;
+  job_id: number;
+  event_type: string;
+  payload_json: string;
+  created_at: string;
+}
+
+export interface AgentJobCheckpointDto {
+  id: number;
+  job_id: number;
+  step_index: number;
+  phase: string;
+  state_json: string;
+  created_at: string;
+}
+
+export interface AgentJobSteeringDto {
+  id: number;
+  job_id: number;
+  message: string;
+  status: string;
+  boundary_step_index: number | null;
+  created_at: string;
+  applied_at: string | null;
+}
+
+export interface AgentJobDetailDto {
+  job: AgentJobDto;
+  steps: AgentJobStepDto[];
+  artifacts: AgentJobArtifactDto[];
+  events: AgentJobEventDto[];
+  checkpoints: AgentJobCheckpointDto[];
+  steering: AgentJobSteeringDto[];
+}
+
+export interface StandingJobDto {
+  id: number;
+  task_id: number;
+  goal_contract: string;
+  schedule_spec: string;
+  trigger_kind: string;
+  next_run_at: string;
+  enabled: boolean;
+  critical: boolean;
+  last_job_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface SubTaskSuggestionDto {
   task_id: number;
   title: string;
@@ -836,6 +926,56 @@ export async function listSubtasks(taskId: number): Promise<SubTaskDto[]> {
   return invoke<SubTaskDto[]>("list_subtasks", { taskId });
 }
 
+export async function createAgentJob(args: {
+  taskId: number;
+  goalContract: string;
+  budgetJson?: string | null;
+  speculative?: boolean | null;
+}): Promise<AgentJobDetailDto> {
+  return invoke<AgentJobDetailDto>("create_agent_job", args);
+}
+
+export async function listAgentJobs(taskId?: number | null, limit?: number | null): Promise<AgentJobDto[]> {
+  return invoke<AgentJobDto[]>("list_agent_jobs", { taskId: taskId ?? null, limit: limit ?? null });
+}
+
+export async function getAgentJobDetail(jobId: number): Promise<AgentJobDetailDto> {
+  return invoke<AgentJobDetailDto>("get_agent_job_detail", { jobId });
+}
+
+export async function runAgentJob(jobId: number): Promise<AgentJobDetailDto> {
+  return invoke<AgentJobDetailDto>("run_agent_job", { jobId });
+}
+
+export async function sendJobSteering(jobId: number, message: string): Promise<AgentJobDetailDto> {
+  return invoke<AgentJobDetailDto>("send_job_steering", { jobId, message });
+}
+
+export async function cancelAgentJob(jobId: number): Promise<AgentJobDetailDto> {
+  return invoke<AgentJobDetailDto>("cancel_agent_job", { jobId });
+}
+
+export async function resumeAgentJobs(): Promise<AgentJobDetailDto[]> {
+  return invoke<AgentJobDetailDto[]>("resume_agent_jobs");
+}
+
+export async function createStandingJob(args: {
+  taskId: number;
+  goalContract: string;
+  scheduleSpec: string;
+  critical?: boolean | null;
+}): Promise<StandingJobDto> {
+  return invoke<StandingJobDto>("create_standing_job", args);
+}
+
+export async function listStandingJobs(taskId?: number | null): Promise<StandingJobDto[]> {
+  return invoke<StandingJobDto[]>("list_standing_jobs", { taskId: taskId ?? null });
+}
+
+export async function runDueStandingJobs(eventName?: string | null): Promise<AgentJobDetailDto[]> {
+  return invoke<AgentJobDetailDto[]>("run_due_standing_jobs", { eventName: eventName ?? null });
+}
+
 export async function cancelSubtask(subtaskId: number): Promise<SubTaskDto> {
   return invoke<SubTaskDto>("cancel_subtask", { subtaskId });
 }
@@ -1101,6 +1241,42 @@ export interface WriteAuditEntryDto {
   proposed_path: string;
   resolved_at: string;
   resolved_path?: string;
+  action_receipt_id?: number | null;
+}
+
+export interface ActionReceiptDto {
+  id: number;
+  task_id: number;
+  class: string;
+  surface: string;
+  level: string;
+  description: string;
+  payload_excerpt: string;
+  status: string;
+  failure_reason: string | null;
+  undo_ref: string | null;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+export interface NativeDocsStatusDto {
+  pages_supported: boolean;
+  word_supported: boolean;
+  automation_permission_status: string;
+  automation_permission_explainer: string;
+  ax_buffer_writeback_enabled: boolean;
+}
+
+export interface TrustLevelDto {
+  class: string;
+  level: string;
+  max_level: string;
+  approval_streak: number;
+  graduation_offer: string | null;
+  graduation_offered_at: string | null;
+  sticky_l1: boolean;
+  updated_at: string;
+  recent_history: ActionReceiptDto[];
 }
 
 export async function listSubtaskSteps(
@@ -1140,6 +1316,61 @@ export async function listWriteAuditLog(
   taskId: number
 ): Promise<WriteAuditEntryDto[]> {
   return invoke<WriteAuditEntryDto[]>("list_write_audit_log", { taskId });
+}
+
+export async function listActionReceipts(
+  taskId?: number,
+  limit?: number
+): Promise<ActionReceiptDto[]> {
+  return invoke<ActionReceiptDto[]>("list_action_receipts", { taskId: taskId ?? null, limit: limit ?? null });
+}
+
+export async function revertActionReceipt(receiptId: number): Promise<ActionReceiptDto> {
+  return invoke<ActionReceiptDto>("revert_action_receipt", { receiptId });
+}
+
+export async function requestGoogleDocsWrite(args: {
+  taskId: number;
+  documentTitle: string;
+  beforeText: string;
+  afterText: string;
+  anchorBefore: string;
+  anchorAfter: string;
+  preferSuggesting: boolean;
+}): Promise<ActionReceiptDto> {
+  return invoke<ActionReceiptDto>("request_google_docs_write", args);
+}
+
+export async function getNativeDocsStatus(): Promise<NativeDocsStatusDto> {
+  return invoke<NativeDocsStatusDto>("get_native_docs_status");
+}
+
+export async function requestNativeDocWrite(args: {
+  taskId: number;
+  appName: string;
+  documentTitle: string;
+  beforeText: string;
+  afterText: string;
+  anchorBefore: string;
+  anchorAfter: string;
+  observedText?: string | null;
+}): Promise<ActionReceiptDto> {
+  return invoke<ActionReceiptDto>("request_native_doc_write", args);
+}
+
+export async function listTrustLadder(): Promise<TrustLevelDto[]> {
+  return invoke<TrustLevelDto[]>("list_trust_ladder");
+}
+
+export async function setTrustLevel(
+  actionClass: string,
+  level: "L1" | "L2" | "L3"
+): Promise<TrustLevelDto[]> {
+  return invoke<TrustLevelDto[]>("set_trust_level", { actionClass, level });
+}
+
+export async function demoteTrustClass(actionClass: string): Promise<TrustLevelDto[]> {
+  return invoke<TrustLevelDto[]>("demote_trust_class", { actionClass });
 }
 
 export async function startSubtaskChain(
@@ -1215,6 +1446,11 @@ export interface PrivacyCenterDashboardDto {
   typing_activity_enabled: boolean;
   tts_voice: string;
   available_tts_voices: string[];
+  wake_word: WakeWordStatusDto;
+  crisis_controls: CrisisClassControlDto[];
+  action_receipts: ActionReceiptDto[];
+  native_docs: NativeDocsStatusDto;
+  trust_ladder: TrustLevelDto[];
   // phase 31: content observation
   content_observation_enabled: boolean;
   content_observation_last_captured_at: string | null;
@@ -1224,6 +1460,35 @@ export interface PrivacyCenterDashboardDto {
   content_observation_document_title: string | null;
   local_runtime: LocalRuntimeStatusDto;
   cost_governor: CostGovernorStatusDto;
+}
+
+export interface WakeWordStatusDto {
+  enabled: boolean;
+  configured: boolean;
+  armed: boolean;
+  running: boolean;
+  sidecar_pid: number | null;
+  phrase: string;
+  last_detected_at: number | null;
+  last_error: string | null;
+  no_raw_audio_ipc: boolean;
+}
+
+export interface CrisisClassControlDto {
+  class: string;
+  label: string;
+  enabled: boolean;
+}
+
+export interface CrisisCardDto {
+  task_id: number;
+  class: string;
+  title: string;
+  message: string;
+  evidence: string;
+  delivery_channel: string;
+  quiet_downgraded: boolean;
+  voice_if_session_open: boolean;
 }
 
 export type SelectionCaptureStatus = "captured" | "failed";
@@ -1292,6 +1557,32 @@ export async function setPrivacySurfaceEnabled(
     surface,
     enabled,
   });
+}
+
+export async function getWakeWordStatus(): Promise<WakeWordStatusDto> {
+  return invoke<WakeWordStatusDto>("get_wake_word_status");
+}
+
+export async function setWakeWordEnabled(enabled: boolean): Promise<WakeWordStatusDto> {
+  return invoke<WakeWordStatusDto>("set_wake_word_enabled", { enabled });
+}
+
+export async function setCrisisClassEnabled(
+  className: string,
+  enabled: boolean
+): Promise<PrivacyCenterDashboardDto> {
+  return invoke<PrivacyCenterDashboardDto>("set_crisis_class_enabled", {
+    className,
+    enabled,
+  });
+}
+
+export async function recordCrisisFeedback(
+  taskId: number,
+  className: string,
+  evidence: string
+): Promise<void> {
+  return invoke<void>("record_crisis_feedback", { taskId, className, evidence });
 }
 
 export async function getSelectionCaptureIndicator(): Promise<SelectionCaptureIndicatorDto | null> {

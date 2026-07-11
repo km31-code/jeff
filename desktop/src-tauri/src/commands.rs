@@ -14,20 +14,22 @@ use crate::{
     local_runtime::LocalModelKind,
     message_kind::classify_user_message_kind,
     models::{
-        ActiveWindowContextDto, ApiKeyValidationDto, ArtifactContentDto, ArtifactDto,
-        ArtifactVersionDto, BrowserSelectionCaptureRequestDto, CalendarEventDto, ChatMessageDto,
+        ActionReceiptDto, ActiveWindowContextDto, AgentJobDetailDto, AgentJobDto,
+        ApiKeyValidationDto, ArtifactContentDto, ArtifactDto, ArtifactVersionDto,
+        BrowserSelectionCaptureRequestDto, CalendarEventDto, ChatMessageDto,
         ConsolidationReportDto, CostGovernorStatusDto, CoworkingStatusDto, DataClearResultDto,
         DriftFlagDto, EpisodeDto, EpisodeSearchResultDto, EventLogEntryDto, FactDto,
         FileWriteProposalDto, IntentClassificationDto, IntentLabel, IntentSlotsDto,
-        LiveEditReceiptDto, LocalRuntimeStatusDto, MemoryPromptPreviewDto, OnboardingStatusDto,
-        OpenResourceDto, PendingLiveEditDto, PrivacyCenterDashboardDto, ProactiveAuditEntryDto,
-        ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto, RetrievedChunkDto,
-        RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto, RevisionTargetDto,
-        SelectionBridgeStatusDto, SelectionCaptureIndicatorDto, SendMessageResponseDto,
-        SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto, SubTaskDto, SubTaskStepDto,
-        SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto, SuggestionEvaluationDto,
-        SynthesisLogEntryDto, TaskContextPackDto, TaskDto, TaskSummaryDto, TranscriptionResultDto,
-        UserProfileSignalDto, WatcherStatusDto, WorkloadSummaryDto, WorkspaceInfoDto,
+        LiveEditReceiptDto, LocalRuntimeStatusDto, MemoryPromptPreviewDto, NativeDocsStatusDto,
+        OnboardingStatusDto, OpenResourceDto, PendingLiveEditDto, PrivacyCenterDashboardDto,
+        ProactiveAuditEntryDto, ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto,
+        RetrievedChunkDto, RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto,
+        RevisionTargetDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
+        SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
+        StandingJobDto, SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto,
+        SuggestionDto, SuggestionEvaluationDto, SynthesisLogEntryDto, TaskContextPackDto, TaskDto,
+        TaskSummaryDto, TranscriptionResultDto, TrustLevelDto, UserProfileSignalDto,
+        WakeWordStatusDto, WatcherStatusDto, WorkloadSummaryDto, WorkspaceInfoDto,
         WriteAuditEntryDto,
     },
     relational_model::{self, RelationalProfile},
@@ -459,7 +461,9 @@ pub fn start_voice_session(
             model: config.model,
             expires_at: 0,
             fallback: true,
-            notice: Some("Realtime voice is off or unavailable; using the voice pipeline.".to_string()),
+            notice: Some(
+                "Realtime voice is off or unavailable; using the voice pipeline.".to_string(),
+            ),
         });
     }
 
@@ -517,6 +521,48 @@ pub fn start_voice_session(
             })
         }
     }
+}
+
+#[tauri::command]
+pub fn get_wake_word_status(state: State<'_, JeffState>) -> Result<WakeWordStatusDto, String> {
+    Ok(state.wake_word.status(&state.store))
+}
+
+#[tauri::command]
+pub fn set_wake_word_enabled<R: Runtime + 'static>(
+    app: AppHandle<R>,
+    state: State<'_, JeffState>,
+    enabled: bool,
+) -> Result<WakeWordStatusDto, String> {
+    let status = state
+        .wake_word
+        .set_enabled(&state.store, &app, enabled)
+        .map_err(map_jeff_error)?;
+    ambient::update_wake_word_armed(&app, status.armed);
+    let _ = app.emit(crate::wake_word::WAKE_WORD_STATUS_EVENT, &status);
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn set_crisis_class_enabled(
+    state: State<'_, JeffState>,
+    ambient: State<'_, ambient::AmbientState>,
+    class_name: String,
+    enabled: bool,
+) -> Result<PrivacyCenterDashboardDto, String> {
+    crate::crisis::set_class_enabled(&state.store, &class_name, enabled).map_err(map_jeff_error)?;
+    build_privacy_center_dashboard(state.inner(), &ambient)
+}
+
+#[tauri::command]
+pub fn record_crisis_feedback(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    class_name: String,
+    evidence: String,
+) -> Result<(), String> {
+    crate::crisis::record_feedback(&state.store, task_id, &class_name, &evidence)
+        .map_err(map_jeff_error)
 }
 
 // persist one finalized voice transcript turn (user or assistant) as a normal
@@ -1267,6 +1313,109 @@ pub fn create_subtask(
 #[tauri::command]
 pub fn list_subtasks(state: State<'_, JeffState>, task_id: i64) -> Result<Vec<SubTaskDto>, String> {
     list_subtasks_for_task(&state.store, task_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn create_agent_job(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    goal_contract: String,
+    budget_json: Option<String>,
+    speculative: Option<bool>,
+) -> Result<AgentJobDetailDto, String> {
+    crate::agent_runtime::create_and_run_job(
+        &state.store,
+        task_id,
+        &goal_contract,
+        budget_json.as_deref(),
+        speculative.unwrap_or(false),
+    )
+    .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_agent_jobs(
+    state: State<'_, JeffState>,
+    task_id: Option<i64>,
+    limit: Option<usize>,
+) -> Result<Vec<AgentJobDto>, String> {
+    crate::agent_runtime::list_jobs(&state.store, task_id, limit.unwrap_or(50))
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn get_agent_job_detail(
+    state: State<'_, JeffState>,
+    job_id: i64,
+) -> Result<AgentJobDetailDto, String> {
+    crate::agent_runtime::get_job_detail(&state.store, job_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn run_agent_job(
+    state: State<'_, JeffState>,
+    job_id: i64,
+) -> Result<AgentJobDetailDto, String> {
+    crate::agent_runtime::run_job_to_completion(&state.store, job_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn send_job_steering(
+    state: State<'_, JeffState>,
+    job_id: i64,
+    message: String,
+) -> Result<AgentJobDetailDto, String> {
+    crate::agent_runtime::enqueue_job_steering(&state.store, job_id, &message)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn cancel_agent_job(
+    state: State<'_, JeffState>,
+    job_id: i64,
+) -> Result<AgentJobDetailDto, String> {
+    crate::agent_runtime::cancel_job_preserving_checkpoints(&state.store, job_id)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn resume_agent_jobs(state: State<'_, JeffState>) -> Result<Vec<AgentJobDetailDto>, String> {
+    crate::agent_runtime::resume_incomplete_jobs(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn create_standing_job(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    goal_contract: String,
+    schedule_spec: String,
+    critical: Option<bool>,
+) -> Result<StandingJobDto, String> {
+    crate::agent_runtime::create_standing_job(
+        &state.store,
+        task_id,
+        &goal_contract,
+        &schedule_spec,
+        critical.unwrap_or(false),
+    )
+    .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_standing_jobs(
+    state: State<'_, JeffState>,
+    task_id: Option<i64>,
+) -> Result<Vec<StandingJobDto>, String> {
+    crate::agent_runtime::list_standing_jobs(&state.store, task_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn run_due_standing_jobs(
+    state: State<'_, JeffState>,
+    event_name: Option<String>,
+) -> Result<Vec<AgentJobDetailDto>, String> {
+    crate::agent_runtime::run_due_standing_jobs(&state.store, event_name.as_deref())
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -2182,23 +2331,40 @@ pub fn approve_subtask_file_write(
         .begin_file_write_proposal_apply(proposal_id)
         .map_err(map_jeff_error)?;
 
-    if let Err(write_err) = fs::write(&dest, &proposal.proposed_content) {
-        let rollback_err = state.store.rollback_file_write_proposal_apply(proposal_id);
-        let _ = state.store.append_write_audit_entry(
-            proposal.task_id,
-            proposal.subtask_id,
-            proposal_id,
-            "apply_failed",
-            &proposal.proposed_path,
-        );
-        return match rollback_err {
-            Ok(_) => Err(format!("failed to write file '{}': {write_err}", dest.display())),
-            Err(revert_err) => Err(format!(
-                "failed to write file '{}' ({write_err}); also failed to rollback proposal state: {revert_err}",
-                dest.display()
-            )),
-        };
-    }
+    let action_receipt = match crate::action_bus::FileWriteAdapter::execute_file_write(
+        &state.store,
+        proposal.task_id,
+        "file",
+        &format!("Apply file write proposal #{}", proposal_id),
+        "L1",
+        crate::action_bus::FileWritePayload {
+            destination_path: dest.clone(),
+            content: proposal.proposed_content.clone(),
+            payload_excerpt: proposal.proposed_path.clone(),
+        },
+    ) {
+        Ok(receipt) => receipt,
+        Err(write_err) => {
+            let rollback_err = state.store.rollback_file_write_proposal_apply(proposal_id);
+            let _ = state.store.append_write_audit_entry(
+                proposal.task_id,
+                proposal.subtask_id,
+                proposal_id,
+                "apply_failed",
+                &proposal.proposed_path,
+            );
+            return match rollback_err {
+                Ok(_) => Err(format!(
+                    "failed to write file '{}': {write_err}",
+                    dest.display()
+                )),
+                Err(revert_err) => Err(format!(
+                    "failed to write file '{}' ({write_err}); also failed to rollback proposal state: {revert_err}",
+                    dest.display()
+                )),
+            };
+        }
+    };
 
     state
         .store
@@ -2246,6 +2412,7 @@ pub fn approve_subtask_file_write(
         .next()
         .ok_or_else(|| "audit entry was written but could not be loaded".to_string())?;
     audit.resolved_path = Some(dest.display().to_string());
+    audit.action_receipt_id = Some(action_receipt.id);
     record_proposal_memory_outcome(
         state.inner(),
         proposal.task_id,
@@ -2298,6 +2465,17 @@ pub fn reject_subtask_file_write(
         )
         .map_err(map_jeff_error)?;
 
+    let action_receipt = crate::action_bus::record_rejected_action(
+        &state.store,
+        proposal.task_id,
+        crate::action_bus::ActionClass::FileWrite,
+        "file",
+        "L1",
+        &format!("Reject file write proposal #{}", proposal_id),
+        &proposal.proposed_path,
+    )
+    .map_err(map_jeff_error)?;
+
     let entries = state
         .store
         .list_write_audit_log(task_id, 1)
@@ -2306,7 +2484,8 @@ pub fn reject_subtask_file_write(
         .into_iter()
         .next()
         .ok_or_else(|| "audit entry was written but could not be loaded".to_string())
-        .map(|audit| {
+        .map(|mut audit| {
+            audit.action_receipt_id = Some(action_receipt.id);
             record_proposal_memory_outcome(
                 state.inner(),
                 proposal.task_id,
@@ -2329,6 +2508,143 @@ pub fn list_write_audit_log(
         .store
         .list_write_audit_log(task_id, 100)
         .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_action_receipts(
+    state: State<'_, JeffState>,
+    task_id: Option<i64>,
+    limit: Option<usize>,
+) -> Result<Vec<ActionReceiptDto>, String> {
+    state
+        .store
+        .list_action_receipts(task_id, limit.unwrap_or(100).min(500))
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn revert_action_receipt(
+    state: State<'_, JeffState>,
+    receipt_id: i64,
+) -> Result<ActionReceiptDto, String> {
+    crate::action_bus::revert_action_receipt(&state.store, receipt_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn request_google_docs_write<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, JeffState>,
+    task_id: i64,
+    document_title: String,
+    before_text: String,
+    after_text: String,
+    anchor_before: String,
+    anchor_after: String,
+    prefer_suggesting: bool,
+) -> Result<ActionReceiptDto, String> {
+    let receipt = crate::action_bus::GoogleDocsAdapter::request_tracked_change(
+        &state.store,
+        task_id,
+        &format!("Google Docs edit for {}", document_title.trim()),
+        crate::action_bus::GoogleDocsWritePayload {
+            document_title: document_title.clone(),
+            before_text: before_text.clone(),
+            after_text: after_text.clone(),
+            anchor_before: anchor_before.clone(),
+            anchor_after: anchor_after.clone(),
+            prefer_suggesting,
+        },
+    )
+    .map_err(map_jeff_error)?;
+    let _ = app.emit(
+        crate::selection_capture::EVENT_DOCUMENT_WRITE_APPLY_REQUESTED,
+        serde_json::json!({
+            "receipt_id": receipt.id,
+            "surface": "google_docs",
+            "document_title": document_title,
+            "before_text": before_text,
+            "after_text": after_text,
+            "anchor_before": anchor_before,
+            "anchor_after": anchor_after,
+            "prefer_suggesting": prefer_suggesting
+        }),
+    );
+    Ok(receipt)
+}
+
+#[tauri::command]
+pub fn get_native_docs_status(state: State<'_, JeffState>) -> Result<NativeDocsStatusDto, String> {
+    crate::native_docs::native_docs_status(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn request_native_doc_write<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, JeffState>,
+    task_id: i64,
+    app_name: String,
+    document_title: String,
+    before_text: String,
+    after_text: String,
+    anchor_before: String,
+    anchor_after: String,
+    observed_text: Option<String>,
+) -> Result<ActionReceiptDto, String> {
+    let receipt = crate::native_docs::request_native_doc_write(
+        &state.store,
+        crate::native_docs::NativeDocsWriteRequest {
+            task_id,
+            app_name: app_name.clone(),
+            document_title: document_title.clone(),
+            before_text: before_text.clone(),
+            after_text: after_text.clone(),
+            anchor_before: anchor_before.clone(),
+            anchor_after: anchor_after.clone(),
+            observed_text,
+        },
+    )
+    .map_err(map_jeff_error)?;
+    let _ = app.emit(
+        crate::selection_capture::EVENT_DOCUMENT_WRITE_APPLY_REQUESTED,
+        serde_json::json!({
+            "receipt_id": receipt.id,
+            "surface": receipt.surface,
+            "status": receipt.status,
+            "app_name": app_name,
+            "document_title": document_title,
+            "before_text": before_text,
+            "after_text": after_text,
+            "anchor_before": anchor_before,
+            "anchor_after": anchor_after,
+            "failure_reason": receipt.failure_reason
+        }),
+    );
+    Ok(receipt)
+}
+
+#[tauri::command]
+pub fn list_trust_ladder(state: State<'_, JeffState>) -> Result<Vec<TrustLevelDto>, String> {
+    crate::trust::list_trust_ladder(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn set_trust_level(
+    state: State<'_, JeffState>,
+    action_class: String,
+    level: String,
+) -> Result<Vec<TrustLevelDto>, String> {
+    crate::trust::set_trust_level(&state.store, &action_class, &level, true)
+        .map_err(map_jeff_error)?;
+    crate::trust::list_trust_ladder(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn demote_trust_class(
+    state: State<'_, JeffState>,
+    action_class: String,
+) -> Result<Vec<TrustLevelDto>, String> {
+    crate::trust::demote_trust_class(&state.store, &action_class).map_err(map_jeff_error)?;
+    crate::trust::list_trust_ladder(&state.store).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -2544,6 +2860,15 @@ fn build_privacy_center_dashboard(
             .map_err(map_jeff_error)?,
         tts_voice: state.store.get_tts_voice().map_err(map_jeff_error)?,
         available_tts_voices: crate::voice_naturalness::available_tts_voices(),
+        wake_word: state.wake_word.status(&state.store),
+        crisis_controls: crate::crisis::class_controls(&state.store),
+        action_receipts: state
+            .store
+            .list_action_receipts(active_task_id, 50)
+            .map_err(map_jeff_error)?,
+        native_docs: crate::native_docs::native_docs_status(&state.store)
+            .map_err(map_jeff_error)?,
+        trust_ladder: crate::trust::list_trust_ladder(&state.store).map_err(map_jeff_error)?,
         // phase 31: content observation status
         content_observation_enabled: active_task_id_for_content
             .and_then(|tid| state.store.get_content_observation_enabled(tid).ok())

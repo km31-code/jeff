@@ -1,0 +1,506 @@
+[
+  {
+    "id": "j001",
+    "category": "deep_focus_hold",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.86,
+      "content_idle_seconds": 4,
+      "snapshot_confidence": 0.86,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "task_return",
+      "detail": "user returned after eight minutes away",
+      "confidence": 0.82,
+      "importance": 0.45,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "hold", "channels": ["silent_card"] }
+  },
+  {
+    "id": "j002",
+    "category": "natural_boundary_speak",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.80,
+      "content_idle_seconds": 120,
+      "snapshot_confidence": 0.86,
+      "quiet_mode": false,
+      "natural_boundary": true
+    },
+    "candidate": {
+      "reason_type": "task_return",
+      "detail": "same reorientation candidate at a pause",
+      "confidence": 0.82,
+      "importance": 0.45,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["bubble"] }
+  },
+  {
+    "id": "j003",
+    "category": "natural_boundary_speak",
+    "snapshot": {
+      "attention_state": "idle",
+      "focus_score": 0.12,
+      "content_idle_seconds": 300,
+      "snapshot_confidence": 0.70,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "comprehension_observation",
+      "detail": "argument summary has a weak unsupported transition",
+      "confidence": 0.72,
+      "importance": 0.55,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["bubble"] }
+  },
+  {
+    "id": "j004",
+    "category": "deadline_escalation",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.90,
+      "content_idle_seconds": 5,
+      "snapshot_confidence": 0.90,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "deadline_pressure",
+      "detail": "proposal review in eight minutes",
+      "confidence": 0.95,
+      "importance": 0.95,
+      "deadline_minutes": 8
+    },
+    "ledger": { "ignored_count": 2, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["notification"] }
+  },
+  {
+    "id": "j005",
+    "category": "deadline_escalation",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.78,
+      "content_idle_seconds": 12,
+      "snapshot_confidence": 0.88,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "deadline_pressure",
+      "detail": "draft checkpoint in forty-five minutes",
+      "confidence": 0.90,
+      "importance": 0.90,
+      "deadline_minutes": 45
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["bubble"] }
+  },
+  {
+    "id": "j006",
+    "category": "repeated_ignore_suppression",
+    "snapshot": {
+      "attention_state": "returning",
+      "focus_score": 0.45,
+      "content_idle_seconds": 20,
+      "snapshot_confidence": 0.75,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "task_return",
+      "detail": "fourth comparable reorientation cue",
+      "confidence": 0.80,
+      "importance": 0.45,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 3, "engaged_count": 0 },
+    "expected": { "decision": "hold", "channels": ["silent_card"] }
+  },
+  {
+    "id": "j007",
+    "category": "repeated_ignore_suppression",
+    "snapshot": {
+      "attention_state": "returning",
+      "focus_score": 0.45,
+      "content_idle_seconds": 130,
+      "snapshot_confidence": 0.75,
+      "quiet_mode": false,
+      "natural_boundary": true
+    },
+    "candidate": {
+      "reason_type": "task_return",
+      "detail": "ignored pattern released at a natural boundary",
+      "confidence": 0.80,
+      "importance": 0.45,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 3, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["bubble"] }
+  },
+  {
+    "id": "j008",
+    "category": "quiet_mode_suppression",
+    "snapshot": {
+      "attention_state": "idle",
+      "focus_score": 0.10,
+      "content_idle_seconds": 400,
+      "snapshot_confidence": 0.80,
+      "quiet_mode": true,
+      "natural_boundary": true
+    },
+    "candidate": {
+      "reason_type": "comprehension_observation",
+      "detail": "minor argument weakness while quiet mode is on",
+      "confidence": 0.80,
+      "importance": 0.55,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "hold", "channels": ["silent_card"] }
+  },
+  {
+    "id": "j009",
+    "category": "low_confidence_drop",
+    "snapshot": {
+      "attention_state": "idle",
+      "focus_score": 0.15,
+      "content_idle_seconds": 300,
+      "snapshot_confidence": 0.20,
+      "quiet_mode": false,
+      "natural_boundary": true
+    },
+    "candidate": {
+      "reason_type": "work_quality_observation",
+      "detail": "uncertain weak point from thin context",
+      "confidence": 0.80,
+      "importance": 0.50,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "drop", "channels": ["silent_card"] }
+  },
+  {
+    "id": "j010",
+    "category": "low_confidence_drop",
+    "snapshot": {
+      "attention_state": "idle",
+      "focus_score": 0.15,
+      "content_idle_seconds": 300,
+      "snapshot_confidence": 0.80,
+      "quiet_mode": false,
+      "natural_boundary": true
+    },
+    "candidate": {
+      "reason_type": "work_quality_observation",
+      "detail": "candidate itself is low confidence",
+      "confidence": 0.20,
+      "importance": 0.50,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "drop", "channels": ["silent_card"] }
+  },
+  {
+    "id": "j011",
+    "category": "low_confidence_drop",
+    "snapshot": {
+      "attention_state": "idle",
+      "focus_score": 0.20,
+      "content_idle_seconds": 240,
+      "snapshot_confidence": 0.75,
+      "quiet_mode": false,
+      "natural_boundary": true
+    },
+    "candidate": {
+      "reason_type": "work_quality_observation",
+      "detail": "low-value style note",
+      "confidence": 0.80,
+      "importance": 0.10,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "drop", "channels": ["silent_card"] }
+  },
+  {
+    "id": "j012",
+    "category": "deep_focus_hold",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.74,
+      "content_idle_seconds": 10,
+      "snapshot_confidence": 0.82,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "blocker",
+      "detail": "draft has an unresolved source mismatch",
+      "confidence": 0.84,
+      "importance": 0.70,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "hold", "channels": ["silent_card"] }
+  },
+  {
+    "id": "j013",
+    "category": "natural_boundary_speak",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.74,
+      "content_idle_seconds": 110,
+      "snapshot_confidence": 0.82,
+      "quiet_mode": false,
+      "natural_boundary": true
+    },
+    "candidate": {
+      "reason_type": "blocker",
+      "detail": "same source mismatch at a pause",
+      "confidence": 0.84,
+      "importance": 0.70,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["bubble"] }
+  },
+  {
+    "id": "j014",
+    "category": "multi_signal_integration",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.92,
+      "content_idle_seconds": 4,
+      "snapshot_confidence": 0.92,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "deadline_pressure",
+      "detail": "deadline wins over ignored reorientation pattern",
+      "confidence": 0.94,
+      "importance": 0.95,
+      "deadline_minutes": 15
+    },
+    "ledger": { "ignored_count": 4, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["notification"] }
+  },
+  {
+    "id": "j015",
+    "category": "natural_boundary_speak",
+    "snapshot": {
+      "attention_state": "idle",
+      "focus_score": 0.18,
+      "content_idle_seconds": 600,
+      "snapshot_confidence": 0.78,
+      "quiet_mode": false,
+      "natural_boundary": true
+    },
+    "candidate": {
+      "reason_type": "pending_approval_aging",
+      "detail": "file-write approval has waited thirty minutes",
+      "confidence": 0.86,
+      "importance": 0.60,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 1, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["bubble"] }
+  },
+  {
+    "id": "j016",
+    "category": "deep_focus_hold",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.82,
+      "content_idle_seconds": 2,
+      "snapshot_confidence": 0.84,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "comprehension_observation",
+      "detail": "argument has a circular claim",
+      "confidence": 0.82,
+      "importance": 0.55,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "hold", "channels": ["silent_card"] }
+  },
+  {
+    "id": "j017",
+    "category": "natural_boundary_speak",
+    "snapshot": {
+      "attention_state": "idle",
+      "focus_score": 0.12,
+      "content_idle_seconds": 500,
+      "snapshot_confidence": 0.84,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "comprehension_observation",
+      "detail": "same circular claim while idle",
+      "confidence": 0.82,
+      "importance": 0.55,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["bubble"] }
+  },
+  {
+    "id": "j018",
+    "category": "low_confidence_drop",
+    "snapshot": {
+      "attention_state": "returning",
+      "focus_score": 0.40,
+      "content_idle_seconds": 40,
+      "snapshot_confidence": 0.76,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "work_quality_observation",
+      "detail": "small style preference",
+      "confidence": 0.78,
+      "importance": 0.20,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "drop", "channels": ["silent_card"] }
+  },
+  {
+    "id": "j019",
+    "category": "deadline_escalation",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.70,
+      "content_idle_seconds": 30,
+      "snapshot_confidence": 0.80,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "deadline_pressure",
+      "detail": "meeting begins exactly at the imminent threshold",
+      "confidence": 0.90,
+      "importance": 0.90,
+      "deadline_minutes": 20
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["notification"] }
+  },
+  {
+    "id": "j020",
+    "category": "deadline_escalation",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.70,
+      "content_idle_seconds": 30,
+      "snapshot_confidence": 0.80,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "deadline_pressure",
+      "detail": "deadline exactly at the soft escalation threshold",
+      "confidence": 0.90,
+      "importance": 0.90,
+      "deadline_minutes": 60
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["bubble"] }
+  },
+  {
+    "id": "j021",
+    "category": "deep_focus_hold",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.70,
+      "content_idle_seconds": 30,
+      "snapshot_confidence": 0.80,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "deadline_pressure",
+      "detail": "deadline is not soon enough to break focus",
+      "confidence": 0.90,
+      "importance": 0.70,
+      "deadline_minutes": 61
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "hold", "channels": ["silent_card"] }
+  },
+  {
+    "id": "j022",
+    "category": "repeated_ignore_suppression",
+    "snapshot": {
+      "attention_state": "returning",
+      "focus_score": 0.42,
+      "content_idle_seconds": 35,
+      "snapshot_confidence": 0.76,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "task_return",
+      "detail": "history includes one engagement, so do not learn a blanket hold",
+      "confidence": 0.80,
+      "importance": 0.45,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 3, "engaged_count": 1 },
+    "expected": { "decision": "speak", "channels": ["bubble"] }
+  },
+  {
+    "id": "j023",
+    "category": "natural_boundary_speak",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.88,
+      "content_idle_seconds": 95,
+      "snapshot_confidence": 0.82,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "work_quality_observation",
+      "detail": "pause after a paragraph rewrite",
+      "confidence": 0.80,
+      "importance": 0.50,
+      "deadline_minutes": null
+    },
+    "ledger": { "ignored_count": 0, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["bubble"] }
+  },
+  {
+    "id": "j024",
+    "category": "multi_signal_integration",
+    "snapshot": {
+      "attention_state": "focused",
+      "focus_score": 0.86,
+      "content_idle_seconds": 6,
+      "snapshot_confidence": 0.90,
+      "quiet_mode": false,
+      "natural_boundary": false
+    },
+    "candidate": {
+      "reason_type": "deadline_pressure",
+      "detail": "deadline and blocker coincide; deadline sets the channel",
+      "confidence": 0.93,
+      "importance": 0.95,
+      "deadline_minutes": 35
+    },
+    "ledger": { "ignored_count": 3, "engaged_count": 0 },
+    "expected": { "decision": "speak", "channels": ["bubble"] }
+  }
+]

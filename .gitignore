@@ -17,3 +17,6 @@ desktop/src-tauri/target/
 
 # Distribution artifacts (generated locally, uploaded via CI)
 dist/
+
+# Local eval run output (a/b packets, scoring, generated fixtures)
+artifacts/

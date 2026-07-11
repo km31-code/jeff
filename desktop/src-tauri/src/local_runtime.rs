@@ -31,8 +31,7 @@ pub const LOCAL_RUNTIME_CHOICE: &str = "llama.cpp server";
 // q8_0 gguf, ~35 MB) is a real semantic embedder small enough for a one-click
 // download. the checksum is the git-lfs sha-256 of the published artifact and
 // is verified after download in download_model.
-pub const CURATED_EMBEDDING_MODEL_URL: &str =
-    "https://huggingface.co/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-q8_0.gguf";
+pub const CURATED_EMBEDDING_MODEL_URL: &str = "https://huggingface.co/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-q8_0.gguf";
 pub const CURATED_EMBEDDING_MODEL_SHA256: &str =
     "ec38e8da142596baa913124ae50550de284b6916bf59577ef2f0cb9660c2f514";
 pub const CURATED_EMBEDDING_MODEL_BYTES: u64 = 36_806_944;

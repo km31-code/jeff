@@ -733,6 +733,94 @@ body.overlay-body {
   font-size: 12px;
 }
 
+.overlay-wake-word-armed {
+  display: inline-flex;
+  align-items: center;
+  min-height: 16px;
+  padding: 0 6px;
+  border: 1px solid rgba(125, 211, 252, 0.35);
+  border-radius: 999px;
+  color: #bae6fd;
+  background: rgba(14, 116, 144, 0.18);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.overlay-crisis-card {
+  border: 1px solid rgba(248, 113, 113, 0.55);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(127, 29, 29, 0.28);
+  color: #fee2e2;
+}
+
+.overlay-crisis-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.overlay-crisis-evidence {
+  color: #fecaca;
+  font-size: 11px;
+}
+
+.crisis-control-list {
+  display: grid;
+  gap: 6px;
+}
+
+.action-receipt-list {
+  display: grid;
+  gap: 6px;
+}
+
+.action-receipt-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.trust-ladder-list {
+  display: grid;
+  gap: 6px;
+}
+
+.trust-ladder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.trust-ladder-actions {
+  flex-wrap: nowrap;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 20px;
+  padding: 2px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
 /* b4: status dot with position:relative for breathing ring pseudo-element */
 .overlay-status-dot {
   position: relative;

@@ -74,6 +74,7 @@ import {
   setActiveTask,
   setActiveArtifactSelection,
   setAssistantSpeaking,
+  setCrisisClassEnabled,
   setProactiveMode,
   setUserSpeaking,
   setUserTyping,
@@ -81,6 +82,9 @@ import {
   SuggestionDto,
   SuggestionEvaluationDto,
   SubTaskDto,
+  AgentJobDto,
+  AgentJobDetailDto,
+  StandingJobDto,
   SubTaskSuggestionDto,
   suggestSubtask,
   synthesizeSpeech,
@@ -111,7 +115,17 @@ import {
   approveSubtaskFileWrite,
   rejectSubtaskFileWrite,
   listWriteAuditLog,
-  startSubtaskChain,
+  revertActionReceipt,
+  setTrustLevel,
+  demoteTrustClass,
+  createAgentJob,
+  listAgentJobs,
+  getAgentJobDetail,
+  sendJobSteering,
+  cancelAgentJob,
+  createStandingJob,
+  listStandingJobs,
+  runDueStandingJobs,
   ActiveWindowContextDto,
   getActiveWindowContext,
   getAccessibilityPermissionStatus,
@@ -129,6 +143,7 @@ import {
   setDebriefEnabled,
   getVoiceConfig,
   setVoiceConfig,
+  setWakeWordEnabled,
   setPrivacySurfaceEnabled,
   getSelectionCaptureIndicator,
   getSelectionBridgeStatus,
@@ -327,6 +342,10 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [taskPendingRevisions, setTaskPendingRevisions] = useState<RevisionProposalDto[]>([]);
   const [artifactVersions, setArtifactVersions] = useState<ArtifactVersionDto[]>([]);
   const [subtasks, setSubtasks] = useState<SubTaskDto[]>([]);
+  const [agentJobs, setAgentJobs] = useState<AgentJobDto[]>([]);
+  const [selectedAgentJob, setSelectedAgentJob] = useState<AgentJobDetailDto | null>(null);
+  const [jobSteeringInput, setJobSteeringInput] = useState("");
+  const [standingJobs, setStandingJobs] = useState<StandingJobDto[]>([]);
   const [recentEvents, setRecentEvents] = useState<EventLogEntryDto[]>([]);
   const [subtaskInstruction, setSubtaskInstruction] = useState("");
   const [subtaskExecutionType, setSubtaskExecutionType] = useState<ExecutionType>("draft_generation");
@@ -1192,6 +1211,8 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       artifactList,
       messageList,
       subtaskList,
+      jobList,
+      standingJobList,
       suggestionList,
       modeState,
       taskPending,
@@ -1204,6 +1225,8 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       listArtifacts(taskId),
       listMessages(taskId),
       listSubtasks(taskId),
+      listAgentJobs(taskId, 50),
+      listStandingJobs(taskId),
       listSuggestions(taskId),
       getSessionModeState(taskId),
       listTaskPendingRevisions(taskId),
@@ -1217,6 +1240,11 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     setArtifacts(artifactList);
     setMessages(messageList);
     setSubtasks(subtaskList);
+    setAgentJobs(jobList);
+    setStandingJobs(standingJobList);
+    if (jobList.length > 0 && !selectedAgentJob) {
+      void getAgentJobDetail(jobList[0].id).then(setSelectedAgentJob).catch(() => undefined);
+    }
     setSuggestions(suggestionList);
     setSessionModeState(modeState);
     setTaskPendingRevisions(taskPending);
@@ -1258,17 +1286,27 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   }
 
   async function refreshActionCenterState(taskId: number) {
-    const [taskPending, eventList, suggestionList, subtaskList] = await Promise.all([
+    const [taskPending, eventList, suggestionList, subtaskList, jobList, standingJobList] = await Promise.all([
       listTaskPendingRevisions(taskId),
       listRecentEvents(taskId, 18),
       listSuggestions(taskId),
-      listSubtasks(taskId)
+      listSubtasks(taskId),
+      listAgentJobs(taskId, 50),
+      listStandingJobs(taskId)
     ]);
 
     setTaskPendingRevisions(taskPending);
     setRecentEvents(eventList);
     setSuggestions(suggestionList);
     setSubtasks(subtaskList);
+    setAgentJobs(jobList);
+    setStandingJobs(standingJobList);
+    if (selectedAgentJob) {
+      const stillPresent = jobList.some((job) => job.id === selectedAgentJob.job.id);
+      if (stillPresent) {
+        void getAgentJobDetail(selectedAgentJob.job.id).then(setSelectedAgentJob).catch(() => undefined);
+      }
+    }
   }
 
   // phase 13: load recently learned items and watcher/clipboard state for a task.
@@ -1322,6 +1360,8 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     setArtifacts([]);
     setMessages([]);
     setSubtasks([]);
+    setAgentJobs([]);
+    setSelectedAgentJob(null);
     setSuggestions([]);
     setSessionModeState(null);
     setTaskPendingRevisions([]);
@@ -1688,16 +1728,17 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       ? inferSubtaskExecutionTypeFromDraftType(slots.draft_type)
       : inferSubtaskExecutionType(message);
     const description = slots?.instruction ?? message;
-    // phase 16: use chain executor so intent-routed subtasks get multi-step planning
-    const created = await startSubtaskChain(
+    const job = await createAgentJob({
       taskId,
-      deriveSubtaskTitle(description),
-      description,
-      executionType,
-      source === "voice" ? "voice" : "text"
-    );
-    updateSubtaskDebugFromSubtask(created);
-    setSuggestionActionMessage("I started a chain subtask in parallel. Step progress and any file proposals appear below.");
+      goalContract: JSON.stringify({
+        title: deriveSubtaskTitle(description),
+        instruction: description,
+        execution_type: executionType,
+        source: source === "voice" ? "voice" : "text"
+      })
+    });
+    setSelectedAgentJob(job);
+    setSuggestionActionMessage("I started an agent job. Plan, steps, verification, and delivery are in the workload view.");
     await refreshActionCenterState(taskId);
     const messageList = await listMessages(taskId);
     setMessages(messageList);
@@ -2074,6 +2115,72 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       }
     } catch (error) {
       setOperationError("Failed to update privacy setting", error);
+    }
+  }
+
+  async function handleToggleWakeWord(enabled: boolean) {
+    try {
+      const wakeWord = await setWakeWordEnabled(enabled);
+      setPrivacyDashboard((current) => (current ? { ...current, wake_word: wakeWord } : current));
+      setPrivacyActionMessage(
+        wakeWord.enabled
+          ? wakeWord.armed
+            ? "Wake word is armed."
+            : "Wake word is enabled but the detector is not running."
+          : "Wake word is off."
+      );
+      if (wakeWord.last_error) {
+        setOperationError("Failed to update wake word detector", wakeWord.last_error);
+      }
+    } catch (error) {
+      setOperationError("Failed to update wake word detector", error);
+      await refreshPrivacyCenter();
+    }
+  }
+
+  async function handleToggleCrisisClass(className: string, enabled: boolean) {
+    try {
+      const dashboard = await setCrisisClassEnabled(className, enabled);
+      setPrivacyDashboard(dashboard);
+      setPrivacyActionMessage(`${enabled ? "Enabled" : "Disabled"} ${className.replace(/_/g, " ")}.`);
+    } catch (error) {
+      setOperationError("Failed to update override channel", error);
+      await refreshPrivacyCenter();
+    }
+  }
+
+  async function handleRevertActionReceipt(receiptId: number) {
+    try {
+      await revertActionReceipt(receiptId);
+      await refreshPrivacyCenter();
+      setPrivacyActionMessage(`Reverted action receipt #${receiptId}.`);
+    } catch (error) {
+      setOperationError("Failed to revert action receipt", error);
+      await refreshPrivacyCenter();
+    }
+  }
+
+  async function handleSetTrustLevel(actionClass: string, level: "L1" | "L2" | "L3") {
+    try {
+      const trustLadder = await setTrustLevel(actionClass, level);
+      setPrivacyDashboard((current) => current ? { ...current, trust_ladder: trustLadder } : current);
+      setPrivacyActionMessage(`Set ${actionClass} trust to ${level}.`);
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to update trust level", error);
+      await refreshPrivacyCenter();
+    }
+  }
+
+  async function handleDemoteTrustClass(actionClass: string) {
+    try {
+      const trustLadder = await demoteTrustClass(actionClass);
+      setPrivacyDashboard((current) => current ? { ...current, trust_ladder: trustLadder } : current);
+      setPrivacyActionMessage(`Demoted ${actionClass} to L1.`);
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to demote trust class", error);
+      await refreshPrivacyCenter();
     }
   }
 
@@ -2484,26 +2591,104 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     const title = deriveSubtaskTitle(description);
 
     try {
-      const created = await startSubtaskChain(
-        activeTask.id,
-        title,
-        description,
-        executionType,
-        instructionSource
-      );
+      const job = await createAgentJob({
+        taskId: activeTask.id,
+        goalContract: JSON.stringify({
+          title,
+          instruction: description,
+          execution_type: executionType,
+          source: instructionSource
+        })
+      });
 
       if (instructionSource === "text") {
         setSubtaskInstruction("");
       }
 
       setSubtaskSuggestion(null);
-      updateSubtaskDebugFromSubtask(created);
+      setSelectedAgentJob(job);
+      setSuggestionActionMessage("I started an agent job. Review the live plan, verification, and deliverable in the workload view.");
       await refreshActionCenterState(activeTask.id);
       const messageList = await listMessages(activeTask.id);
       setMessages(messageList);
       await refreshCoworkingStatus();
     } catch (error) {
       setOperationError("Failed to create subtask", error);
+    }
+  }
+
+  async function handleSendJobSteering() {
+    if (!activeTask || !selectedAgentJob) {
+      return;
+    }
+    const message = jobSteeringInput.trim();
+    if (!message) {
+      return;
+    }
+    try {
+      const detail = await sendJobSteering(selectedAgentJob.job.id, message);
+      setSelectedAgentJob(detail);
+      setJobSteeringInput("");
+      await refreshActionCenterState(activeTask.id);
+    } catch (error) {
+      setOperationError("Failed to send job steering", error);
+    }
+  }
+
+  async function handleCancelAgentJob() {
+    if (!activeTask || !selectedAgentJob) {
+      return;
+    }
+    try {
+      const detail = await cancelAgentJob(selectedAgentJob.job.id);
+      setSelectedAgentJob(detail);
+      await refreshActionCenterState(activeTask.id);
+    } catch (error) {
+      setOperationError("Failed to cancel agent job", error);
+    }
+  }
+
+  async function handleCreateStandingJobFromInstruction() {
+    if (!activeTask) {
+      setErrorMessage("Select an active task before creating a standing job.");
+      return;
+    }
+    const description = subtaskInstruction.trim();
+    if (!description) {
+      return;
+    }
+    try {
+      await createStandingJob({
+        taskId: activeTask.id,
+        goalContract: JSON.stringify({
+          title: deriveSubtaskTitle(description),
+          instruction: description,
+          execution_type: subtaskExecutionType,
+          source: "standing_job"
+        }),
+        scheduleSpec: inferStandingScheduleSpec(description),
+        critical: /\b(guard|critical|watch|alert)\b/i.test(description)
+      });
+      setSubtaskInstruction("");
+      setSuggestionActionMessage("I created a standing job. It is listed in the workload view with its next run.");
+      await refreshActionCenterState(activeTask.id);
+    } catch (error) {
+      setOperationError("Failed to create standing job", error);
+    }
+  }
+
+  async function handleRunDueStandingJobs() {
+    if (!activeTask) {
+      return;
+    }
+    try {
+      const details = await runDueStandingJobs();
+      if (details.length > 0) {
+        setSelectedAgentJob(details[0]);
+      }
+      await refreshActionCenterState(activeTask.id);
+    } catch (error) {
+      setOperationError("Failed to run due standing jobs", error);
     }
   }
 
@@ -3480,6 +3665,14 @@ function App({ onCloseWorkspace }: AppProps = {}) {
               </button>
               <button
                 type="button"
+                onClick={() => void handleCreateStandingJobFromInstruction()}
+                disabled={subtaskInstruction.trim().length === 0}
+                data-testid="standing-job-create"
+              >
+                Make Standing Job
+              </button>
+              <button
+                type="button"
                 onClick={() => void startRecording("subtask")}
                 disabled={recording}
                 data-testid="voice-subtask-button"
@@ -4025,6 +4218,36 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                         <p className="task-meta">Rate-only; Jeff stores no key values or typed text.</p>
                       </li>
 
+                      <li data-testid="privacy-surface-wake-word">
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={privacyDashboard.wake_word?.enabled ?? false}
+                            onChange={(event) => void handleToggleWakeWord(event.target.checked)}
+                            data-testid="privacy-toggle-wake-word"
+                          />
+                          Wake word
+                        </label>
+                        <p className="task-meta" data-testid="wake-word-status">
+                          "{privacyDashboard.wake_word?.phrase ?? "hey jeff"}";{" "}
+                          {privacyDashboard.wake_word?.configured ? "detector configured" : "detector not configured"};{" "}
+                          {privacyDashboard.wake_word?.running ? "running" : "stopped"};{" "}
+                          {privacyDashboard.wake_word?.armed ? "armed" : "not armed"}
+                          {privacyDashboard.wake_word?.sidecar_pid
+                            ? `; pid ${privacyDashboard.wake_word.sidecar_pid}`
+                            : ""}
+                        </p>
+                        <p className="task-meta" data-testid="wake-word-privacy-guarantee">
+                          Pre-wake microphone audio stays inside the detector process; Jeff only receives a wake token.
+                          Raw audio IPC: {privacyDashboard.wake_word?.no_raw_audio_ipc ?? true ? "disabled" : "enabled"}.
+                        </p>
+                        {privacyDashboard.wake_word?.last_error ? (
+                          <p className="task-meta" data-testid="wake-word-error">
+                            {privacyDashboard.wake_word.last_error}
+                          </p>
+                        ) : null}
+                      </li>
+
                       <li data-testid="privacy-surface-proactive">
                         <label className="toggle-row">
                           <input
@@ -4038,6 +4261,139 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                           Proactive triggers
                         </label>
                         <p className="task-meta">Equivalent to quiet mode for proactive surfaces.</p>
+                      </li>
+
+                      <li data-testid="privacy-surface-crisis">
+                        <label className="toggle-row">
+                          <span>Override channel</span>
+                        </label>
+                        <p className="task-meta">
+                          Deterministic emergency classes bypass ordinary interruption judgment.
+                          Quiet mode downgrades delivery to a persistent card.
+                        </p>
+                        <div className="crisis-control-list" data-testid="crisis-control-list">
+                          {(privacyDashboard.crisis_controls ?? []).map((control) => (
+                            <label className="toggle-row" key={control.class} data-testid="crisis-class-control">
+                              <input
+                                type="checkbox"
+                                checked={control.enabled}
+                                onChange={(event) =>
+                                  void handleToggleCrisisClass(control.class, event.target.checked)
+                                }
+                                data-testid={`privacy-toggle-crisis-${control.class}`}
+                              />
+                              {control.label}
+                            </label>
+                          ))}
+                        </div>
+                      </li>
+
+                      <li data-testid="privacy-surface-action-receipts">
+                        <label className="toggle-row">
+                          <span>Action receipts</span>
+                        </label>
+                        <p className="task-meta">
+                          Every mutation Jeff performs is recorded here with its class, surface, trust level, and undo state.
+                        </p>
+                        <div className="action-receipt-list" data-testid="action-receipt-list">
+                          {(privacyDashboard.action_receipts ?? []).slice(0, 6).map((receipt) => (
+                            <div className="action-receipt-row" key={receipt.id}>
+                              <div>
+                                <strong>#{receipt.id} {receipt.class}</strong>
+                                <p className="task-meta">
+                                  {receipt.surface}; {receipt.level}; {receipt.status}; {receipt.description}
+                                </p>
+                              </div>
+                              {receipt.undo_ref && receipt.status === "applied" ? (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleRevertActionReceipt(receipt.id)}
+                                  data-testid="action-receipt-revert"
+                                >
+                                  revert
+                                </button>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      </li>
+
+                      <li data-testid="privacy-surface-trust-ladder">
+                        <label className="toggle-row">
+                          <span>Trust ladder</span>
+                        </label>
+                        <p className="task-meta">
+                          Autonomy is per action class. Email send, file delete, and custom tools are capped at L1.
+                        </p>
+                        <div className="trust-ladder-list" data-testid="trust-ladder-list">
+                          {(privacyDashboard.trust_ladder ?? []).map((entry) => (
+                            <div className="trust-ladder-row" key={entry.class} data-testid="trust-ladder-row">
+                              <div>
+                                <strong>{entry.class}</strong>
+                                <p className="task-meta">
+                                  {entry.level} of {entry.max_level}; streak {entry.approval_streak};{" "}
+                                  {entry.sticky_l1 ? "sticky L1" : "eligible"}
+                                </p>
+                                {entry.graduation_offer ? (
+                                  <p className="task-meta" data-testid="trust-graduation-offer">
+                                    {entry.graduation_offer}
+                                  </p>
+                                ) : null}
+                                {entry.recent_history.length > 0 ? (
+                                  <p className="task-meta" data-testid="trust-history">
+                                    Last: {entry.recent_history[0].status} #{entry.recent_history[0].id}
+                                  </p>
+                                ) : null}
+                              </div>
+                              <div className="row-actions trust-ladder-actions">
+                                {entry.max_level !== "L1" && entry.level === "L1" ? (
+                                  <button
+                                    type="button"
+                                    data-testid="trust-offer-l2"
+                                    onClick={() => void handleSetTrustLevel(entry.class, "L2")}
+                                  >
+                                    L2
+                                  </button>
+                                ) : null}
+                                {entry.max_level === "L3" && entry.level !== "L3" ? (
+                                  <button
+                                    type="button"
+                                    data-testid="trust-explicit-l3"
+                                    onClick={() => void handleSetTrustLevel(entry.class, "L3")}
+                                  >
+                                    L3
+                                  </button>
+                                ) : null}
+                                {entry.level !== "L1" ? (
+                                  <button
+                                    type="button"
+                                    data-testid="trust-demote"
+                                    onClick={() => void handleDemoteTrustClass(entry.class)}
+                                  >
+                                    L1
+                                  </button>
+                                ) : null}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </li>
+
+                      <li data-testid="privacy-surface-native-docs">
+                        <label className="toggle-row">
+                          <span>Native docs</span>
+                          <span className="status-pill">
+                            {privacyDashboard.native_docs.ax_buffer_writeback_enabled ? "AX fallback on" : "AX fallback off"}
+                          </span>
+                        </label>
+                        <p className="task-meta" data-testid="native-docs-automation-explainer">
+                          {privacyDashboard.native_docs.automation_permission_explainer}
+                        </p>
+                        <p className="task-meta">
+                          Pages {privacyDashboard.native_docs.pages_supported ? "supported" : "unavailable"}; Word{" "}
+                          {privacyDashboard.native_docs.word_supported ? "supported" : "unavailable"}; automation{" "}
+                          {privacyDashboard.native_docs.automation_permission_status.replace(/_/g, " ")}.
+                        </p>
                       </li>
 
                       <li data-testid="privacy-surface-profile">
@@ -4574,6 +4930,11 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                   </strong>{" "}
                   &mdash; {edit.document_title}
                 </p>
+                {edit.editor_surface.toLowerCase().includes("google") ? (
+                  <p className="task-meta" data-testid="google-docs-tracked-change-note">
+                    Google Docs edits use the anchored browser adapter. If suggesting mode is active, the change appears as a native suggestion; anchor drift falls back to guided apply.
+                  </p>
+                ) : null}
                 <div className="live-edit-diff" data-testid="live-edit-diff">
                   <div className="live-edit-before">
                     <p className="task-meta">Before</p>
@@ -4612,7 +4973,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                 ) : (
                   <>
                     <p className="task-meta" data-testid="guided-apply-fallback">
-                      The document changed. Paste this manually where it belongs.
+                      The document changed or the anchor moved. Paste this manually where it belongs.
                     </p>
                     <div className="row-actions">
                       <button
@@ -4794,7 +5155,11 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                     type="button"
                     data-testid="workload-refresh"
                     onClick={() => {
-                      void getWorkloadSummary().then(setWorkloadSummary).catch(() => undefined);
+                      void Promise.all([
+                        getWorkloadSummary().then(setWorkloadSummary),
+                        activeTask ? listAgentJobs(activeTask.id, 50).then(setAgentJobs) : Promise.resolve(),
+                        activeTask ? listStandingJobs(activeTask.id).then(setStandingJobs) : Promise.resolve()
+                      ]).catch(() => undefined);
                     }}
                   >
                     Refresh
@@ -4829,6 +5194,130 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                                 </span>
                               ) : null}
                             </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {agentJobs.length > 0 ? (
+                      <div data-testid="agent-jobs-panel">
+                        <p className="task-meta">Agent jobs</p>
+                        <ul className="subtask-list" data-testid="agent-jobs-list">
+                          {agentJobs.slice(0, 8).map((job) => (
+                            <li key={job.id} className="subtask-item" data-testid="agent-job-item">
+                              <button
+                                type="button"
+                                data-testid="agent-job-open"
+                                onClick={() => {
+                                  void getAgentJobDetail(job.id).then(setSelectedAgentJob).catch(() => undefined);
+                                }}
+                              >
+                                #{job.id} {job.status}
+                              </button>
+                              <p className="task-meta">{job.goal_contract}</p>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {standingJobs.length > 0 ? (
+                      <div data-testid="standing-jobs-panel">
+                        <div className="row-actions">
+                          <p className="task-meta">Standing jobs</p>
+                          <button
+                            type="button"
+                            data-testid="standing-jobs-run-due"
+                            onClick={() => void handleRunDueStandingJobs()}
+                          >
+                            Run due
+                          </button>
+                        </div>
+                        <ul className="subtask-list" data-testid="standing-jobs-list">
+                          {standingJobs.slice(0, 8).map((job) => (
+                            <li key={job.id} className="subtask-item" data-testid="standing-job-item">
+                              <p>
+                                <strong>#{job.id}</strong> {job.enabled ? "enabled" : "paused"}
+                                {job.critical ? " critical" : ""}
+                              </p>
+                              <p className="task-meta">{job.schedule_spec}</p>
+                              <p className="task-meta">Next run: {job.next_run_at}</p>
+                              <p className="task-meta">{job.goal_contract}</p>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {selectedAgentJob ? (
+                      <div className="subtask-item" data-testid="agent-job-detail">
+                        <p>
+                          <strong>Job #{selectedAgentJob.job.id}</strong> {selectedAgentJob.job.status}
+                        </p>
+                        <div className="row-actions" data-testid="agent-job-steering-controls">
+                          <input
+                            type="text"
+                            value={jobSteeringInput}
+                            onChange={(event) => setJobSteeringInput(event.target.value)}
+                            placeholder="Steer this job"
+                            data-testid="job-steering-input"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handleSendJobSteering()}
+                            disabled={jobSteeringInput.trim().length === 0}
+                            data-testid="job-steering-send"
+                          >
+                            Send
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleCancelAgentJob()}
+                            disabled={[
+                              "completed",
+                              "blocked",
+                              "budget_exhausted",
+                              "cancelled_partial"
+                            ].includes(selectedAgentJob.job.status)}
+                            data-testid="agent-job-cancel"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                        <p className="task-meta" data-testid="agent-job-verification">
+                          {selectedAgentJob.job.verification_transcript ?? "verification pending"}
+                        </p>
+                        {selectedAgentJob.job.capability_request_json ? (
+                          <pre data-testid="agent-job-capability-request">
+                            {selectedAgentJob.job.capability_request_json}
+                          </pre>
+                        ) : null}
+                        {selectedAgentJob.job.deliverable_json ? (
+                          <pre data-testid="agent-job-deliverable">
+                            {selectedAgentJob.job.deliverable_json}
+                          </pre>
+                        ) : null}
+                        <ul className="subtask-step-list" data-testid="agent-job-steps">
+                          {selectedAgentJob.steps.map((step) => (
+                            <li key={step.id} className={`subtask-step subtask-step--${step.status}`}>
+                              {step.step_index + 1}. {step.phase}: {step.status}
+                            </li>
+                          ))}
+                        </ul>
+                        <ul className="compact-list" data-testid="agent-job-checkpoints">
+                          {selectedAgentJob.checkpoints.map((checkpoint) => (
+                            <li key={checkpoint.id}>
+                              checkpoint {checkpoint.step_index + 1}: {checkpoint.phase}
+                            </li>
+                          ))}
+                        </ul>
+                        <ul className="compact-list" data-testid="agent-job-steering">
+                          {selectedAgentJob.steering.map((steering) => (
+                            <li key={steering.id}>
+                              {steering.status}: {steering.message}
+                            </li>
+                          ))}
+                        </ul>
+                        <ul className="compact-list" data-testid="agent-job-events">
+                          {selectedAgentJob.events.slice(-6).map((event) => (
+                            <li key={event.id}>{event.event_type}</li>
                           ))}
                         </ul>
                       </div>
@@ -5632,6 +6121,25 @@ function inferSubtaskExecutionType(message: string): ExecutionType {
     return "targeted_research_synthesis";
   }
   return "draft_generation";
+}
+
+function inferStandingScheduleSpec(message: string): string {
+  const lower = message.toLowerCase();
+  const explicitDaily = lower.match(/\bdaily\s+([01]\d|2[0-3]):([0-5]\d)\b/);
+  if (explicitDaily) {
+    return `daily ${explicitDaily[1]}:${explicitDaily[2]}`;
+  }
+  const onEvent = lower.match(/\bon-event\s+([a-z0-9_-]+)\b/);
+  if (onEvent) {
+    return `on-event ${onEvent[1]}`;
+  }
+  if (lower.includes("every morning")) {
+    return "daily 08:00";
+  }
+  if (lower.includes("every evening") || lower.includes("tonight") || lower.includes("citations")) {
+    return "daily 18:00";
+  }
+  return "daily 18:00";
 }
 
 function normalizeRevisionInstruction(message: string): string {

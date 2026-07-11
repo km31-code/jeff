@@ -6,6 +6,8 @@ use anyhow::Result;
 use chrono::Timelike;
 use tauri::{AppHandle, Manager, Runtime};
 
+#[cfg(not(test))]
+use crate::model_router::{GenerateOptions, Tier};
 use crate::{
     ambient::AmbientState,
     consolidation,
@@ -15,8 +17,6 @@ use crate::{
     store::TaskStore,
     workload,
 };
-#[cfg(not(test))]
-use crate::model_router::{GenerateOptions, Tier};
 
 pub const BRIEFING_MESSAGE_KIND: &str = "proactive_briefing";
 pub const DEBRIEF_MESSAGE_KIND: &str = "proactive_debrief";
@@ -30,16 +30,19 @@ const BRIEFING_LAST_FIRED_KEY: &str = "ritual:briefing_last_fired_date";
 const DEBRIEF_LAST_FIRED_KEY: &str = "ritual:debrief_last_fired_date";
 const WRAP_REQUESTED_KEY: &str = "ritual:wrap_requested_date";
 
+#[cfg_attr(test, allow(dead_code))]
 pub const BRIEFING_SYSTEM_PROMPT: &str = "You are Jeff opening the user's day. \
 Compose a briefing as a coworker who has already looked at the calendar, workload, and what mattered yesterday — not a report or a status dump. \
 At most four sentences. Reference the specific items given. Make at most one concrete offer to help. \
 No greetings-cliche, no filler, no bullet points. Start a conversation.";
 
+#[cfg_attr(test, allow(dead_code))]
 pub const DEBRIEF_SYSTEM_PROMPT: &str = "You are Jeff closing the user's day. \
 Compose a short debrief as a coworker wrapping up together — what got done, what is still waiting on them, and the first thing tomorrow needs. \
 At most four sentences. Reference the specific items given. No filler, no bullet points.";
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(test, allow(dead_code))]
 pub struct BriefingInputs {
     pub calendar: Option<String>,
     pub workload: String,
@@ -151,15 +154,9 @@ pub async fn maybe_fire_briefing<R: Runtime>(app: &AppHandle<R>) {
     if message.trim().is_empty() {
         return;
     }
-    if deliver_proactive_as_chat_message(
-        &jeff.store,
-        app,
-        task.id,
-        &message,
-        BRIEFING_MESSAGE_KIND,
-    )
-    .await
-    .is_ok()
+    if deliver_proactive_as_chat_message(&jeff.store, app, task.id, &message, BRIEFING_MESSAGE_KIND)
+        .await
+        .is_ok()
     {
         let _ = jeff
             .store
@@ -204,8 +201,14 @@ pub async fn maybe_fire_debrief<R: Runtime>(app: &AppHandle<R>) {
         .flatten()
         .map(|value| value == date_of(now))
         .unwrap_or(false);
-    if !should_fire_debrief(enabled, hour, idle_seconds, explicit_wrap, last_fired.as_deref(), now)
-    {
+    if !should_fire_debrief(
+        enabled,
+        hour,
+        idle_seconds,
+        explicit_wrap,
+        last_fired.as_deref(),
+        now,
+    ) {
         return;
     }
 
@@ -354,6 +357,7 @@ fn compose_debrief_model(router: &ModelRouter, inputs: &DebriefInputs) -> Result
     )
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub fn build_briefing_prompt(inputs: &BriefingInputs) -> String {
     format!(
         "Calendar: {}\nWorkload: {}\nYesterday's takeaways: {}\nPending approvals: {}",
@@ -368,6 +372,7 @@ pub fn build_briefing_prompt(inputs: &BriefingInputs) -> String {
     )
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub fn build_debrief_prompt(inputs: &DebriefInputs) -> String {
     format!(
         "Done today: {}\nPending approvals: {}\nTomorrow's first constraint: {}",
@@ -393,7 +398,11 @@ fn deterministic_briefing(inputs: &BriefingInputs) -> String {
         parts.push(format!(
             "{} approval{} still waiting on you.",
             inputs.pending_approvals,
-            if inputs.pending_approvals == 1 { "" } else { "s" }
+            if inputs.pending_approvals == 1 {
+                ""
+            } else {
+                "s"
+            }
         ));
     }
     if parts.is_empty() {
@@ -414,7 +423,11 @@ fn deterministic_debrief(inputs: &DebriefInputs) -> String {
         parts.push(format!(
             "{} approval{} still waiting.",
             inputs.pending_approvals,
-            if inputs.pending_approvals == 1 { "" } else { "s" }
+            if inputs.pending_approvals == 1 {
+                ""
+            } else {
+                "s"
+            }
         ));
     }
     if let Some(tomorrow) = inputs.tomorrow_first.as_deref() {
@@ -468,9 +481,23 @@ mod tests {
     fn c3_debrief_requires_opt_in() {
         let now = 10 * DAY;
         // opted out: never fires, even in the evening after long idle.
-        assert!(!should_fire_debrief(false, 20, DEBRIEF_IDLE_SECONDS + 1, false, None, now));
+        assert!(!should_fire_debrief(
+            false,
+            20,
+            DEBRIEF_IDLE_SECONDS + 1,
+            false,
+            None,
+            now
+        ));
         // opted in, evening, idle -> fires.
-        assert!(should_fire_debrief(true, 20, DEBRIEF_IDLE_SECONDS + 1, false, None, now));
+        assert!(should_fire_debrief(
+            true,
+            20,
+            DEBRIEF_IDLE_SECONDS + 1,
+            false,
+            None,
+            now
+        ));
         // opted in but morning, not idle -> no.
         assert!(!should_fire_debrief(true, 9, 10, false, None, now));
         // opted in, explicit wrap -> fires regardless of hour/idle.
@@ -508,7 +535,13 @@ mod tests {
         assert!(message.contains("approval"));
         // exactly one offer ("want me to ...").
         assert_eq!(message.to_lowercase().matches("want me to").count(), 1);
-        assert!(message.split(['.', '?']).filter(|s| !s.trim().is_empty()).count() <= 4);
+        assert!(
+            message
+                .split(['.', '?'])
+                .filter(|s| !s.trim().is_empty())
+                .count()
+                <= 4
+        );
     }
 
     #[test]
