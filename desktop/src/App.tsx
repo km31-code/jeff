@@ -126,6 +126,7 @@ import {
   createStandingJob,
   listStandingJobs,
   runDueStandingJobs,
+  setStandingJobEnabled,
   ActiveWindowContextDto,
   getActiveWindowContext,
   getAccessibilityPermissionStatus,
@@ -2692,6 +2693,17 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     }
   }
 
+  async function handleToggleStandingJob(standingJobId: number, enabled: boolean) {
+    try {
+      await setStandingJobEnabled(standingJobId, enabled);
+      if (activeTask) {
+        await refreshActionCenterState(activeTask.id);
+      }
+    } catch (error) {
+      setOperationError("Failed to update standing job", error);
+    }
+  }
+
   async function handleCancelSubtask(subtaskId: number) {
     if (!activeTask) {
       return;
@@ -5241,6 +5253,15 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                               <p className="task-meta">{job.schedule_spec}</p>
                               <p className="task-meta">Next run: {job.next_run_at}</p>
                               <p className="task-meta">{job.goal_contract}</p>
+                              <div className="row-actions">
+                                <button
+                                  type="button"
+                                  data-testid="standing-job-toggle"
+                                  onClick={() => void handleToggleStandingJob(job.id, !job.enabled)}
+                                >
+                                  {job.enabled ? "Disable" : "Enable"}
+                                </button>
+                              </div>
                             </li>
                           ))}
                         </ul>

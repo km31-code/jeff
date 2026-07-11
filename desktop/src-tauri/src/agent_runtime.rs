@@ -462,6 +462,27 @@ pub fn list_standing_jobs(
     Ok(jobs)
 }
 
+pub fn set_standing_job_enabled(
+    store: &TaskStore,
+    standing_job_id: i64,
+    enabled: bool,
+) -> Result<StandingJobDto> {
+    let conn = store.connect()?;
+    let changed = conn
+        .execute(
+            "UPDATE standing_jobs
+             SET enabled = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?2",
+            params![if enabled { 1 } else { 0 }, standing_job_id],
+        )
+        .context("failed to update standing job enabled state")?;
+    if changed == 0 {
+        return Err(anyhow!("standing job id={standing_job_id} not found"));
+    }
+    get_standing_job(store, standing_job_id)?
+        .ok_or_else(|| anyhow!("standing job id={standing_job_id} missing after update"))
+}
+
 pub fn run_due_standing_jobs(
     store: &TaskStore,
     event_name: Option<&str>,
@@ -1579,5 +1600,31 @@ mod tests {
                 && receipt.surface == STANDING_JOB_RECEIPT_SURFACE
                 && receipt.status == "applied"
         }));
+    }
+
+    #[test]
+    fn d6_disabling_standing_job_stops_it_from_running() {
+        let (_dir, store) = store();
+        let task = store.create_task("d6 disable").unwrap();
+        let standing = create_standing_job(
+            &store,
+            task.id,
+            "Every evening, check my citations.",
+            "on-event citation_guard",
+            false,
+        )
+        .unwrap();
+
+        // disabling must remove it from the due set entirely.
+        let updated = set_standing_job_enabled(&store, standing.id, false).unwrap();
+        assert!(!updated.enabled);
+        let details = run_due_standing_jobs(&store, Some("citation_guard")).unwrap();
+        assert!(details.is_empty(), "disabled standing job must not run");
+
+        // re-enabling restores it.
+        set_standing_job_enabled(&store, standing.id, true).unwrap();
+        let details = run_due_standing_jobs(&store, Some("citation_guard")).unwrap();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].job.status, JOB_STATUS_COMPLETED);
     }
 }

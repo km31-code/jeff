@@ -1351,6 +1351,14 @@ function setupInvokeMock(options?: {
       return [];
     }
 
+    if (command === "set_standing_job_enabled") {
+      const target = standingJobs.find((job) => job.id === Number(args?.standingJobId));
+      if (target) {
+        target.enabled = Boolean(args?.enabled);
+      }
+      return target;
+    }
+
     if (command === "list_file_write_proposals") {
       return [];
     }

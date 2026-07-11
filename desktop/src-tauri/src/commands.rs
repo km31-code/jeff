@@ -1419,6 +1419,16 @@ pub fn run_due_standing_jobs(
 }
 
 #[tauri::command]
+pub fn set_standing_job_enabled(
+    state: State<'_, JeffState>,
+    standing_job_id: i64,
+    enabled: bool,
+) -> Result<StandingJobDto, String> {
+    crate::agent_runtime::set_standing_job_enabled(&state.store, standing_job_id, enabled)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
 pub fn cancel_subtask(state: State<'_, JeffState>, subtask_id: i64) -> Result<SubTaskDto, String> {
     cancel_subtask_by_id(&state.store, state.subtasks.as_ref(), subtask_id).map_err(map_jeff_error)
 }

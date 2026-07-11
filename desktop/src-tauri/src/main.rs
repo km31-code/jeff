@@ -692,6 +692,61 @@ fn main() {
                 });
             }
 
+            // apex d6: resume any job left pending/running by a previous session
+            // (app restart or crash) once at startup, so checkpointed jobs
+            // continue from their last completed step and emit the
+            // resumed_from_checkpoint event. delayed so db init and session
+            // restore complete first.
+            {
+                let resume_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    if let Some(state) = resume_handle.try_state::<JeffState>() {
+                        match agent_runtime::resume_incomplete_jobs(&state.store) {
+                            Ok(resumed) if !resumed.is_empty() => {
+                                eprintln!(
+                                    "[jeff] resumed {} incomplete agent job(s) at startup",
+                                    resumed.len()
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(err) => {
+                                eprintln!("[jeff] startup job resume failed: {err:#}");
+                            }
+                        }
+                    }
+                });
+            }
+
+            // apex d6: standing-job scheduler (60-second interval). fires
+            // daily-due standing jobs automatically so a recurring guard (e.g.
+            // "every evening, check my citations") runs across days without a
+            // manual trigger; each run posts a receipt to the unified audit log.
+            // on-event standing jobs are dispatched by their event sources, not
+            // this timer. disabled standing jobs are skipped at the query level.
+            {
+                let standing_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        if let Some(state) = standing_handle.try_state::<JeffState>() {
+                            match agent_runtime::run_due_standing_jobs(&state.store, None) {
+                                Ok(ran) if !ran.is_empty() => {
+                                    eprintln!(
+                                        "[jeff] ran {} due standing job(s)",
+                                        ran.len()
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(err) => {
+                                    eprintln!("[jeff] standing-job scheduler tick failed: {err:#}");
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
             // phase 19: fire a one-time native notification on the very first
             // session so users who enabled launch-at-login know jeff is running
             // in the tray without needing to look for it.
@@ -797,6 +852,7 @@ fn main() {
             commands::create_standing_job,
             commands::list_standing_jobs,
             commands::run_due_standing_jobs,
+            commands::set_standing_job_enabled,
             commands::evaluate_next_suggestions,
             commands::list_suggestions,
             commands::accept_suggestion,

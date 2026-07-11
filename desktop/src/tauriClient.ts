@@ -976,6 +976,13 @@ export async function runDueStandingJobs(eventName?: string | null): Promise<Age
   return invoke<AgentJobDetailDto[]>("run_due_standing_jobs", { eventName: eventName ?? null });
 }
 
+export async function setStandingJobEnabled(
+  standingJobId: number,
+  enabled: boolean
+): Promise<StandingJobDto> {
+  return invoke<StandingJobDto>("set_standing_job_enabled", { standingJobId, enabled });
+}
+
 export async function cancelSubtask(subtaskId: number): Promise<SubTaskDto> {
   return invoke<SubTaskDto>("cancel_subtask", { subtaskId });
 }
