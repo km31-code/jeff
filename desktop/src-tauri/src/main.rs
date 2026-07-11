@@ -22,6 +22,7 @@ mod embedding;
 mod errors;
 mod flow;
 mod goal_extraction;
+mod gmail_core;
 mod judgment_eval_core;
 mod latency;
 mod local_runtime;
@@ -922,6 +923,12 @@ fn main() {
             commands::set_web_corpus_dir,
             commands::web_search,
             commands::web_fetch,
+            commands::triage_inbox,
+            commands::summarize_email_thread,
+            commands::register_email_reply_watch,
+            commands::list_email_reply_watches,
+            commands::draft_email_reply,
+            commands::notify_email_landed,
             commands::evaluate_next_suggestions,
             commands::list_suggestions,
             commands::accept_suggestion,

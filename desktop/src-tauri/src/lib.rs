@@ -11,6 +11,7 @@ pub mod cost_governor;
 pub mod crisis_core;
 pub mod embedding;
 pub mod errors;
+pub mod gmail_core;
 pub mod goal_extraction;
 pub mod judgment_eval_core;
 pub mod latency;

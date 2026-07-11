@@ -166,7 +166,6 @@ pub fn fire_data_loss_risk_with_disk<R: Runtime>(
     }
 }
 
-#[allow(dead_code)]
 pub fn maybe_fire_awaited_reply_landed<R: Runtime>(
     app: &AppHandle<R>,
     task_id: i64,

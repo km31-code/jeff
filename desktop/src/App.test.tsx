@@ -920,6 +920,10 @@ function setupInvokeMock(options?: {
       return [];
     }
 
+    if (command === "list_email_reply_watches") {
+      return [];
+    }
+
     if (command === "set_speculation_enabled") {
       privacyDashboard = {
         ...privacyDashboard,

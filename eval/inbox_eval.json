@@ -1,0 +1,420 @@
+{
+  "context": {
+    "known_people": [
+      "Sarah",
+      "advisor",
+      "Dr. Chen",
+      "journal"
+    ],
+    "active_goal_terms": [
+      "thesis",
+      "chapter",
+      "abstract",
+      "methods"
+    ]
+  },
+  "messages": [
+    {
+      "id": "m1",
+      "thread_id": "t1",
+      "sender": "Sarah Lee",
+      "subject": "Draft review moved to 1:30",
+      "snippet": "Can we move the review? It is time sensitive."
+    },
+    {
+      "id": "m2",
+      "thread_id": "t2",
+      "sender": "advisor@university.edu",
+      "subject": "Feedback on chapter 3",
+      "snippet": "Please review my notes by Friday."
+    },
+    {
+      "id": "m3",
+      "thread_id": "t3",
+      "sender": "Dr. Chen",
+      "subject": "Thesis committee date",
+      "snippet": "The thesis defense deadline is next week."
+    },
+    {
+      "id": "m4",
+      "thread_id": "t4",
+      "sender": "Sarah Lee",
+      "subject": "Re: abstract",
+      "snippet": "The journal wants the revised abstract by Friday."
+    },
+    {
+      "id": "m5",
+      "thread_id": "t5",
+      "sender": "registrar@university.edu",
+      "subject": "Action required: enrollment",
+      "snippet": "Response needed before the deadline."
+    },
+    {
+      "id": "m6",
+      "thread_id": "t6",
+      "sender": "journal editor",
+      "subject": "Revisions due EOD",
+      "snippet": "Your revisions are due end of day today."
+    },
+    {
+      "id": "m7",
+      "thread_id": "t7",
+      "sender": "Sarah Lee",
+      "subject": "quick question",
+      "snippet": "Urgent: need your reply on the figures."
+    },
+    {
+      "id": "m8",
+      "thread_id": "t8",
+      "sender": "advisor@university.edu",
+      "subject": "meeting tomorrow",
+      "snippet": "Let us meet tomorrow about the chapter."
+    },
+    {
+      "id": "m9",
+      "thread_id": "t9",
+      "sender": "billing@service.com",
+      "subject": "Invoice payment due Monday",
+      "snippet": "Payment is due by Monday, action required."
+    },
+    {
+      "id": "m10",
+      "thread_id": "t10",
+      "sender": "it-help@university.edu",
+      "subject": "Password expires tomorrow",
+      "snippet": "Your password expires tomorrow, action required."
+    },
+    {
+      "id": "m11",
+      "thread_id": "t11",
+      "sender": "Sarah Lee",
+      "subject": "chapter 3 counterargument",
+      "snippet": "The chapter still needs the counterargument, please review."
+    },
+    {
+      "id": "m12",
+      "thread_id": "t12",
+      "sender": "Dr. Chen",
+      "subject": "abstract feedback",
+      "snippet": "Please review the abstract, time sensitive."
+    },
+    {
+      "id": "m13",
+      "thread_id": "t13",
+      "sender": "conference@acm.org",
+      "subject": "Submission deadline Friday",
+      "snippet": "The submission deadline is Friday, response needed."
+    },
+    {
+      "id": "m14",
+      "thread_id": "t14",
+      "sender": "advisor@university.edu",
+      "subject": "thesis timeline",
+      "snippet": "We need to finalize the thesis timeline asap."
+    },
+    {
+      "id": "m15",
+      "thread_id": "t15",
+      "sender": "Sarah Lee",
+      "subject": "reply needed",
+      "snippet": "Reply needed on the methods section today."
+    },
+    {
+      "id": "n16",
+      "thread_id": "t16",
+      "sender": "no-reply@newsletter.com",
+      "subject": "Weekly digest",
+      "snippet": "Unsubscribe anytime to stop the weekly digest."
+    },
+    {
+      "id": "n17",
+      "thread_id": "t17",
+      "sender": "promo@shop.com",
+      "subject": "50% off sale",
+      "snippet": "Limited time promotion, big sale this week."
+    },
+    {
+      "id": "n18",
+      "thread_id": "t18",
+      "sender": "updates@app.com",
+      "subject": "New features are here",
+      "snippet": "Check out our new features and updates."
+    },
+    {
+      "id": "n19",
+      "thread_id": "t19",
+      "sender": "notifications@github.com",
+      "subject": "Your receipt",
+      "snippet": "Here is your receipt for the purchase."
+    },
+    {
+      "id": "n20",
+      "thread_id": "t20",
+      "sender": "digest@medium.com",
+      "subject": "You have 3 new connections",
+      "snippet": "See who viewed your profile this week."
+    },
+    {
+      "id": "n21",
+      "thread_id": "t21",
+      "sender": "marketing@brand.com",
+      "subject": "Trending stories for you",
+      "snippet": "Your personalized weekly digest of stories."
+    },
+    {
+      "id": "n22",
+      "thread_id": "t22",
+      "sender": "no-reply@social.com",
+      "subject": "Webinar invitation",
+      "snippet": "Join our free webinar next month."
+    },
+    {
+      "id": "n23",
+      "thread_id": "t23",
+      "sender": "newsletter@news.com",
+      "subject": "Product update",
+      "snippet": "We shipped new features, learn more."
+    },
+    {
+      "id": "n24",
+      "thread_id": "t24",
+      "sender": "no-reply@newsletter.com",
+      "subject": "Community newsletter",
+      "snippet": "This month in the community, unsubscribe below."
+    },
+    {
+      "id": "n25",
+      "thread_id": "t25",
+      "sender": "promo@shop.com",
+      "subject": "Rewards points update",
+      "snippet": "Your rewards points summary, limited time offer."
+    },
+    {
+      "id": "n26",
+      "thread_id": "t26",
+      "sender": "updates@app.com",
+      "subject": "Weekly digest",
+      "snippet": "Unsubscribe anytime to stop the weekly digest."
+    },
+    {
+      "id": "n27",
+      "thread_id": "t27",
+      "sender": "notifications@github.com",
+      "subject": "50% off sale",
+      "snippet": "Limited time promotion, big sale this week."
+    },
+    {
+      "id": "n28",
+      "thread_id": "t28",
+      "sender": "digest@medium.com",
+      "subject": "New features are here",
+      "snippet": "Check out our new features and updates."
+    },
+    {
+      "id": "n29",
+      "thread_id": "t29",
+      "sender": "marketing@brand.com",
+      "subject": "Your receipt",
+      "snippet": "Here is your receipt for the purchase."
+    },
+    {
+      "id": "n30",
+      "thread_id": "t30",
+      "sender": "no-reply@social.com",
+      "subject": "You have 3 new connections",
+      "snippet": "See who viewed your profile this week."
+    },
+    {
+      "id": "n31",
+      "thread_id": "t31",
+      "sender": "newsletter@news.com",
+      "subject": "Trending stories for you",
+      "snippet": "Your personalized weekly digest of stories."
+    },
+    {
+      "id": "n32",
+      "thread_id": "t32",
+      "sender": "no-reply@newsletter.com",
+      "subject": "Webinar invitation",
+      "snippet": "Join our free webinar next month."
+    },
+    {
+      "id": "n33",
+      "thread_id": "t33",
+      "sender": "promo@shop.com",
+      "subject": "Product update",
+      "snippet": "We shipped new features, learn more."
+    },
+    {
+      "id": "n34",
+      "thread_id": "t34",
+      "sender": "updates@app.com",
+      "subject": "Community newsletter",
+      "snippet": "This month in the community, unsubscribe below."
+    },
+    {
+      "id": "n35",
+      "thread_id": "t35",
+      "sender": "notifications@github.com",
+      "subject": "Rewards points update",
+      "snippet": "Your rewards points summary, limited time offer."
+    },
+    {
+      "id": "n36",
+      "thread_id": "t36",
+      "sender": "digest@medium.com",
+      "subject": "Weekly digest",
+      "snippet": "Unsubscribe anytime to stop the weekly digest."
+    },
+    {
+      "id": "n37",
+      "thread_id": "t37",
+      "sender": "marketing@brand.com",
+      "subject": "50% off sale",
+      "snippet": "Limited time promotion, big sale this week."
+    },
+    {
+      "id": "n38",
+      "thread_id": "t38",
+      "sender": "no-reply@social.com",
+      "subject": "New features are here",
+      "snippet": "Check out our new features and updates."
+    },
+    {
+      "id": "n39",
+      "thread_id": "t39",
+      "sender": "newsletter@news.com",
+      "subject": "Your receipt",
+      "snippet": "Here is your receipt for the purchase."
+    },
+    {
+      "id": "n40",
+      "thread_id": "t40",
+      "sender": "no-reply@newsletter.com",
+      "subject": "You have 3 new connections",
+      "snippet": "See who viewed your profile this week."
+    },
+    {
+      "id": "n41",
+      "thread_id": "t41",
+      "sender": "promo@shop.com",
+      "subject": "Trending stories for you",
+      "snippet": "Your personalized weekly digest of stories."
+    },
+    {
+      "id": "n42",
+      "thread_id": "t42",
+      "sender": "updates@app.com",
+      "subject": "Webinar invitation",
+      "snippet": "Join our free webinar next month."
+    },
+    {
+      "id": "n43",
+      "thread_id": "t43",
+      "sender": "notifications@github.com",
+      "subject": "Product update",
+      "snippet": "We shipped new features, learn more."
+    },
+    {
+      "id": "n44",
+      "thread_id": "t44",
+      "sender": "digest@medium.com",
+      "subject": "Community newsletter",
+      "snippet": "This month in the community, unsubscribe below."
+    },
+    {
+      "id": "n45",
+      "thread_id": "t45",
+      "sender": "marketing@brand.com",
+      "subject": "Rewards points update",
+      "snippet": "Your rewards points summary, limited time offer."
+    },
+    {
+      "id": "n46",
+      "thread_id": "t46",
+      "sender": "no-reply@social.com",
+      "subject": "Weekly digest",
+      "snippet": "Unsubscribe anytime to stop the weekly digest."
+    },
+    {
+      "id": "n47",
+      "thread_id": "t47",
+      "sender": "newsletter@news.com",
+      "subject": "50% off sale",
+      "snippet": "Limited time promotion, big sale this week."
+    },
+    {
+      "id": "n48",
+      "thread_id": "t48",
+      "sender": "no-reply@newsletter.com",
+      "subject": "New features are here",
+      "snippet": "Check out our new features and updates."
+    },
+    {
+      "id": "n49",
+      "thread_id": "t49",
+      "sender": "promo@shop.com",
+      "subject": "Your receipt",
+      "snippet": "Here is your receipt for the purchase."
+    },
+    {
+      "id": "n50",
+      "thread_id": "t50",
+      "sender": "updates@app.com",
+      "subject": "You have 3 new connections",
+      "snippet": "See who viewed your profile this week."
+    }
+  ],
+  "labels": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ]
+}

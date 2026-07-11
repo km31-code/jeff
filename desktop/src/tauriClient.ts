@@ -1619,6 +1619,31 @@ export async function setWebUserNameGuard(name: string): Promise<void> {
   await invoke("set_web_user_name_guard", { name });
 }
 
+export interface EmailReplyWatchDto {
+  id: number;
+  task_id: number | null;
+  sender: string;
+  thread_hint: string;
+  status: string;
+  created_at: string;
+}
+
+export async function listEmailReplyWatches(): Promise<EmailReplyWatchDto[]> {
+  return invoke<EmailReplyWatchDto[]>("list_email_reply_watches");
+}
+
+export async function registerEmailReplyWatch(
+  taskId: number,
+  sender: string,
+  threadHint?: string
+): Promise<EmailReplyWatchDto> {
+  return invoke<EmailReplyWatchDto>("register_email_reply_watch", {
+    taskId,
+    sender,
+    threadHint: threadHint ?? null
+  });
+}
+
 export interface WakeWordStatusDto {
   enabled: boolean;
   configured: boolean;

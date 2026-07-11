@@ -432,6 +432,23 @@ pub struct CustomToolRunResultDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EmailTriageFlagDto {
+    pub message_id: String,
+    pub subject: String,
+    pub matters_because: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EmailReplyWatchDto {
+    pub id: i64,
+    pub task_id: Option<i64>,
+    pub sender: String,
+    pub thread_hint: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WebQueryLogDto {
     pub id: i64,
     pub query: String,

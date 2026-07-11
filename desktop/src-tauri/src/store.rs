@@ -801,6 +801,19 @@ impl TaskStore {
 
             CREATE INDEX IF NOT EXISTS idx_web_query_log_recent
                 ON web_query_log(id DESC);
+
+            CREATE TABLE IF NOT EXISTS email_reply_watches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+                sender TEXT NOT NULL,
+                thread_hint TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'watching',
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                resolved_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_email_reply_watches_active
+                ON email_reply_watches(status, id DESC);
             "#,
             now = SQLITE_NOW_EXPR,
             embedding_model = crate::providers::OPENAI_EMBEDDING_MODEL_ID,
@@ -5611,8 +5624,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 51,
-            "expected 51 application tables after apex e2 (added web_query_log)"
+            count, 52,
+            "expected 52 application tables after apex e3 (added email_reply_watches)"
         );
     }
 

@@ -28,6 +28,7 @@ use crate::{
         RevisionTargetDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
         SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
         SpeculationCacheDto, SpeculationServeResultDto, SpeculationStatusDto,
+        EmailReplyWatchDto, EmailTriageFlagDto,
         ToolCallLogDto, ToolConnectionDto, ToolDescriptorDto, WebQueryLogDto,
         StandingJobDto, SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto,
         SuggestionDto, SuggestionEvaluationDto, SynthesisLogEntryDto, TaskContextPackDto, TaskDto,
@@ -1630,6 +1631,87 @@ pub fn web_fetch(
     url: String,
 ) -> Result<crate::web_tools::WebDocument, String> {
     crate::web_tools::fetch(&state.store, &url).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn triage_inbox(
+    _state: State<'_, JeffState>,
+    messages: Vec<crate::gmail_core::EmailMessage>,
+    context: crate::gmail_core::TriageContext,
+) -> Result<Vec<EmailTriageFlagDto>, String> {
+    Ok(crate::gmail_core::triage_inbox(&messages, &context))
+}
+
+#[tauri::command]
+pub fn summarize_email_thread(
+    _state: State<'_, JeffState>,
+    messages: Vec<crate::gmail_core::EmailMessage>,
+) -> Result<String, String> {
+    Ok(crate::gmail_core::summarize_thread(&messages))
+}
+
+#[tauri::command]
+pub fn register_email_reply_watch(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    sender: String,
+    thread_hint: Option<String>,
+) -> Result<EmailReplyWatchDto, String> {
+    crate::gmail_core::register_reply_watch(
+        &state.store,
+        task_id,
+        &sender,
+        thread_hint.as_deref().unwrap_or(""),
+    )
+    .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_email_reply_watches(
+    state: State<'_, JeffState>,
+) -> Result<Vec<EmailReplyWatchDto>, String> {
+    crate::gmail_core::list_reply_watches(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn draft_email_reply(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    thread_hint: Option<String>,
+    to: String,
+    subject: String,
+    body: String,
+) -> Result<ActionReceiptDto, String> {
+    crate::gmail_core::draft_reply(
+        &state.store,
+        task_id,
+        thread_hint.as_deref().unwrap_or(""),
+        &to,
+        &subject,
+        &body,
+    )
+    .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn notify_email_landed<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, JeffState>,
+    task_id: i64,
+    message: crate::gmail_core::EmailMessage,
+) -> Result<usize, String> {
+    let resolved =
+        crate::gmail_core::resolve_landed_reply(&state.store, &message).map_err(map_jeff_error)?;
+    if !resolved.is_empty() {
+        // deterministic crisis trigger: an awaited reply landed.
+        crate::crisis::maybe_fire_awaited_reply_landed(
+            &app,
+            task_id,
+            &format!("awaited reply from {} landed", message.sender),
+            true,
+        );
+    }
+    Ok(resolved.len())
 }
 
 #[tauri::command]

@@ -157,6 +157,8 @@ import {
   WebQueryLogDto,
   listWebQueryLog,
   setWebUserNameGuard,
+  EmailReplyWatchDto,
+  listEmailReplyWatches,
   getPrivacyCenterDashboard,
   getInterruptionAudit,
   type InterruptionAuditDto,
@@ -440,6 +442,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [toolCallLog, setToolCallLog] = useState<ToolCallLogDto[]>([]);
   const [webQueryLog, setWebQueryLog] = useState<WebQueryLogDto[]>([]);
   const [webUserGuard, setWebUserGuard] = useState("");
+  const [emailReplyWatches, setEmailReplyWatches] = useState<EmailReplyWatchDto[]>([]);
   const [interruptionAudit, setInterruptionAudit] = useState<InterruptionAuditDto | null>(null);
   const [debriefEnabled, setDebriefEnabledState] = useState(false);
   const [voiceEnabled, setVoiceEnabledState] = useState(false);
@@ -1187,10 +1190,11 @@ function App({ onCloseWorkspace }: AppProps = {}) {
           listCapabilityGaps().catch(() => []),
           listCustomTools().catch(() => [])
         ]);
-      const [connections, callLog, webLog] = await Promise.all([
+      const [connections, callLog, webLog, replyWatches] = await Promise.all([
         listToolConnections().catch(() => []),
         listToolCallLog(8).catch(() => []),
-        listWebQueryLog(8).catch(() => [])
+        listWebQueryLog(8).catch(() => []),
+        listEmailReplyWatches().catch(() => [])
       ]);
       setPrivacyDashboard(dashboard);
       setSpeculationCache(speculation);
@@ -1199,6 +1203,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setToolConnections(connections);
       setToolCallLog(callLog);
       setWebQueryLog(webLog);
+      setEmailReplyWatches(replyWatches);
       setSelectionBridgeStatus(bridgeStatus);
       setRelationalProfile(profile);
       setInterruptionAudit(audit);
@@ -4537,6 +4542,23 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                                 {entry.connection_name}.{entry.tool_name} {entry.argument_summary} [{entry.status}]
                               </p>
                             </div>
+                          ))}
+                        </div>
+                      </li>
+
+                      <li data-testid="privacy-surface-email">
+                        <label className="toggle-row">
+                          <span>Email</span>
+                        </label>
+                        <p className="task-meta">
+                          Jeff reads and drafts email but never sends. Drafts are propose-only
+                          (email.draft at L1). Reply watches notify you when a specific reply lands.
+                        </p>
+                        <div className="compact-list" data-testid="email-reply-watch-list">
+                          {emailReplyWatches.slice(0, 6).map((watch) => (
+                            <p className="task-meta" key={watch.id}>
+                              watching {watch.sender} {watch.thread_hint ? `(${watch.thread_hint})` : ""} [{watch.status}]
+                            </p>
                           ))}
                         </div>
                       </li>
