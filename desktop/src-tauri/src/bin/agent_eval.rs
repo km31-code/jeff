@@ -6,9 +6,11 @@ use jeff_desktop::{
     store::TaskStore,
 };
 
-const REQUIRED_MIN_PASSES: usize = 12;
-const MIN_NON_GATED: usize = 15;
-const MIN_GATED: usize = 5;
+// apex e2 unlocked the 5 web-research contracts (they now run against seeded
+// web-source fixtures), so all 20 contracts are non-gated and must pass.
+const REQUIRED_MIN_PASSES: usize = 17;
+const MIN_NON_GATED: usize = 20;
+const MIN_GATED: usize = 0;
 
 struct Args {
     contracts_path: PathBuf,

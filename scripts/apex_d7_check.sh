@@ -43,8 +43,8 @@ TOTAL=$(echo "$COUNTS" | cut -d' ' -f1)
 NON_GATED=$(echo "$COUNTS" | cut -d' ' -f2)
 GATED=$(echo "$COUNTS" | cut -d' ' -f3)
 MISSING=$(echo "$COUNTS" | cut -d' ' -f4)
+# e2 unlocked the 5 web-research contracts, so all 20 are non-gated now.
 [ "$NON_GATED" -ge 15 ] || fail "expected >=15 non-gated contracts, got $NON_GATED"
-[ "$GATED" -ge 5 ] || fail "expected >=5 e2-gated contracts, got $GATED"
 [ -z "$MISSING" ] || fail "non-gated contracts missing categories: $MISSING"
 pass "contracts: $NON_GATED non-gated + $GATED e2-gated ($TOTAL total), all categories covered"
 

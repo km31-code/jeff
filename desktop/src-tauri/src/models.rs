@@ -432,6 +432,16 @@ pub struct CustomToolRunResultDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebQueryLogDto {
+    pub id: i64,
+    pub query: String,
+    pub tool: String,
+    pub result_count: i64,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolConnectionDto {
     pub id: i64,
     pub name: String,

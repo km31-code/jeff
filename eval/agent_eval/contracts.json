@@ -171,35 +171,60 @@
     "id": "web_find_sources",
     "category": "web_research",
     "goal_contract": "Find three sources supporting the thesis and draft the paragraph with citations.",
-    "gated": true,
-    "expect_status": "completed"
+    "fixture_workspace": "fixtures/web_research",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true,
+    "require_grounded_output": true,
+    "expected_source_files": ["source_related_work.md"],
+    "must_contain": ["Three independent sources agree that citation enforcement prevents fabrication"]
   },
   {
     "id": "web_verify_claim",
     "category": "web_research",
     "goal_contract": "Verify the statistic in paragraph two against a reputable web source.",
-    "gated": true,
-    "expect_status": "completed"
+    "fixture_workspace": "fixtures/web_research",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true,
+    "require_grounded_output": true,
+    "expected_source_files": ["source_verification.md"],
+    "must_contain": ["compares every stated claim against a named source"]
   },
   {
     "id": "web_recent_developments",
     "category": "web_research",
     "goal_contract": "Research recent developments on the topic and summarize with citations.",
-    "gated": true,
-    "expect_status": "completed"
+    "fixture_workspace": "fixtures/web_research",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true,
+    "require_grounded_output": true,
+    "expected_source_files": ["source_grounding.md"],
+    "must_contain": ["On-device retrieval now matches cloud retrieval quality"]
   },
   {
     "id": "web_fact_check",
     "category": "web_research",
     "goal_contract": "Fact-check the claims in the local draft against web sources.",
-    "gated": true,
-    "expect_status": "completed"
+    "fixture_workspace": "fixtures/web_research",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true,
+    "require_grounded_output": true,
+    "expected_source_files": ["source_verification.md"],
+    "must_contain": ["flags unsupported claims"]
   },
   {
     "id": "web_related_work",
     "category": "web_research",
     "goal_contract": "Find related work online and draft a related-work paragraph with citations.",
-    "gated": true,
-    "expect_status": "completed"
+    "fixture_workspace": "fixtures/web_research",
+    "expect_status": "completed",
+    "require_assessment": true,
+    "require_verification": true,
+    "require_grounded_output": true,
+    "expected_source_files": ["source_related_work.md"],
+    "must_contain": ["explicit source ledgers mapping each claim to its source"]
   }
 ]

@@ -57,6 +57,7 @@ mod voice_naturalness;
 mod voice_session;
 mod wake_word;
 mod watcher;
+mod web_tools;
 mod work_understanding;
 mod workload;
 mod workspace;
@@ -916,6 +917,11 @@ fn main() {
             commands::list_tool_call_log,
             commands::discover_connection_tools,
             commands::invoke_tool,
+            commands::list_web_query_log,
+            commands::set_web_user_name_guard,
+            commands::set_web_corpus_dir,
+            commands::web_search,
+            commands::web_fetch,
             commands::evaluate_next_suggestions,
             commands::list_suggestions,
             commands::accept_suggestion,

@@ -1602,6 +1602,23 @@ export async function listToolCallLog(limit?: number): Promise<ToolCallLogDto[]>
   return invoke<ToolCallLogDto[]>("list_tool_call_log", { limit: limit ?? null });
 }
 
+export interface WebQueryLogDto {
+  id: number;
+  query: string;
+  tool: string;
+  result_count: number;
+  status: string;
+  created_at: string;
+}
+
+export async function listWebQueryLog(limit?: number): Promise<WebQueryLogDto[]> {
+  return invoke<WebQueryLogDto[]>("list_web_query_log", { limit: limit ?? null });
+}
+
+export async function setWebUserNameGuard(name: string): Promise<void> {
+  await invoke("set_web_user_name_guard", { name });
+}
+
 export interface WakeWordStatusDto {
   enabled: boolean;
   configured: boolean;

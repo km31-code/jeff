@@ -28,7 +28,7 @@ use crate::{
         RevisionTargetDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
         SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
         SpeculationCacheDto, SpeculationServeResultDto, SpeculationStatusDto,
-        ToolCallLogDto, ToolConnectionDto, ToolDescriptorDto,
+        ToolCallLogDto, ToolConnectionDto, ToolDescriptorDto, WebQueryLogDto,
         StandingJobDto, SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto,
         SuggestionDto, SuggestionEvaluationDto, SynthesisLogEntryDto, TaskContextPackDto, TaskDto,
         TaskSummaryDto, TranscriptionResultDto, TrustLevelDto, UserProfileSignalDto,
@@ -1592,6 +1592,44 @@ pub fn invoke_tool(
     let args = crate::tool_bus::ToolArguments::from_value(arguments).map_err(map_jeff_error)?;
     crate::tool_bus::invoke_tool(&state.store, &connection_name, &tool_name, &args)
         .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_web_query_log(
+    state: State<'_, JeffState>,
+    limit: Option<usize>,
+) -> Result<Vec<WebQueryLogDto>, String> {
+    crate::web_tools::list_web_query_log(&state.store, limit.unwrap_or(50)).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn set_web_user_name_guard(
+    state: State<'_, JeffState>,
+    name: String,
+) -> Result<(), String> {
+    crate::web_tools::set_user_name_guard(&state.store, &name).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn set_web_corpus_dir(state: State<'_, JeffState>, dir: String) -> Result<(), String> {
+    crate::web_tools::set_corpus_dir(&state.store, &dir).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn web_search(
+    state: State<'_, JeffState>,
+    query: String,
+) -> Result<serde_json::Value, String> {
+    let (sources, ledger) = crate::web_tools::search(&state.store, &query).map_err(map_jeff_error)?;
+    Ok(serde_json::json!({ "sources": sources, "source_ledger": ledger }))
+}
+
+#[tauri::command]
+pub fn web_fetch(
+    state: State<'_, JeffState>,
+    url: String,
+) -> Result<crate::web_tools::WebDocument, String> {
+    crate::web_tools::fetch(&state.store, &url).map_err(map_jeff_error)
 }
 
 #[tauri::command]

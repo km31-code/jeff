@@ -916,6 +916,10 @@ function setupInvokeMock(options?: {
       return [];
     }
 
+    if (command === "list_web_query_log") {
+      return [];
+    }
+
     if (command === "set_speculation_enabled") {
       privacyDashboard = {
         ...privacyDashboard,

@@ -789,6 +789,18 @@ impl TaskStore {
 
             CREATE INDEX IF NOT EXISTS idx_tool_call_log_recent
                 ON tool_call_log(id DESC);
+
+            CREATE TABLE IF NOT EXISTS web_query_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                result_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_web_query_log_recent
+                ON web_query_log(id DESC);
             "#,
             now = SQLITE_NOW_EXPR,
             embedding_model = crate::providers::OPENAI_EMBEDDING_MODEL_ID,
@@ -5599,8 +5611,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 50,
-            "expected 50 application tables after apex e1 (added tool_connections, tool_connection_tools, tool_call_log)"
+            count, 51,
+            "expected 51 application tables after apex e2 (added web_query_log)"
         );
     }
 

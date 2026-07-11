@@ -154,6 +154,9 @@ import {
   setToolConnectionEnabled,
   removeToolConnection,
   listToolCallLog,
+  WebQueryLogDto,
+  listWebQueryLog,
+  setWebUserNameGuard,
   getPrivacyCenterDashboard,
   getInterruptionAudit,
   type InterruptionAuditDto,
@@ -435,6 +438,8 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [customTools, setCustomTools] = useState<CustomToolDto[]>([]);
   const [toolConnections, setToolConnections] = useState<ToolConnectionDto[]>([]);
   const [toolCallLog, setToolCallLog] = useState<ToolCallLogDto[]>([]);
+  const [webQueryLog, setWebQueryLog] = useState<WebQueryLogDto[]>([]);
+  const [webUserGuard, setWebUserGuard] = useState("");
   const [interruptionAudit, setInterruptionAudit] = useState<InterruptionAuditDto | null>(null);
   const [debriefEnabled, setDebriefEnabledState] = useState(false);
   const [voiceEnabled, setVoiceEnabledState] = useState(false);
@@ -1182,9 +1187,10 @@ function App({ onCloseWorkspace }: AppProps = {}) {
           listCapabilityGaps().catch(() => []),
           listCustomTools().catch(() => [])
         ]);
-      const [connections, callLog] = await Promise.all([
+      const [connections, callLog, webLog] = await Promise.all([
         listToolConnections().catch(() => []),
-        listToolCallLog(8).catch(() => [])
+        listToolCallLog(8).catch(() => []),
+        listWebQueryLog(8).catch(() => [])
       ]);
       setPrivacyDashboard(dashboard);
       setSpeculationCache(speculation);
@@ -1192,6 +1198,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setCustomTools(tools);
       setToolConnections(connections);
       setToolCallLog(callLog);
+      setWebQueryLog(webLog);
       setSelectionBridgeStatus(bridgeStatus);
       setRelationalProfile(profile);
       setInterruptionAudit(audit);
@@ -2743,6 +2750,14 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setSpeculationCache((current) => current.filter((entry) => entry.id !== cacheId));
     } catch (error) {
       setOperationError("Failed to discard speculation", error);
+    }
+  }
+
+  async function handleSaveWebUserGuard() {
+    try {
+      await setWebUserNameGuard(webUserGuard.trim());
+    } catch (error) {
+      setOperationError("Failed to save web guard", error);
     }
   }
 
@@ -4522,6 +4537,39 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                                 {entry.connection_name}.{entry.tool_name} {entry.argument_summary} [{entry.status}]
                               </p>
                             </div>
+                          ))}
+                        </div>
+                      </li>
+
+                      <li data-testid="privacy-surface-web-research">
+                        <label className="toggle-row">
+                          <span>Web research</span>
+                        </label>
+                        <p className="task-meta">
+                          Web search is rate-limited and logged. The user-name guard blocks searches
+                          that mention a name you set. Every source used in a job is cited.
+                        </p>
+                        <div className="row-actions" data-testid="web-user-guard">
+                          <input
+                            type="text"
+                            value={webUserGuard}
+                            onChange={(event) => setWebUserGuard(event.target.value)}
+                            placeholder="Block web searches mentioning this name"
+                            data-testid="web-user-guard-input"
+                          />
+                          <button
+                            type="button"
+                            data-testid="web-user-guard-save"
+                            onClick={() => void handleSaveWebUserGuard()}
+                          >
+                            save
+                          </button>
+                        </div>
+                        <div className="compact-list" data-testid="web-query-log">
+                          {webQueryLog.slice(0, 6).map((entry) => (
+                            <p className="task-meta" key={entry.id}>
+                              {entry.tool}: {entry.query} [{entry.status}] ({entry.result_count})
+                            </p>
                           ))}
                         </div>
                       </li>
