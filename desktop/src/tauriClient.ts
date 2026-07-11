@@ -1644,6 +1644,24 @@ export async function registerEmailReplyWatch(
   });
 }
 
+export interface RemoteDocDto {
+  id: number;
+  task_id: number;
+  title: string;
+  url: string;
+  provenance: string;
+  artifact_id: number | null;
+  created_at: string;
+}
+
+export async function listRemoteDocs(): Promise<RemoteDocDto[]> {
+  return invoke<RemoteDocDto[]>("list_remote_docs");
+}
+
+export async function removeRemoteDoc(id: number): Promise<void> {
+  await invoke("remove_remote_doc", { id });
+}
+
 export interface WakeWordStatusDto {
   enabled: boolean;
   configured: boolean;

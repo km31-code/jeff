@@ -159,6 +159,9 @@ import {
   setWebUserNameGuard,
   EmailReplyWatchDto,
   listEmailReplyWatches,
+  RemoteDocDto,
+  listRemoteDocs,
+  removeRemoteDoc,
   getPrivacyCenterDashboard,
   getInterruptionAudit,
   type InterruptionAuditDto,
@@ -443,6 +446,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [webQueryLog, setWebQueryLog] = useState<WebQueryLogDto[]>([]);
   const [webUserGuard, setWebUserGuard] = useState("");
   const [emailReplyWatches, setEmailReplyWatches] = useState<EmailReplyWatchDto[]>([]);
+  const [remoteDocs, setRemoteDocs] = useState<RemoteDocDto[]>([]);
   const [interruptionAudit, setInterruptionAudit] = useState<InterruptionAuditDto | null>(null);
   const [debriefEnabled, setDebriefEnabledState] = useState(false);
   const [voiceEnabled, setVoiceEnabledState] = useState(false);
@@ -1190,11 +1194,12 @@ function App({ onCloseWorkspace }: AppProps = {}) {
           listCapabilityGaps().catch(() => []),
           listCustomTools().catch(() => [])
         ]);
-      const [connections, callLog, webLog, replyWatches] = await Promise.all([
+      const [connections, callLog, webLog, replyWatches, remotes] = await Promise.all([
         listToolConnections().catch(() => []),
         listToolCallLog(8).catch(() => []),
         listWebQueryLog(8).catch(() => []),
-        listEmailReplyWatches().catch(() => [])
+        listEmailReplyWatches().catch(() => []),
+        listRemoteDocs().catch(() => [])
       ]);
       setPrivacyDashboard(dashboard);
       setSpeculationCache(speculation);
@@ -1204,6 +1209,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setToolCallLog(callLog);
       setWebQueryLog(webLog);
       setEmailReplyWatches(replyWatches);
+      setRemoteDocs(remotes);
       setSelectionBridgeStatus(bridgeStatus);
       setRelationalProfile(profile);
       setInterruptionAudit(audit);
@@ -2755,6 +2761,15 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setSpeculationCache((current) => current.filter((entry) => entry.id !== cacheId));
     } catch (error) {
       setOperationError("Failed to discard speculation", error);
+    }
+  }
+
+  async function handleRemoveRemoteDoc(id: number) {
+    try {
+      await removeRemoteDoc(id);
+      setRemoteDocs((current) => current.filter((doc) => doc.id !== id));
+    } catch (error) {
+      setOperationError("Failed to remove remote doc", error);
     }
   }
 
@@ -4541,6 +4556,35 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                               <p className="task-meta">
                                 {entry.connection_name}.{entry.tool_name} {entry.argument_summary} [{entry.status}]
                               </p>
+                            </div>
+                          ))}
+                        </div>
+                      </li>
+
+                      <li data-testid="privacy-surface-remote-docs">
+                        <label className="toggle-row">
+                          <span>Remote documents</span>
+                        </label>
+                        <p className="task-meta">
+                          Documents pulled in from Drive or Docs are ingested with provenance.
+                          Removing one purges its content from retrieval.
+                        </p>
+                        <div className="compact-list" data-testid="remote-doc-list">
+                          {remoteDocs.slice(0, 6).map((doc) => (
+                            <div className="action-receipt-row" key={doc.id}>
+                              <div>
+                                <strong>{doc.title}</strong>
+                                <p className="task-meta">
+                                  {doc.provenance}; {doc.url}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                data-testid="remote-doc-remove"
+                                onClick={() => void handleRemoveRemoteDoc(doc.id)}
+                              >
+                                remove
+                              </button>
                             </div>
                           ))}
                         </div>

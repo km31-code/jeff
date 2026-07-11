@@ -1694,6 +1694,31 @@ pub fn draft_email_reply(
 }
 
 #[tauri::command]
+pub fn ingest_remote_doc(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    title: String,
+    url: String,
+    provenance: String,
+    content: String,
+) -> Result<crate::drive_core::RemoteDocDto, String> {
+    crate::drive_core::ingest_remote_doc(&state.store, task_id, &title, &url, &provenance, &content)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn list_remote_docs(
+    state: State<'_, JeffState>,
+) -> Result<Vec<crate::drive_core::RemoteDocDto>, String> {
+    crate::drive_core::list_remote_docs(&state.store).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn remove_remote_doc(state: State<'_, JeffState>, id: i64) -> Result<(), String> {
+    crate::drive_core::remove_remote_doc(&state.store, id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
 pub fn full_day_calendar(
     _state: State<'_, JeffState>,
     events: Vec<crate::calendar_core::FullCalendarEvent>,

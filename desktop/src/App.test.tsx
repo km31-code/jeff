@@ -924,6 +924,10 @@ function setupInvokeMock(options?: {
       return [];
     }
 
+    if (command === "list_remote_docs") {
+      return [];
+    }
+
     if (command === "set_speculation_enabled") {
       privacyDashboard = {
         ...privacyDashboard,

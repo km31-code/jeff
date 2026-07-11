@@ -814,6 +814,19 @@ impl TaskStore {
 
             CREATE INDEX IF NOT EXISTS idx_email_reply_watches_active
                 ON email_reply_watches(status, id DESC);
+
+            CREATE TABLE IF NOT EXISTS remote_ingested_docs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL DEFAULT ({now})
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_remote_ingested_docs_task
+                ON remote_ingested_docs(task_id, id DESC);
             "#,
             now = SQLITE_NOW_EXPR,
             embedding_model = crate::providers::OPENAI_EMBEDDING_MODEL_ID,
@@ -5624,8 +5637,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 52,
-            "expected 52 application tables after apex e3 (added email_reply_watches)"
+            count, 53,
+            "expected 53 application tables after apex e5 (added remote_ingested_docs)"
         );
     }
 

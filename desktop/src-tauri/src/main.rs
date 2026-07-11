@@ -19,6 +19,7 @@ mod coworking;
 mod crisis;
 mod crisis_core;
 mod document_model;
+mod drive_core;
 mod embedding;
 mod errors;
 mod flow;
@@ -933,6 +934,9 @@ fn main() {
             commands::full_day_calendar,
             commands::pre_meeting_prep,
             commands::propose_calendar_event,
+            commands::ingest_remote_doc,
+            commands::list_remote_docs,
+            commands::remove_remote_doc,
             commands::evaluate_next_suggestions,
             commands::list_suggestions,
             commands::accept_suggestion,
