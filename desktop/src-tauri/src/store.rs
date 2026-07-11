@@ -5622,6 +5622,37 @@ mod tests {
     }
 
     #[test]
+    fn e7_migrations_are_idempotent_and_preserve_data() {
+        // ship-gate reliability: re-initializing an existing database (as happens
+        // on every app launch and across upgrades) must be idempotent -- no
+        // errors, stable schema, and existing data survives.
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        let task = store.create_task("migration").unwrap();
+        let table_count = |s: &TaskStore| -> i64 {
+            s.connect()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        let before = table_count(&store);
+
+        // second initialize over the same directory (upgrade path).
+        let reopened = TaskStore::initialize(dir.path()).unwrap();
+        assert_eq!(table_count(&reopened), before, "schema changed on re-init");
+        // data survives the re-initialize.
+        assert!(reopened
+            .list_tasks()
+            .unwrap()
+            .iter()
+            .any(|t| t.id == task.id));
+    }
+
+    #[test]
     fn schema_table_count_matches_phase_16_expectation() {
         let (_dir, store) = new_test_store();
         let conn = store.connect().unwrap();
