@@ -1694,6 +1694,40 @@ pub fn draft_email_reply(
 }
 
 #[tauri::command]
+pub fn full_day_calendar(
+    _state: State<'_, JeffState>,
+    events: Vec<crate::calendar_core::FullCalendarEvent>,
+) -> Result<Vec<crate::calendar_core::FullCalendarEvent>, String> {
+    Ok(crate::calendar_core::full_day_events(&events))
+}
+
+#[tauri::command]
+pub fn pre_meeting_prep(
+    _state: State<'_, JeffState>,
+    events: Vec<crate::calendar_core::FullCalendarEvent>,
+    document_delta_summary: Option<String>,
+    last_meeting_attendees: Vec<String>,
+) -> Result<Option<String>, String> {
+    Ok(crate::calendar_core::pre_meeting_prep_offer(
+        &events,
+        document_delta_summary.as_deref(),
+        &last_meeting_attendees,
+    ))
+}
+
+#[tauri::command]
+pub fn propose_calendar_event(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    title: String,
+    start: String,
+    end: String,
+) -> Result<ActionReceiptDto, String> {
+    crate::calendar_core::propose_event(&state.store, task_id, &title, &start, &end)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
 pub fn notify_email_landed<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, JeffState>,

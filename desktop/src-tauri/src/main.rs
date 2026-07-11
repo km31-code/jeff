@@ -5,6 +5,7 @@ mod artifact_parser;
 mod awareness_core;
 mod briefing;
 mod calendar;
+mod calendar_core;
 mod character;
 mod chat;
 mod chat_streaming;
@@ -929,6 +930,9 @@ fn main() {
             commands::list_email_reply_watches,
             commands::draft_email_reply,
             commands::notify_email_landed,
+            commands::full_day_calendar,
+            commands::pre_meeting_prep,
+            commands::propose_calendar_event,
             commands::evaluate_next_suggestions,
             commands::list_suggestions,
             commands::accept_suggestion,
