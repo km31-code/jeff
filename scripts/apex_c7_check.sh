@@ -12,6 +12,9 @@ DESKTOP="$ROOT_DIR/desktop"
 CORE="$SRC/crisis_core.rs"
 CRISIS="$SRC/crisis.rs"
 MAIN="$SRC/main.rs"
+# apex f1a moved the calendar poll (which wires the meeting/deadline crisis
+# classes) out of main.rs into core_runtime.
+CORE_RUNTIME="$SRC/core_runtime.rs"
 WATCHER="$SRC/watcher.rs"
 COMMANDS="$SRC/commands.rs"
 MODELS="$SRC/models.rs"
@@ -54,8 +57,8 @@ grep -q "voice_if_session_open" "$CRISIS" "$MODELS" || fail "voice-if-session-op
 pass "delivery logs firing, emits persistent card, notifies when not quiet, and records feedback"
 
 # 3. main monitor and watcher signal integration.
-grep -q "maybe_fire_meeting_imminent" "$MAIN" || fail "meeting crisis not wired into calendar poll"
-grep -q "maybe_fire_deadline_collision" "$MAIN" || fail "deadline crisis not wired into calendar poll"
+grep -q "maybe_fire_meeting_imminent" "$CORE_RUNTIME" || fail "meeting crisis not wired into calendar poll"
+grep -q "maybe_fire_deadline_collision" "$CORE_RUNTIME" || fail "deadline crisis not wired into calendar poll"
 grep -q "crisis_event_matches_context" "$MAIN" || fail "movement-toward-event check missing"
 grep -q "set_mass_deletion_notify" "$WATCHER" || fail "watcher mass-deletion callback missing"
 grep -q "is_mass_deletion_signal" "$WATCHER" || fail "watcher does not test mass-deletion signal"

@@ -7,6 +7,9 @@ STORE_RS="$ROOT_DIR/desktop/src-tauri/src/store.rs"
 MODELS_RS="$ROOT_DIR/desktop/src-tauri/src/models.rs"
 COMMANDS_RS="$ROOT_DIR/desktop/src-tauri/src/commands.rs"
 MAIN_RS="$ROOT_DIR/desktop/src-tauri/src/main.rs"
+# apex f1a moved the recurring background schedulers (incl. the proactive
+# ambient monitor) out of the main.rs setup closure into core_runtime.
+CORE_RUNTIME_RS="$ROOT_DIR/desktop/src-tauri/src/core_runtime.rs"
 TAURI_CLIENT_TS="$ROOT_DIR/desktop/src/tauriClient.ts"
 APP_TSX="$ROOT_DIR/desktop/src/App.tsx"
 
@@ -81,7 +84,7 @@ pass "quiet mode guard present in proactive commands (m15.3)"
 # monitor-driven reorientation delivery as proactive chat messages.
 grep -q "recordTaskFocus" "$ROOT_DIR/desktop/src/Overlay.tsx" || \
   fail "recordTaskFocus call missing from Overlay.tsx"
-grep -q "spawn_ambient_monitor" "$MAIN_RS" || fail "ambient monitor not spawned in main.rs"
+grep -q "spawn_ambient_monitor" "$CORE_RUNTIME_RS" || fail "ambient monitor not spawned in core_runtime"
 grep -q "run_synthesis_check" "$PROACTIVE_RS" || fail "ambient monitor does not run synthesis check"
 grep -q "proactive_reorientation" "$PROACTIVE_RS" || \
   fail "proactive_reorientation chat delivery missing from proactive.rs"

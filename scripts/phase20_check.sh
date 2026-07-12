@@ -102,14 +102,15 @@ grep_check "nudged title set prevents repeats" \
 grep_check "ContextState managed in main.rs" \
     "app.manage(ContextState::new())" "$SRC/main.rs"
 
-grep_check "polling loop in main.rs" \
-    "async_runtime::spawn" "$SRC/main.rs"
+# apex f1a moved the background polling loops into core_runtime.
+grep_check "active-window polling loop present" \
+    "async_runtime::spawn" "$SRC/main.rs" "$SRC/core_runtime.rs"
 
-grep_check "context://document-switch event emitted in main.rs" \
-    "context://document-switch" "$SRC/main.rs"
+grep_check "context://document-switch event emitted by the context loop" \
+    "context://document-switch" "$SRC/main.rs" "$SRC/core_runtime.rs"
 
-grep_check "context://context-updated event emitted in main.rs" \
-    "context://context-updated" "$SRC/main.rs"
+grep_check "context://context-updated event emitted by the context loop" \
+    "context://context-updated" "$SRC/main.rs" "$SRC/core_runtime.rs"
 
 grep_check "nudged_titles cap constant in state.rs" \
     "MAX_NUDGED_TITLES" "$SRC/state.rs"
@@ -187,7 +188,7 @@ grep_check "active_context in proactive.rs generate_reorientation" \
     "active_context" "$SRC/proactive.rs"
 
 grep_check "chat grounding allows active-window title context" \
-    "active-window title context" "$SRC/chat.rs"
+    "active_window_section" "$SRC/chat.rs"
 
 echo ""
 echo "--- m20.5: document-switch nudge ---"

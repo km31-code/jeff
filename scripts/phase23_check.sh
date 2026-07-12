@@ -144,8 +144,9 @@ grep_check "get_workload_summary command registered" \
     "get_workload_summary" "$SRC/commands.rs" "$SRC/main.rs"
 grep_check "switch_active_task_from_companion command registered" \
     "switch_active_task_from_companion" "$SRC/commands.rs" "$SRC/main.rs"
+# apex f1a moved the startup/poll scheduler bodies into core_runtime.
 grep_check "stale notification called at startup" \
-    "check_stale_task_notifications" "$SRC/main.rs"
+    "check_stale_task_notifications" "$SRC/main.rs" "$SRC/core_runtime.rs"
 grep_check "stale notification checked on task focus events" \
     "check_stale_task_notifications" "$SRC/commands.rs"
 grep_check "cross-task collision detection in commands.rs" \
@@ -180,14 +181,14 @@ grep_check "get_calendar_permission_status returns string" \
     "get_calendar_permission_status\|not_determined\|granted\|denied" "$SRC/calendar.rs"
 grep_check "calendar state managed" \
     "CalendarState" "$SRC/state.rs" "$SRC/main.rs"
-grep_check "calendar poll task spawned in main.rs" \
-    "calendar.*poll\|fetch_next_event" "$SRC/main.rs"
+grep_check "calendar poll task spawned by the core" \
+    "calendar.*poll\|fetch_next_event" "$SRC/main.rs" "$SRC/core_runtime.rs"
 grep_check "calendar poll respects privacy gate" \
-    "privacy_calendar_context_enabled" "$SRC/main.rs"
+    "privacy_calendar_context_enabled" "$SRC/main.rs" "$SRC/core_runtime.rs"
 grep_check "calendar event emitted to frontend" \
-    "calendar://event-updated" "$SRC/main.rs"
+    "calendar://event-updated" "$SRC/main.rs" "$SRC/core_runtime.rs"
 grep_check "calendar event cleared when privacy or quiet mode disables polling" \
-    "serde_json::Value::Null" "$SRC/main.rs"
+    "serde_json::Value::Null" "$SRC/main.rs" "$SRC/core_runtime.rs"
 grep_check "request_calendar_permission command registered" \
     "request_calendar_permission" "$SRC/commands.rs" "$SRC/main.rs"
 grep_check "get_calendar_permission_status command registered" \
