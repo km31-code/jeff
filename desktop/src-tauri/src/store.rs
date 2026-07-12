@@ -906,6 +906,20 @@ impl TaskStore {
         )
         .context("failed to create phase 23 tables")?;
 
+        // a live_edit_receipts table left by the first phase 23 pass predates
+        // these columns. add them idempotently BEFORE the backfill below reads
+        // them -- otherwise the backfill's `WHERE action_receipt_id IS NULL`
+        // fails with "no such column" on a real upgraded database and the whole
+        // store init aborts at startup.
+        let _ = conn.execute_batch("ALTER TABLE live_edit_receipts ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL;");
+        let _ = conn.execute_batch("ALTER TABLE live_edit_receipts ADD COLUMN action_receipt_id INTEGER REFERENCES action_receipts(id) ON DELETE SET NULL;");
+        let _ = conn.execute_batch(
+            "ALTER TABLE live_edit_receipts ADD COLUMN before_text TEXT NOT NULL DEFAULT '';",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE live_edit_receipts ADD COLUMN after_text TEXT NOT NULL DEFAULT '';",
+        );
+
         // apex: backfill legacy receipts now that live_edit_receipts exists.
         conn.execute_batch(
             "INSERT INTO action_receipts
@@ -958,16 +972,6 @@ impl TaskStore {
              WHERE action_receipt_id IS NULL;",
         )
         .context("failed to backfill legacy mutation receipts")?;
-
-        // idempotent migration for databases created by the first phase 23 pass.
-        let _ = conn.execute_batch("ALTER TABLE live_edit_receipts ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL;");
-        let _ = conn.execute_batch("ALTER TABLE live_edit_receipts ADD COLUMN action_receipt_id INTEGER REFERENCES action_receipts(id) ON DELETE SET NULL;");
-        let _ = conn.execute_batch(
-            "ALTER TABLE live_edit_receipts ADD COLUMN before_text TEXT NOT NULL DEFAULT '';",
-        );
-        let _ = conn.execute_batch(
-            "ALTER TABLE live_edit_receipts ADD COLUMN after_text TEXT NOT NULL DEFAULT '';",
-        );
 
         // phase 29: opinionated output — alternative revision linking
         let _ = conn
@@ -5715,6 +5719,56 @@ mod tests {
             .unwrap()
             .iter()
             .any(|t| t.id == task.id));
+    }
+
+    #[test]
+    fn legacy_pre_apex_live_edit_receipts_upgrade_backfills_without_panicking() {
+        // regression: a real pre-Apex database has a live_edit_receipts table
+        // from the first phase 23 pass, before action_receipt_id existed. the D1
+        // backfill filters `WHERE action_receipt_id IS NULL` on that table, so
+        // the column-add migration must run BEFORE the backfill -- otherwise
+        // store init aborts at app startup with "no such column:
+        // action_receipt_id". this reproduces that exact legacy shape (which no
+        // fresh-store test exercises) and asserts the upgrade succeeds and
+        // migrates the legacy row into the unified action ledger.
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        let task = store.create_task("legacy edit").unwrap();
+        {
+            let conn = store.connect().unwrap();
+            // revert live_edit_receipts to its first-pass shape and seed a
+            // legacy row the backfill must migrate on the next open.
+            conn.execute_batch("ALTER TABLE live_edit_receipts DROP COLUMN action_receipt_id;")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO live_edit_receipts
+                    (task_id, editor_surface, document_title, before_hash, after_hash, status)
+                 VALUES (?1, 'google_docs', 'thesis', 'aaa', 'bbb', 'applied')",
+                rusqlite::params![task.id],
+            )
+            .unwrap();
+        }
+
+        // upgrade path: re-initialize over the legacy database. must not error.
+        let upgraded = TaskStore::initialize(dir.path()).unwrap();
+        let conn = upgraded.connect().unwrap();
+        let migrated: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM action_receipts \
+                 WHERE description LIKE 'Migrated live edit receipt%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migrated, 1, "legacy live edit receipt was not backfilled");
+        let linked: i64 = conn
+            .query_row(
+                "SELECT action_receipt_id FROM live_edit_receipts WHERE task_id = ?1",
+                rusqlite::params![task.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(linked > 0, "legacy row was not linked to its migrated receipt");
     }
 
     #[test]
