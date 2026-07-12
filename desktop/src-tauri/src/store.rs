@@ -757,6 +757,22 @@ impl TaskStore {
             CREATE INDEX IF NOT EXISTS idx_custom_tools_status
                 ON custom_tools(status, id DESC);
 
+            CREATE TABLE IF NOT EXISTS custom_tool_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                receipt_id INTEGER NOT NULL UNIQUE REFERENCES action_receipts(id) ON DELETE CASCADE,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                tool_id INTEGER NOT NULL REFERENCES custom_tools(id) ON DELETE CASCADE,
+                input TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending_approval',
+                output TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                resolved_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_custom_tool_runs_task_status
+                ON custom_tool_runs(task_id, status, id DESC);
+
             CREATE TABLE IF NOT EXISTS tool_connections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
@@ -789,6 +805,22 @@ impl TaskStore {
 
             CREATE INDEX IF NOT EXISTS idx_tool_call_log_recent
                 ON tool_call_log(id DESC);
+
+            CREATE TABLE IF NOT EXISTS connected_action_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                receipt_id INTEGER NOT NULL UNIQUE REFERENCES action_receipts(id) ON DELETE CASCADE,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                tool_names_json TEXT NOT NULL,
+                arguments_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending_approval',
+                result_json TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT ({now}),
+                resolved_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_connected_action_runs_task_status
+                ON connected_action_runs(task_id, status, id DESC);
 
             CREATE TABLE IF NOT EXISTS web_query_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -835,9 +867,8 @@ impl TaskStore {
 
         // D1/D8 hardening migrations. These are intentionally additive so an
         // existing user database can be upgraded without rebuilding it.
-        let _ = conn.execute_batch(
-            "ALTER TABLE action_receipts ADD COLUMN outcome_accounted_at TEXT;",
-        );
+        let _ =
+            conn.execute_batch("ALTER TABLE action_receipts ADD COLUMN outcome_accounted_at TEXT;");
         let _ = conn.execute_batch(
             "ALTER TABLE subtask_write_audit_log ADD COLUMN action_receipt_id INTEGER REFERENCES action_receipts(id) ON DELETE SET NULL;",
         );
@@ -2930,7 +2961,9 @@ impl TaskStore {
         }
         crate::trust::assert_runtime_level_allowed(class, level.trim())?;
         if surface.trim().is_empty() || description.trim().is_empty() {
-            return Err(anyhow!("action receipt surface and description are required"));
+            return Err(anyhow!(
+                "action receipt surface and description are required"
+            ));
         }
         let conn = self.connect()?;
         let mark_resolved = matches!(
@@ -2989,7 +3022,8 @@ impl TaskStore {
             )
             .optional()
             .context("failed to read action receipt transition state")?;
-        let current = current.ok_or_else(|| anyhow!("action receipt id={} not found", receipt_id))?;
+        let current =
+            current.ok_or_else(|| anyhow!("action receipt id={} not found", receipt_id))?;
         if !valid_action_status_transition(&current, status) {
             return Err(anyhow!(
                 "invalid action receipt transition for id={receipt_id}: {current} -> {status}"
@@ -4668,13 +4702,10 @@ impl TaskStore {
         // clear never leaves the DB claiming data was removed when it was not.
         let undo_refs = {
             let conn = self.connect()?;
-            let mut stmt = conn.prepare(
-                "SELECT id FROM action_receipts WHERE task_id = ?1",
-            )?;
+            let mut stmt = conn.prepare("SELECT id FROM action_receipts WHERE task_id = ?1")?;
             let receipt_ids = stmt
                 .query_map(params![task_id], |row| row.get::<_, i64>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-                ;
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             receipt_ids
                 .into_iter()
                 .map(|receipt_id| {
@@ -4742,8 +4773,11 @@ impl TaskStore {
             .context("failed to clear subtasks")?;
         if Self::table_exists_tx(&tx, "jobs")? {
             if Self::table_exists_tx(&tx, "standing_jobs")? {
-                tx.execute("DELETE FROM standing_jobs WHERE task_id = ?1", params![task_id])
-                    .context("failed to clear standing jobs")?;
+                tx.execute(
+                    "DELETE FROM standing_jobs WHERE task_id = ?1",
+                    params![task_id],
+                )
+                .context("failed to clear standing jobs")?;
             }
             if Self::table_exists_tx(&tx, "job_steering")? {
                 tx.execute(
@@ -4874,6 +4908,23 @@ impl TaskStore {
             tx.execute("DELETE FROM episodes WHERE task_id = ?1", params![task_id])
                 .context("failed to clear episodes")?;
         }
+        // apex e3/e5: task-scoped external-integration records. email watches use
+        // ON DELETE SET NULL, so they must be deleted explicitly or a nulled row
+        // carrying the sender survives; remote-doc rows carry title/url/provenance.
+        if Self::table_exists_tx(&tx, "email_reply_watches")? {
+            tx.execute(
+                "DELETE FROM email_reply_watches WHERE task_id = ?1",
+                params![task_id],
+            )
+            .context("failed to clear email reply watches")?;
+        }
+        if Self::table_exists_tx(&tx, "remote_ingested_docs")? {
+            tx.execute(
+                "DELETE FROM remote_ingested_docs WHERE task_id = ?1",
+                params![task_id],
+            )
+            .context("failed to clear remote ingested docs")?;
+        }
         tx.execute(
             "DELETE FROM app_settings WHERE key = ?1",
             params![format!("active_artifact_task_{task_id}")],
@@ -4902,9 +4953,20 @@ impl TaskStore {
             "live_edit_receipts",
             "interruption_ledger",
             "speculation_events",
+            "speculation_cache",
+            "connected_action_runs",
+            "custom_tool_runs",
             "custom_tools",
             "capability_gaps",
             "llm_usage_log",
+            // apex e1-e5: external-integration state. tool_connections cascades to
+            // tool_connection_tools; tool_call_log/web_query_log/email_reply_watches
+            // are standalone or SET NULL, so a task cascade alone would leave them.
+            "tool_connections",
+            "tool_call_log",
+            "web_query_log",
+            "email_reply_watches",
+            "remote_ingested_docs",
         ] {
             if Self::table_exists_tx(&tx, table)? {
                 tx.execute(&format!("DELETE FROM {table}"), [])
@@ -5474,7 +5536,10 @@ fn action_receipt_from_row(row: &Row<'_>) -> rusqlite::Result<ActionReceiptDto> 
 }
 
 fn is_terminal_action_status(status: &str) -> bool {
-    matches!(status, "applied" | "rejected" | "reverted" | "failed" | "guided")
+    matches!(
+        status,
+        "applied" | "rejected" | "reverted" | "failed" | "guided"
+    )
 }
 
 fn valid_action_status_transition(current: &str, next: &str) -> bool {
@@ -5653,7 +5718,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_table_count_matches_phase_16_expectation() {
+    fn schema_table_count_matches_current_migrations() {
         let (_dir, store) = new_test_store();
         let conn = store.connect().unwrap();
         let count: i64 = conn
@@ -5668,8 +5733,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 53,
-            "expected 53 application tables after apex e5 (added remote_ingested_docs)"
+            count, 55,
+            "expected 55 application tables after the connected action approval ledger"
         );
     }
 
@@ -6270,6 +6335,23 @@ mod tests {
             )
             .unwrap();
 
+        // apex e3/e5: external-integration records scoped to this task.
+        {
+            let conn = store.connect().unwrap();
+            conn.execute(
+                "INSERT INTO email_reply_watches (task_id, sender, thread_hint)
+                 VALUES (?1, 'sarah@example.com', 'budget thread')",
+                params![task.id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO remote_ingested_docs (task_id, title, url, provenance)
+                 VALUES (?1, 'Q3 plan', 'https://drive/x', 'drive')",
+                params![task.id],
+            )
+            .unwrap();
+        }
+
         let task_workspace = PathBuf::from(&task.workspace_path);
         fs::write(task_workspace.join("scratch.txt"), "private").unwrap();
 
@@ -6289,6 +6371,21 @@ mod tests {
         assert!(store.list_synthesis_log(task.id, 10).unwrap().is_empty());
         assert!(!task_workspace.join("scratch.txt").exists());
         assert!(task_workspace.exists());
+
+        // no orphaned external-integration rows survive the task clear.
+        {
+            let conn = store.connect().unwrap();
+            let watches: i64 = conn
+                .query_row("SELECT COUNT(*) FROM email_reply_watches", [], |r| r.get(0))
+                .unwrap();
+            let docs: i64 = conn
+                .query_row("SELECT COUNT(*) FROM remote_ingested_docs", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(watches, 0, "email watches must not survive task clear");
+            assert_eq!(docs, 0, "remote docs must not survive task clear");
+        }
     }
 
     #[test]
@@ -6303,6 +6400,40 @@ mod tests {
         )
         .unwrap();
 
+        // apex e1-e5: standalone / SET NULL external-integration state that a task
+        // cascade alone would leave behind. All of it must be gone after CLEAR ALL.
+        {
+            let conn = store.connect().unwrap();
+            conn.execute(
+                "INSERT INTO tool_connections (name, transport, endpoint)
+                 VALUES ('acme', 'http', 'https://acme/mcp')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tool_call_log (connection_name, tool_name, argument_summary, status)
+                 VALUES ('acme', 'search', '{q}', 'ok')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO web_query_log (query, tool, status) VALUES ('private query', 'search', 'ok')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO email_reply_watches (task_id, sender) VALUES (?1, 'sarah@example.com')",
+                params![task.id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO remote_ingested_docs (task_id, title, url, provenance)
+                 VALUES (?1, 'Q3', 'https://drive/x', 'drive')",
+                params![task.id],
+            )
+            .unwrap();
+        }
+
         store.clear_all_data().unwrap();
 
         assert!(store.list_tasks().unwrap().is_empty());
@@ -6310,5 +6441,23 @@ mod tests {
         assert!(store.get_privacy_workspace_watcher_enabled().unwrap());
         assert!(store.paths.workspace_root.exists());
         assert!(!PathBuf::from(task.workspace_path).exists());
+
+        // every external-integration table is empty -- no residue survives.
+        {
+            let conn = store.connect().unwrap();
+            for table in [
+                "tool_connections",
+                "tool_connection_tools",
+                "tool_call_log",
+                "web_query_log",
+                "email_reply_watches",
+                "remote_ingested_docs",
+            ] {
+                let count: i64 = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(count, 0, "{table} must be empty after clear_all_data");
+            }
+        }
     }
 }

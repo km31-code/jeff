@@ -275,7 +275,8 @@ fn held_candidate_is_relevant(
             .and_then(|pressure| pressure.minutes_until.map(|minutes| (pressure, minutes)))
             .map(|(pressure, minutes)| {
                 minutes >= 0
-                    && (pressure.description.contains(event) || event.contains(&pressure.description))
+                    && (pressure.description.contains(event)
+                        || event.contains(&pressure.description))
             })
             .unwrap_or(false),
         ProactiveSpeechReason::BlockerDetected { blocker } => snapshot

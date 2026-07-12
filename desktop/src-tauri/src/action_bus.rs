@@ -3,8 +3,8 @@
 
 use std::{
     fs,
-    io::Write,
     fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -29,6 +29,7 @@ pub enum ActionClass {
     FileWrite,
     FileDelete,
     EmailDraft,
+    EmailLabel,
     EmailSend,
     CalendarPropose,
     SystemOpen,
@@ -44,6 +45,7 @@ impl ActionClass {
             Self::FileWrite => "file.write".to_string(),
             Self::FileDelete => "file.delete".to_string(),
             Self::EmailDraft => "email.draft".to_string(),
+            Self::EmailLabel => "email.label".to_string(),
             Self::EmailSend => "email.send".to_string(),
             Self::CalendarPropose => "calendar.propose".to_string(),
             Self::SystemOpen => "system.open".to_string(),
@@ -61,6 +63,7 @@ impl ActionClass {
             "file.write" => Some(Self::FileWrite),
             "file.delete" => Some(Self::FileDelete),
             "email.draft" => Some(Self::EmailDraft),
+            "email.label" => Some(Self::EmailLabel),
             "email.send" => Some(Self::EmailSend),
             "calendar.propose" => Some(Self::CalendarPropose),
             "system.open" => Some(Self::SystemOpen),
@@ -103,6 +106,7 @@ pub struct ActionRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionAuthorization {
+    Proposal,
     ExplicitApproval,
     EarnedAutonomy,
 }
@@ -140,11 +144,13 @@ pub struct GoogleDocsWritePayload {
 
 pub struct FileWriteAdapter;
 pub struct GoogleDocsAdapter;
+pub struct ProposalAdapter;
 
 static FILE_WRITE_ADAPTER: FileWriteAdapter = FileWriteAdapter;
 static GOOGLE_DOCS_ADAPTER: GoogleDocsAdapter = GoogleDocsAdapter;
-static ACTION_ADAPTERS: [&'static dyn ActionAdapter; 2] =
-    [&FILE_WRITE_ADAPTER, &GOOGLE_DOCS_ADAPTER];
+static PROPOSAL_ADAPTER: ProposalAdapter = ProposalAdapter;
+static ACTION_ADAPTERS: [&'static dyn ActionAdapter; 3] =
+    [&FILE_WRITE_ADAPTER, &GOOGLE_DOCS_ADAPTER, &PROPOSAL_ADAPTER];
 
 /// The single production dispatch spine for every externally-visible action.
 /// Callers must state whether a user explicitly approved this exact run or the
@@ -156,6 +162,13 @@ impl ActionBus {
     #[allow(dead_code)]
     pub fn registered_adapter_count() -> usize {
         ACTION_ADAPTERS.len()
+    }
+
+    pub fn dispatch_proposal(
+        store: &TaskStore,
+        request: &ActionRequest,
+    ) -> Result<ActionReceiptDto> {
+        Self::dispatch(store, request, ActionAuthorization::Proposal)
     }
 
     pub fn dispatch_explicit(
@@ -199,10 +212,7 @@ impl ActionBus {
                     request.class.as_str()
                 ));
             }
-            if !crate::trust::execute_allowed_without_approval(
-                store,
-                &request.class.as_str(),
-            )? {
+            if !crate::trust::execute_allowed_without_approval(store, &request.class.as_str())? {
                 return Err(anyhow!(
                     "{} requires approval at L1",
                     request.class.as_str()
@@ -247,12 +257,15 @@ impl FileWriteAdapter {
         payload: FileWritePayload,
     ) -> Result<ActionReceiptDto> {
         let level = match authorization {
+            ActionAuthorization::Proposal => {
+                return Err(anyhow!(
+                    "file.write proposals use the subtask proposal store"
+                ));
+            }
             ActionAuthorization::ExplicitApproval => crate::trust::TRUST_LEVEL_L1.to_string(),
             ActionAuthorization::EarnedAutonomy => {
-                let level = crate::trust::level_for_action(
-                    store,
-                    &ActionClass::FileWrite.as_str(),
-                )?;
+                let level =
+                    crate::trust::level_for_action(store, &ActionClass::FileWrite.as_str())?;
                 if level == crate::trust::TRUST_LEVEL_L1 {
                     return Err(anyhow!("file.write requires approval at L1"));
                 }
@@ -271,21 +284,20 @@ impl FileWriteAdapter {
             None,
         )?;
 
-        let validated = match validate_file_write_destination(
-            &payload.allowed_root,
-            &payload.destination_path,
-        ) {
-            Ok(paths) => paths,
-            Err(err) => {
-                let _ = store.update_action_receipt_status(
-                    receipt.id,
-                    ACTION_STATUS_FAILED,
-                    Some(&err.to_string()),
-                    None,
-                );
-                return Err(err);
-            }
-        };
+        let validated =
+            match validate_file_write_destination(&payload.allowed_root, &payload.destination_path)
+            {
+                Ok(paths) => paths,
+                Err(err) => {
+                    let _ = store.update_action_receipt_status(
+                        receipt.id,
+                        ACTION_STATUS_FAILED,
+                        Some(&err.to_string()),
+                        None,
+                    );
+                    return Err(err);
+                }
+            };
         let expected_post_hash = sha256_bytes(payload.content.as_bytes());
         let undo_ref = match snapshot_for_file_write(
             store,
@@ -309,12 +321,7 @@ impl FileWriteAdapter {
                 ));
             }
         };
-        store.update_action_receipt_status(
-            receipt.id,
-            "applying",
-            None,
-            Some(&undo_ref),
-        )?;
+        store.update_action_receipt_status(receipt.id, "applying", None, Some(&undo_ref))?;
 
         if let Err(err) = atomic_write_file(&validated.destination, payload.content.as_bytes()) {
             let receipt = store.update_action_receipt_status(
@@ -484,7 +491,9 @@ fn validate_file_write_destination(
             .components()
             .any(|component| !matches!(component, std::path::Component::Normal(_)))
     {
-        return Err(anyhow!("file.write destination must be a normal relative file path"));
+        return Err(anyhow!(
+            "file.write destination must be a normal relative file path"
+        ));
     }
 
     let mut current = allowed_root.clone();
@@ -562,7 +571,10 @@ fn atomic_write_file(destination: &Path, content: &[u8]) -> Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("jeff-write");
-    let temporary = parent.join(format!(".{file_name}.jeff-{}-{nonce}.tmp", std::process::id()));
+    let temporary = parent.join(format!(
+        ".{file_name}.jeff-{}-{nonce}.tmp",
+        std::process::id()
+    ));
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -611,16 +623,16 @@ impl GoogleDocsAdapter {
             "prefer_suggesting": payload.prefer_suggesting
         })
         .to_string();
-        store.create_action_receipt(
-            task_id,
-            &class.as_str(),
-            "google_docs",
-            "L1",
-            description,
-            &payload_excerpt,
-            "pending_approval",
-            None,
-            None,
+        ActionBus::dispatch_proposal(
+            store,
+            &ActionRequest {
+                task_id,
+                class,
+                surface: "google_docs".to_string(),
+                description: description.to_string(),
+                payload: serde_json::from_str(&payload_excerpt)?,
+                reversibility: Reversibility::Guided,
+            },
         )
     }
 }
@@ -646,9 +658,9 @@ impl ActionAdapter for GoogleDocsAdapter {
         if !self.supports(request) {
             return Err(anyhow!("google docs adapter does not support this action"));
         }
-        if authorization != ActionAuthorization::ExplicitApproval {
+        if authorization != ActionAuthorization::Proposal {
             return Err(anyhow!(
-                "google docs actions remain L1 until native revert is verified"
+                "google docs changes must be proposed before extension approval"
             ));
         }
         store.create_action_receipt(
@@ -667,6 +679,60 @@ impl ActionAdapter for GoogleDocsAdapter {
     fn revert(&self, _store: &TaskStore, receipt_id: i64) -> Result<ActionReceiptDto> {
         Err(anyhow!(
             "google docs receipt id={} reverts through native tracked-change discard or guided fallback",
+            receipt_id
+        ))
+    }
+}
+
+impl ActionAdapter for ProposalAdapter {
+    fn supports(&self, request: &ActionRequest) -> bool {
+        match &request.class {
+            ActionClass::DocInsert | ActionClass::DocReplace | ActionClass::DocSuggest => {
+                request.surface.starts_with("native_docs.")
+            }
+            ActionClass::EmailDraft | ActionClass::EmailLabel => request.surface == "gmail",
+            ActionClass::CalendarPropose => request.surface == "calendar",
+            ActionClass::ToolCustom(_) => request.surface == "self_extend",
+            _ => false,
+        }
+    }
+
+    fn supports_autonomous_execution(&self) -> bool {
+        false
+    }
+
+    fn execute(
+        &self,
+        store: &TaskStore,
+        request: &ActionRequest,
+        authorization: ActionAuthorization,
+    ) -> Result<ActionReceiptDto> {
+        if !self.supports(request) {
+            return Err(anyhow!("proposal adapter does not support this action"));
+        }
+        if authorization != ActionAuthorization::Proposal {
+            return Err(anyhow!(
+                "{} on {} is proposal-only",
+                request.class.as_str(),
+                request.surface
+            ));
+        }
+        store.create_action_receipt(
+            request.task_id,
+            &request.class.as_str(),
+            &request.surface,
+            crate::trust::TRUST_LEVEL_L1,
+            &request.description,
+            &excerpt_payload(&request.payload),
+            "pending_approval",
+            None,
+            None,
+        )
+    }
+
+    fn revert(&self, _store: &TaskStore, receipt_id: i64) -> Result<ActionReceiptDto> {
+        Err(anyhow!(
+            "proposal receipt id={} requires its surface-specific revert adapter",
             receipt_id
         ))
     }
@@ -729,7 +795,9 @@ pub fn revert_action_receipt(store: &TaskStore, receipt_id: i64) -> Result<Actio
     })?;
     let expected_undo_path = store.action_undo_root().join(receipt_id.to_string());
     if Path::new(undo_path) != expected_undo_path {
-        return Err(anyhow!("receipt undo path does not match its owned receipt directory"));
+        return Err(anyhow!(
+            "receipt undo path does not match its owned receipt directory"
+        ));
     }
     restore_file_write_snapshot(&expected_undo_path, metadata_hash)?;
     let receipt = store.update_action_receipt_status(
@@ -845,7 +913,9 @@ fn restore_file_write_snapshot(undo_dir: &Path, expected_metadata_hash: &str) ->
     let destination = PathBuf::from(destination);
     let allowed_root = fs::canonicalize(allowed_root)?;
     if !resolve_existing_ancestor(&destination).starts_with(&allowed_root) {
-        return Err(anyhow!("undo destination escapes its recorded allowed root"));
+        return Err(anyhow!(
+            "undo destination escapes its recorded allowed root"
+        ));
     }
     let destination_metadata = fs::symlink_metadata(&destination)
         .context("cannot safely revert because the written destination is missing")?;
@@ -937,6 +1007,53 @@ mod tests {
             ActionClass::ToolCustom("bad name!".to_string()).as_str(),
             "tool.custom.badname"
         );
+    }
+
+    #[test]
+    fn d1_all_proposal_surfaces_route_through_registered_adapters() {
+        let (_dir, store) = store();
+        let task = store.create_task("d1 proposals").unwrap();
+        let cases = [
+            (ActionClass::DocSuggest, "google_docs"),
+            (ActionClass::DocReplace, "native_docs.pages"),
+            (ActionClass::EmailDraft, "gmail"),
+            (ActionClass::EmailLabel, "gmail"),
+            (ActionClass::CalendarPropose, "calendar"),
+            (ActionClass::ToolCustom("upper".to_string()), "self_extend"),
+        ];
+
+        assert_eq!(ActionBus::registered_adapter_count(), 3);
+        for (class, surface) in cases {
+            let request = ActionRequest {
+                task_id: task.id,
+                class: class.clone(),
+                surface: surface.to_string(),
+                description: format!("propose {}", class.as_str()),
+                payload: serde_json::json!({"bounded": true}),
+                reversibility: Reversibility::Guided,
+            };
+            let receipt = ActionBus::dispatch_proposal(&store, &request).unwrap();
+            assert_eq!(receipt.class, class.as_str());
+            assert_eq!(receipt.surface, surface);
+            assert_eq!(receipt.status, "pending_approval");
+            assert_eq!(receipt.level, crate::trust::TRUST_LEVEL_L1);
+        }
+    }
+
+    #[test]
+    fn d1_proposal_only_surfaces_reject_execution_without_surface_approval() {
+        let (_dir, store) = store();
+        let task = store.create_task("d1 proposal authorization").unwrap();
+        let request = ActionRequest {
+            task_id: task.id,
+            class: ActionClass::EmailDraft,
+            surface: "gmail".to_string(),
+            description: "draft".to_string(),
+            payload: serde_json::json!({}),
+            reversibility: Reversibility::Guided,
+        };
+        assert!(ActionBus::dispatch_explicit(&store, &request).is_err());
+        assert!(ActionBus::dispatch_trusted(&store, &request).is_err());
     }
 
     #[test]

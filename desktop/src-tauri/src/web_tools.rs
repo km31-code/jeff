@@ -1,11 +1,8 @@
 // apex e2: web research tools. web.search + web.fetch as agent tools with a
 // per-job source ledger, an hourly rate limit, a query log, and a user-name
-// query guard (absorbed from the Phase 34 spec). Live search/fetch against the
-// open web is env-gated (needs a search API key / network); the rate limiter,
-// query log, guard, keyword search, readable extraction, and source-ledger are
-// deterministic over a fixture corpus and tested. The agent eval's web-research
-// contracts run against seeded web-source fixtures, proving cited output with
-// zero fabricated citations.
+// query guard (absorbed from the phase 34 spec). production resolves enabled
+// MCP web.search/web.fetch tools; a configured local corpus is the explicit
+// offline fallback used by deterministic evaluation.
 
 #![cfg_attr(test, allow(dead_code))]
 
@@ -48,15 +45,24 @@ pub fn set_user_name_guard(store: &TaskStore, name: &str) -> Result<()> {
 }
 
 pub fn query_blocked_by_user_guard(store: &TaskStore, query: &str) -> bool {
-    let Some(name) = store.get_app_setting(WEB_USER_NAME_GUARD_KEY).ok().flatten() else {
+    let Some(name) = store
+        .get_app_setting(WEB_USER_NAME_GUARD_KEY)
+        .ok()
+        .flatten()
+    else {
         return false;
     };
     let name = name.trim();
-    !name.is_empty() && query.to_ascii_lowercase().contains(&name.to_ascii_lowercase())
+    !name.is_empty()
+        && query
+            .to_ascii_lowercase()
+            .contains(&name.to_ascii_lowercase())
 }
 
 pub fn within_rate_limit(store: &TaskStore) -> bool {
-    recent_query_count(store).map(|n| n < WEB_RATE_LIMIT_PER_HOUR).unwrap_or(false)
+    recent_query_count(store)
+        .map(|n| n < WEB_RATE_LIMIT_PER_HOUR)
+        .unwrap_or(false)
 }
 
 fn recent_query_count(store: &TaskStore) -> Result<i64> {
@@ -70,11 +76,22 @@ fn recent_query_count(store: &TaskStore) -> Result<i64> {
     .context("failed to count recent web queries")
 }
 
-fn log_query(store: &TaskStore, query: &str, tool: &str, result_count: i64, status: &str) -> Result<()> {
+fn log_query(
+    store: &TaskStore,
+    query: &str,
+    tool: &str,
+    result_count: i64,
+    status: &str,
+) -> Result<()> {
     let conn = store.connect()?;
     conn.execute(
         "INSERT INTO web_query_log (query, tool, result_count, status) VALUES (?1, ?2, ?3, ?4)",
-        params![query.chars().take(200).collect::<String>(), tool, result_count, status],
+        params![
+            query.chars().take(200).collect::<String>(),
+            tool,
+            result_count,
+            status
+        ],
     )
     .context("failed to log web query")?;
     Ok(())
@@ -104,7 +121,11 @@ pub fn list_web_query_log(store: &TaskStore, limit: usize) -> Result<Vec<WebQuer
 
 // web.search: guarded, rate-limited keyword search over the corpus. Returns
 // ranked sources. The corpus is a fixture stand-in for live results.
-pub fn web_search(store: &TaskStore, query: &str, corpus: &[WebDocument]) -> Result<Vec<WebSource>> {
+pub fn web_search(
+    store: &TaskStore,
+    query: &str,
+    corpus: &[WebDocument],
+) -> Result<Vec<WebSource>> {
     let clean = query.trim();
     if clean.is_empty() {
         return Err(anyhow!("web search query cannot be empty"));
@@ -136,7 +157,13 @@ pub fn web_search(store: &TaskStore, query: &str, corpus: &[WebDocument]) -> Res
             snippet: doc.content.chars().take(160).collect(),
         })
         .collect();
-    log_query(store, clean, WEB_TOOL_SEARCH, sources.len() as i64, QUERY_STATUS_OK)?;
+    log_query(
+        store,
+        clean,
+        WEB_TOOL_SEARCH,
+        sources.len() as i64,
+        QUERY_STATUS_OK,
+    )?;
     Ok(sources)
 }
 
@@ -182,7 +209,10 @@ pub fn load_web_fixture_corpus(dir: &Path) -> Result<Vec<WebDocument>> {
             continue;
         }
         let raw = std::fs::read_to_string(entry.path())?;
-        docs.push(parse_web_fixture(&raw, &entry.file_name().to_string_lossy()));
+        docs.push(parse_web_fixture(
+            &raw,
+            &entry.file_name().to_string_lossy(),
+        ));
     }
     Ok(docs)
 }
@@ -206,15 +236,132 @@ pub fn configured_corpus(store: &TaskStore) -> Result<Vec<WebDocument>> {
 // high-level agent-facing search: returns ranked sources plus the per-job source
 // ledger the verification pass uses to enforce claim->source citation.
 pub fn search(store: &TaskStore, query: &str) -> Result<(Vec<WebSource>, Vec<serde_json::Value>)> {
-    let corpus = configured_corpus(store)?;
-    let sources = web_search(store, query, &corpus)?;
+    let clean = validate_live_query(store, query)?;
+    let sources = if crate::tool_bus::has_enabled_tool(store, &[WEB_TOOL_SEARCH, "search"])? {
+        let sources = connected_search(store, clean)?;
+        log_query(
+            store,
+            clean,
+            WEB_TOOL_SEARCH,
+            sources.len() as i64,
+            QUERY_STATUS_OK,
+        )?;
+        sources
+    } else {
+        web_search(store, clean, &configured_corpus(store)?)?
+    };
     let ledger = build_source_ledger(&sources);
     Ok((sources, ledger))
 }
 
 pub fn fetch(store: &TaskStore, url: &str) -> Result<WebDocument> {
-    let corpus = configured_corpus(store)?;
-    web_fetch(store, url, &corpus)
+    if crate::tool_bus::has_enabled_tool(store, &[WEB_TOOL_FETCH, "fetch"])? {
+        let document = connected_fetch(store, url)?;
+        log_query(store, url, WEB_TOOL_FETCH, 1, QUERY_STATUS_OK)?;
+        Ok(document)
+    } else {
+        web_fetch(store, url, &configured_corpus(store)?)
+    }
+}
+
+fn validate_live_query<'a>(store: &TaskStore, query: &'a str) -> Result<&'a str> {
+    let clean = query.trim();
+    if clean.is_empty() {
+        return Err(anyhow!("web search query cannot be empty"));
+    }
+    if query_blocked_by_user_guard(store, clean) {
+        log_query(store, clean, WEB_TOOL_SEARCH, 0, QUERY_STATUS_BLOCKED)?;
+        return Err(anyhow!("web search blocked by the user-name guard"));
+    }
+    if !within_rate_limit(store) {
+        log_query(store, clean, WEB_TOOL_SEARCH, 0, QUERY_STATUS_RATE_LIMITED)?;
+        return Err(anyhow!(
+            "web search rate limit reached ({}/hour)",
+            WEB_RATE_LIMIT_PER_HOUR
+        ));
+    }
+    Ok(clean)
+}
+
+fn connected_search(store: &TaskStore, query: &str) -> Result<Vec<WebSource>> {
+    let result = crate::tool_bus::invoke_first_enabled_tool(
+        store,
+        &[WEB_TOOL_SEARCH, "search"],
+        serde_json::json!({"query": query, "limit": 5}),
+    )?;
+    let payload = crate::tool_bus::tool_result_payload(&result.output)?;
+    let sources = payload
+        .get("sources")
+        .or_else(|| payload.get("results"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("web.search result omitted sources"))?;
+    sources.iter().take(5).map(parse_connected_source).collect()
+}
+
+fn parse_connected_source(value: &serde_json::Value) -> Result<WebSource> {
+    let url = value
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("web.search source omitted url"))?;
+    validate_public_source_url(url)?;
+    Ok(WebSource {
+        url: url.to_string(),
+        title: value
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(url)
+            .chars()
+            .take(500)
+            .collect(),
+        snippet: value
+            .get("snippet")
+            .or_else(|| value.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .take(2_000)
+            .collect(),
+    })
+}
+
+fn connected_fetch(store: &TaskStore, url: &str) -> Result<WebDocument> {
+    validate_public_source_url(url)?;
+    let result = crate::tool_bus::invoke_first_enabled_tool(
+        store,
+        &[WEB_TOOL_FETCH, "fetch"],
+        serde_json::json!({"url": url}),
+    )?;
+    let payload = crate::tool_bus::tool_result_payload(&result.output)?;
+    let content = payload
+        .get("content")
+        .or_else(|| payload.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("web.fetch result omitted content"))?;
+    Ok(WebDocument {
+        url: url.to_string(),
+        title: payload
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(url)
+            .chars()
+            .take(500)
+            .collect(),
+        content: readable_extract(&content.chars().take(2_000_000).collect::<String>()),
+    })
+}
+
+fn validate_public_source_url(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url).context("invalid web source url")?;
+    if parsed.scheme() != "https" {
+        return Err(anyhow!("web sources must use https"));
+    }
+    if matches!(
+        parsed.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1") | None
+    ) {
+        return Err(anyhow!("web source host is not public"));
+    }
+    Ok(())
 }
 
 fn parse_web_fixture(raw: &str, fallback_name: &str) -> WebDocument {
@@ -247,7 +394,10 @@ fn tokenize(text: &str) -> Vec<String> {
 
 fn relevance(doc: &WebDocument, terms: &[String]) -> usize {
     let haystack = format!("{} {}", doc.title, doc.content).to_ascii_lowercase();
-    terms.iter().filter(|term| haystack.contains(term.as_str())).count()
+    terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .count()
 }
 
 // minimal readability: collapse whitespace and drop obvious nav/boilerplate.
@@ -297,7 +447,9 @@ mod tests {
         // readability drops the "Menu" boilerplate line.
         assert!(!doc.content.contains("Menu"));
         let log = list_web_query_log(&store, 10).unwrap();
-        assert!(log.iter().any(|entry| entry.tool == WEB_TOOL_SEARCH && entry.status == QUERY_STATUS_OK));
+        assert!(log
+            .iter()
+            .any(|entry| entry.tool == WEB_TOOL_SEARCH && entry.status == QUERY_STATUS_OK));
         assert!(log.iter().any(|entry| entry.tool == WEB_TOOL_FETCH));
     }
 
@@ -322,7 +474,9 @@ mod tests {
         let err = web_search(&store, "verification boundaries", &corpus());
         assert!(err.is_err());
         let log = list_web_query_log(&store, 20).unwrap();
-        assert!(log.iter().any(|entry| entry.status == QUERY_STATUS_RATE_LIMITED));
+        assert!(log
+            .iter()
+            .any(|entry| entry.status == QUERY_STATUS_RATE_LIMITED));
     }
 
     #[test]
@@ -335,5 +489,38 @@ mod tests {
         assert!(log.iter().any(|entry| entry.status == QUERY_STATUS_BLOCKED));
         // an unrelated query is allowed.
         assert!(web_search(&store, "verification boundaries", &corpus()).is_ok());
+    }
+
+    #[test]
+    fn e2_connected_web_search_and_fetch_use_discovered_mcp_tools() {
+        let (_dir, store) = test_store();
+        let server = r#"import json,sys
+for line in sys.stdin:
+ m=json.loads(line)
+ if m.get('method')=='initialize': result={'protocolVersion':'2025-03-26','capabilities':{},'serverInfo':{'name':'web-fixture','version':'1'}}
+ elif m.get('method')=='tools/list': result={'tools':[{'name':'web.search','description':'search','inputSchema':{'type':'object'}},{'name':'web.fetch','description':'fetch','inputSchema':{'type':'object'}}]}
+ elif m.get('method')=='tools/call' and m['params']['name']=='web.search': result={'structuredContent':{'sources':[{'url':'https://example.com/research','title':'Research','snippet':'Grounded result'}]}}
+ elif m.get('method')=='tools/call': result={'structuredContent':{'title':'Research','content':'Home\nGrounded full article text.\nMenu'}}
+ else: continue
+ print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':result}),flush=True)"#;
+        let endpoint =
+            serde_json::to_string(&vec!["/usr/bin/python3", "-u", "-c", server]).unwrap();
+        let connection = crate::tool_bus::add_tool_connection(
+            &store,
+            "web-fixture",
+            crate::tool_bus::TRANSPORT_STDIO,
+            &endpoint,
+            &[],
+        )
+        .unwrap();
+        crate::tool_bus::discover_connection_tools(&store, connection.id).unwrap();
+
+        let (sources, ledger) = search(&store, "grounded research").unwrap();
+        assert_eq!(sources[0].url, "https://example.com/research");
+        assert_eq!(ledger[0]["url"], "https://example.com/research");
+        let document = fetch(&store, &sources[0].url).unwrap();
+        assert!(document.content.contains("Grounded full article text"));
+        assert!(!document.content.contains("Home"));
+        assert!(!document.content.contains("Menu"));
     }
 }

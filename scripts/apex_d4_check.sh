@@ -80,13 +80,14 @@ FRONTEND_LINT_OUT=$(cd "$DESKTOP" && npm run lint 2>&1)
 echo "$FRONTEND_LINT_OUT" | grep -q "tsc --noEmit" || { echo "$FRONTEND_LINT_OUT"; fail "frontend TypeScript check did not run"; }
 pass "frontend TypeScript check passes"
 
-bash "$ROOT_DIR/scripts/apex_d1_check.sh" >/dev/null 2>&1 || fail "apex d1 action bus gate regressed"
-pass "apex d1 action bus gate still passes"
-
-bash "$ROOT_DIR/scripts/apex_d2_check.sh" >/dev/null 2>&1 || fail "apex d2 Google Docs gate regressed"
-pass "apex d2 Google Docs gate still passes"
-
-bash "$ROOT_DIR/scripts/apex_d3_check.sh" >/dev/null 2>&1 || fail "apex d3 native docs gate regressed"
-pass "apex d3 native docs gate still passes"
+if [ "${JEFF_SKIP_ADJACENT_GATES:-0}" != "1" ]; then
+  for adjacent in d1 d2 d3; do
+    if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/apex_${adjacent}_check.sh" 2>&1); then
+      echo "$ADJACENT_OUT"
+      fail "apex ${adjacent} gate regressed"
+    fi
+    pass "apex ${adjacent} gate still passes"
+  done
+fi
 
 echo "--- apex d4 check passed ---"

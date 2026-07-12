@@ -29,7 +29,8 @@ fn run() -> Result<bool> {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("eval/inbox_eval.json"));
-    let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let eval: InboxEval = serde_json::from_str(&raw).context("failed to parse inbox eval")?;
     if eval.messages.len() != eval.labels.len() {
         return Err(anyhow!(

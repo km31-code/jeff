@@ -18,23 +18,21 @@ use crate::{
         ApiKeyValidationDto, ArtifactContentDto, ArtifactDto, ArtifactVersionDto,
         BrowserSelectionCaptureRequestDto, CalendarEventDto, CapabilityGapDto, ChatMessageDto,
         ConsolidationReportDto, CostGovernorStatusDto, CoworkingStatusDto, CustomToolDto,
-        CustomToolRunResultDto, DataClearResultDto,
-        DriftFlagDto, EpisodeDto, EpisodeSearchResultDto, EventLogEntryDto, FactDto,
+        CustomToolRunResultDto, DataClearResultDto, DriftFlagDto, EmailReplyWatchDto,
+        EmailTriageFlagDto, EpisodeDto, EpisodeSearchResultDto, EventLogEntryDto, FactDto,
         FileWriteProposalDto, IntentClassificationDto, IntentLabel, IntentSlotsDto,
         LiveEditReceiptDto, LocalRuntimeStatusDto, MemoryPromptPreviewDto, NativeDocsStatusDto,
         OnboardingStatusDto, OpenResourceDto, PendingLiveEditDto, PrivacyCenterDashboardDto,
         ProactiveAuditEntryDto, ProactiveEvaluationDto, RecentlyLearnedItemDto, ReorientationDto,
         RetrievedChunkDto, RevisionApplyResultDto, RevisionProposalDto, RevisionProposalResultDto,
         RevisionTargetDto, SelectionBridgeStatusDto, SelectionCaptureIndicatorDto,
-        SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeechSynthesisDto,
-        SpeculationCacheDto, SpeculationServeResultDto, SpeculationStatusDto,
-        EmailReplyWatchDto, EmailTriageFlagDto,
-        ToolCallLogDto, ToolConnectionDto, ToolDescriptorDto, WebQueryLogDto,
-        StandingJobDto, SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto,
-        SuggestionDto, SuggestionEvaluationDto, SynthesisLogEntryDto, TaskContextPackDto, TaskDto,
-        TaskSummaryDto, TranscriptionResultDto, TrustLevelDto, UserProfileSignalDto,
-        WakeWordStatusDto, WatcherStatusDto, WorkloadSummaryDto, WorkspaceInfoDto,
-        WriteAuditEntryDto,
+        SendMessageResponseDto, SessionModeStateDto, SessionRestoreDto, SpeculationCacheDto,
+        SpeculationServeResultDto, SpeculationStatusDto, SpeechSynthesisDto, StandingJobDto,
+        SubTaskDto, SubTaskStepDto, SubTaskSuggestionDto, SuggestionAcceptanceDto, SuggestionDto,
+        SuggestionEvaluationDto, SynthesisLogEntryDto, TaskContextPackDto, TaskDto, TaskSummaryDto,
+        ToolCallLogDto, ToolConnectionDto, ToolDescriptorDto, TranscriptionResultDto,
+        TrustLevelDto, UserProfileSignalDto, WakeWordStatusDto, WatcherStatusDto, WebQueryLogDto,
+        WorkloadSummaryDto, WorkspaceInfoDto, WriteAuditEntryDto,
     },
     relational_model::{self, RelationalProfile},
     retrieval::{
@@ -209,14 +207,21 @@ pub fn set_inference_mode(state: State<'_, JeffState>, mode: String) -> Result<(
 }
 
 #[tauri::command]
+pub fn configure_bundled_inference(
+    state: State<'_, JeffState>,
+    endpoint: Option<String>,
+) -> Result<(), String> {
+    crate::onboarding::configure_bundled_inference(&state.store, endpoint.as_deref())
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
 pub fn complete_onboarding(state: State<'_, JeffState>) -> Result<(), String> {
     // apex e6: onboarding completes with a key (byok) or with bundled inference
     // chosen (no key entry). Guard so a half-configured setup can't complete.
     let has_key = crate::secrets::resolve_openai_api_key().api_key.is_some();
     if !crate::onboarding::onboarding_ready(&state.store, has_key) {
-        return Err(
-            "onboarding needs an API key or the bundled inference option".to_string(),
-        );
+        return Err("onboarding needs an API key or the bundled inference option".to_string());
     }
     state
         .store
@@ -1342,8 +1347,9 @@ pub fn create_agent_job(
     budget_json: Option<String>,
     speculative: Option<bool>,
 ) -> Result<AgentJobDetailDto, String> {
-    crate::agent_runtime::create_and_run_job(
+    crate::agent_runtime::create_and_run_job_with_router(
         &state.store,
+        &state.model_router,
         task_id,
         &goal_contract,
         budget_json.as_deref(),
@@ -1375,7 +1381,12 @@ pub fn run_agent_job(
     state: State<'_, JeffState>,
     job_id: i64,
 ) -> Result<AgentJobDetailDto, String> {
-    crate::agent_runtime::run_job_to_completion(&state.store, job_id).map_err(map_jeff_error)
+    crate::agent_runtime::run_job_to_completion_with_router(
+        &state.store,
+        &state.model_router,
+        job_id,
+    )
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1399,7 +1410,8 @@ pub fn cancel_agent_job(
 
 #[tauri::command]
 pub fn resume_agent_jobs(state: State<'_, JeffState>) -> Result<Vec<AgentJobDetailDto>, String> {
-    crate::agent_runtime::resume_incomplete_jobs(&state.store).map_err(map_jeff_error)
+    crate::agent_runtime::resume_incomplete_jobs_with_router(&state.store, &state.model_router)
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1433,8 +1445,12 @@ pub fn run_due_standing_jobs(
     state: State<'_, JeffState>,
     event_name: Option<String>,
 ) -> Result<Vec<AgentJobDetailDto>, String> {
-    crate::agent_runtime::run_due_standing_jobs(&state.store, event_name.as_deref())
-        .map_err(map_jeff_error)
+    crate::agent_runtime::run_due_standing_jobs_with_router(
+        &state.store,
+        &state.model_router,
+        event_name.as_deref(),
+    )
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1448,9 +1464,7 @@ pub fn set_standing_job_enabled(
 }
 
 #[tauri::command]
-pub fn get_speculation_status(
-    state: State<'_, JeffState>,
-) -> Result<SpeculationStatusDto, String> {
+pub fn get_speculation_status(state: State<'_, JeffState>) -> Result<SpeculationStatusDto, String> {
     crate::speculation::speculation_status(&state.store).map_err(map_jeff_error)
 }
 
@@ -1489,9 +1503,7 @@ pub fn serve_speculation(
 }
 
 #[tauri::command]
-pub fn list_capability_gaps(
-    state: State<'_, JeffState>,
-) -> Result<Vec<CapabilityGapDto>, String> {
+pub fn list_capability_gaps(state: State<'_, JeffState>) -> Result<Vec<CapabilityGapDto>, String> {
     crate::self_extend::list_capability_gaps(&state.store).map_err(map_jeff_error)
 }
 
@@ -1531,7 +1543,24 @@ pub fn run_custom_tool(
     name: String,
     input: String,
 ) -> Result<CustomToolRunResultDto, String> {
-    crate::self_extend::run_custom_tool(&state.store, task_id, &name, &input).map_err(map_jeff_error)
+    crate::self_extend::run_custom_tool(&state.store, task_id, &name, &input)
+        .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn approve_custom_tool_run(
+    state: State<'_, JeffState>,
+    receipt_id: i64,
+) -> Result<CustomToolRunResultDto, String> {
+    crate::self_extend::approve_custom_tool_run(&state.store, receipt_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn reject_custom_tool_run(
+    state: State<'_, JeffState>,
+    receipt_id: i64,
+) -> Result<CustomToolRunResultDto, String> {
+    crate::self_extend::reject_custom_tool_run(&state.store, receipt_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1591,11 +1620,8 @@ pub fn list_tool_call_log(
 pub fn discover_connection_tools(
     state: State<'_, JeffState>,
     connection_id: i64,
-    tools: Vec<(String, String)>,
 ) -> Result<Vec<ToolDescriptorDto>, String> {
-    crate::tool_bus::register_connection_tools(&state.store, connection_id, &tools)
-        .map_err(map_jeff_error)?;
-    crate::tool_bus::list_connection_tools(&state.store, connection_id).map_err(map_jeff_error)
+    crate::tool_bus::discover_connection_tools(&state.store, connection_id).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1619,10 +1645,7 @@ pub fn list_web_query_log(
 }
 
 #[tauri::command]
-pub fn set_web_user_name_guard(
-    state: State<'_, JeffState>,
-    name: String,
-) -> Result<(), String> {
+pub fn set_web_user_name_guard(state: State<'_, JeffState>, name: String) -> Result<(), String> {
     crate::web_tools::set_user_name_guard(&state.store, &name).map_err(map_jeff_error)
 }
 
@@ -1632,11 +1655,9 @@ pub fn set_web_corpus_dir(state: State<'_, JeffState>, dir: String) -> Result<()
 }
 
 #[tauri::command]
-pub fn web_search(
-    state: State<'_, JeffState>,
-    query: String,
-) -> Result<serde_json::Value, String> {
-    let (sources, ledger) = crate::web_tools::search(&state.store, &query).map_err(map_jeff_error)?;
+pub fn web_search(state: State<'_, JeffState>, query: String) -> Result<serde_json::Value, String> {
+    let (sources, ledger) =
+        crate::web_tools::search(&state.store, &query).map_err(map_jeff_error)?;
     Ok(serde_json::json!({ "sources": sources, "source_ledger": ledger }))
 }
 
@@ -1650,18 +1671,26 @@ pub fn web_fetch(
 
 #[tauri::command]
 pub fn triage_inbox(
-    _state: State<'_, JeffState>,
-    messages: Vec<crate::gmail_core::EmailMessage>,
-    context: crate::gmail_core::TriageContext,
+    state: State<'_, JeffState>,
+    task_id: i64,
+    query: Option<String>,
 ) -> Result<Vec<EmailTriageFlagDto>, String> {
-    Ok(crate::gmail_core::triage_inbox(&messages, &context))
+    crate::gmail_core::connected_triage(
+        &state.store,
+        &state.model_router,
+        task_id,
+        query.as_deref().unwrap_or("newer_than:1d"),
+    )
+    .map_err(map_jeff_error)
 }
 
 #[tauri::command]
 pub fn summarize_email_thread(
-    _state: State<'_, JeffState>,
-    messages: Vec<crate::gmail_core::EmailMessage>,
+    state: State<'_, JeffState>,
+    thread_id: String,
 ) -> Result<String, String> {
+    let messages =
+        crate::gmail_core::connected_thread(&state.store, &thread_id).map_err(map_jeff_error)?;
     Ok(crate::gmail_core::summarize_thread(&messages))
 }
 
@@ -1669,16 +1698,10 @@ pub fn summarize_email_thread(
 pub fn register_email_reply_watch(
     state: State<'_, JeffState>,
     task_id: i64,
-    sender: String,
-    thread_hint: Option<String>,
+    message_id: String,
 ) -> Result<EmailReplyWatchDto, String> {
-    crate::gmail_core::register_reply_watch(
-        &state.store,
-        task_id,
-        &sender,
-        thread_hint.as_deref().unwrap_or(""),
-    )
-    .map_err(map_jeff_error)
+    crate::gmail_core::register_connected_reply_watch(&state.store, task_id, &message_id)
+        .map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1709,16 +1732,46 @@ pub fn draft_email_reply(
 }
 
 #[tauri::command]
-pub fn ingest_remote_doc(
+pub fn propose_email_labels(
     state: State<'_, JeffState>,
     task_id: i64,
-    title: String,
-    url: String,
-    provenance: String,
-    content: String,
+    message_id: String,
+    add_labels: Vec<String>,
+    remove_labels: Vec<String>,
+) -> Result<ActionReceiptDto, String> {
+    crate::gmail_core::propose_message_label(
+        &state.store,
+        task_id,
+        &message_id,
+        &add_labels,
+        &remove_labels,
+    )
+    .map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn approve_connected_action(
+    state: State<'_, JeffState>,
+    receipt_id: i64,
+) -> Result<crate::tool_bus::ConnectedActionResult, String> {
+    crate::tool_bus::approve_connected_action(&state.store, receipt_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn reject_connected_action(
+    state: State<'_, JeffState>,
+    receipt_id: i64,
+) -> Result<crate::tool_bus::ConnectedActionResult, String> {
+    crate::tool_bus::reject_connected_action(&state.store, receipt_id).map_err(map_jeff_error)
+}
+
+#[tauri::command]
+pub fn pull_remote_doc(
+    state: State<'_, JeffState>,
+    task_id: i64,
+    query: String,
 ) -> Result<crate::drive_core::RemoteDocDto, String> {
-    crate::drive_core::ingest_remote_doc(&state.store, task_id, &title, &url, &provenance, &content)
-        .map_err(map_jeff_error)
+    crate::drive_core::pull_remote_doc(&state.store, task_id, &query).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1735,10 +1788,9 @@ pub fn remove_remote_doc(state: State<'_, JeffState>, id: i64) -> Result<(), Str
 
 #[tauri::command]
 pub fn full_day_calendar(
-    _state: State<'_, JeffState>,
-    events: Vec<crate::calendar_core::FullCalendarEvent>,
+    state: State<'_, JeffState>,
 ) -> Result<Vec<crate::calendar_core::FullCalendarEvent>, String> {
-    Ok(crate::calendar_core::full_day_events(&events))
+    crate::calendar_core::connected_full_day_events(&state.store).map_err(map_jeff_error)
 }
 
 #[tauri::command]
@@ -1768,20 +1820,19 @@ pub fn propose_calendar_event(
 }
 
 #[tauri::command]
-pub fn notify_email_landed<R: tauri::Runtime>(
+pub fn poll_email_reply_watches<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, JeffState>,
     task_id: i64,
-    message: crate::gmail_core::EmailMessage,
 ) -> Result<usize, String> {
     let resolved =
-        crate::gmail_core::resolve_landed_reply(&state.store, &message).map_err(map_jeff_error)?;
+        crate::gmail_core::resolve_connected_reply_watches(&state.store).map_err(map_jeff_error)?;
     if !resolved.is_empty() {
-        // deterministic crisis trigger: an awaited reply landed.
+        // the connected gmail read is the trusted crisis trigger.
         crate::crisis::maybe_fire_awaited_reply_landed(
             &app,
             task_id,
-            &format!("awaited reply from {} landed", message.sender),
+            &format!("{} awaited email reply or replies landed", resolved.len()),
             true,
         );
     }
@@ -3258,7 +3309,8 @@ fn build_privacy_center_dashboard(
             .and_then(|g| g.source_title.clone()),
         local_runtime: state.local_runtime.status(),
         cost_governor: crate::cost_governor::status(&state.store).map_err(map_jeff_error)?,
-        speculation: crate::speculation::speculation_status(&state.store).map_err(map_jeff_error)?,
+        speculation: crate::speculation::speculation_status(&state.store)
+            .map_err(map_jeff_error)?,
     })
 }
 

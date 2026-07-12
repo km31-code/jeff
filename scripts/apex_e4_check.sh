@@ -18,6 +18,8 @@ echo "--- apex e4 calendar awareness check ---"
 # 1. Module + capabilities.
 test -f "$CAL" || fail "calendar_core.rs missing"
 grep -q "pub fn full_day_events" "$CAL" || fail "full-day awareness missing"
+grep -q "pub fn connected_full_day_events" "$CAL" || fail "connected full-day calendar read missing"
+grep -q "invoke_first_enabled_tool" "$CAL" || fail "calendar does not use the governed MCP bus"
 grep -q "pub fn pre_meeting_prep_offer" "$CAL" || fail "pre-meeting prep composer missing"
 grep -q "pub fn attendee_overlap" "$CAL" || fail "attendee overlap missing"
 grep -q "pub fn propose_event" "$CAL" || fail "event proposal missing"
@@ -36,10 +38,14 @@ pass "cargo check passes without warnings"
 for t in \
   e4_full_day_awareness_sorts_upcoming_and_drops_past \
   e4_pre_meeting_prep_reproduces_the_125pm_scene \
-  e4_event_proposal_round_trips_as_calendar_propose; do
+  e4_event_proposal_round_trips_as_calendar_propose \
+  e4_connected_calendar_reads_real_full_day_tool_result; do
   grep -q "fn $t" "$CAL" || fail "expected e4 test $t is missing"
 done
-E4_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test e4_ --quiet 2>&1)
+if ! E4_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test e4_ --quiet 2>&1); then
+  echo "$E4_TEST_OUT"
+  fail "e4 tests failed"
+fi
 echo "$E4_TEST_OUT" | grep -q "test result: ok" || { echo "$E4_TEST_OUT"; fail "e4 tests failed"; }
 echo "$E4_TEST_OUT" | grep -q "FAILED" && { echo "$E4_TEST_OUT"; fail "e4 tests failed"; }
 pass "e4 full-day/pre-meeting/propose tests pass (1:25pm scene reproducible)"
@@ -51,7 +57,12 @@ for cmd in full_day_calendar pre_meeting_prep propose_calendar_event; do
 done
 pass "calendar commands are wired"
 
-bash "$ROOT_DIR/scripts/apex_e3_check.sh" >/dev/null 2>&1 || fail "apex e3 gmail gate regressed"
-pass "apex e3 gmail gate still passes"
+if [ "${JEFF_SKIP_ADJACENT_GATES:-0}" != "1" ]; then
+  if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/apex_e3_check.sh" 2>&1); then
+    echo "$ADJACENT_OUT"
+    fail "apex e3 gmail gate regressed"
+  fi
+  pass "apex e3 gmail gate still passes"
+fi
 
 echo "--- apex e4 check passed ---"

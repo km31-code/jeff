@@ -11,8 +11,7 @@ use std::time::Duration;
 
 pub const REALTIME_MODEL: &str = "gpt-realtime-2.1";
 pub const REALTIME_DEFAULT_VOICE: &str = "verse";
-const REALTIME_CLIENT_SECRETS_URL: &str =
-    "https://api.openai.com/v1/realtime/client_secrets";
+const REALTIME_CLIENT_SECRETS_URL: &str = "https://api.openai.com/v1/realtime/client_secrets";
 const MINT_TIMEOUT_MS: u64 = 6000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

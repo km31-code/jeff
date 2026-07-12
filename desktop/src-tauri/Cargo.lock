@@ -2129,6 +2129,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "keyring",
+ "libc",
  "notify",
  "objc2",
  "pdf-extract",

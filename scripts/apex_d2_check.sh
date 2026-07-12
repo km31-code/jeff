@@ -85,11 +85,19 @@ FRONTEND_LINT_OUT=$(cd "$DESKTOP" && npm run lint 2>&1)
 echo "$FRONTEND_LINT_OUT" | grep -q "tsc --noEmit" || { echo "$FRONTEND_LINT_OUT"; fail "frontend TypeScript check did not run"; }
 pass "frontend TypeScript check passes"
 
-bash "$ROOT_DIR/scripts/apex_d1_check.sh" >/dev/null 2>&1 || fail "apex d1 action bus gate regressed"
-pass "apex d1 action bus gate still passes"
+if [ "${JEFF_SKIP_ADJACENT_GATES:-0}" != "1" ]; then
+  if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/apex_d1_check.sh" 2>&1); then
+    echo "$ADJACENT_OUT"
+    fail "apex d1 action bus gate regressed"
+  fi
+  pass "apex d1 action bus gate still passes"
 
-bash "$ROOT_DIR/scripts/apex_b6_check.sh" >/dev/null 2>&1 || fail "apex b6 browser perception gate regressed"
-pass "apex b6 browser perception gate still passes"
+  if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/apex_b6_check.sh" 2>&1); then
+    echo "$ADJACENT_OUT"
+    fail "apex b6 browser perception gate regressed"
+  fi
+  pass "apex b6 browser perception gate still passes"
+fi
 
 echo "SKIP: live Google Docs tracked-change execution requires Chrome, the"
 echo "      extension installed, and an active Google Docs document. Static/local"

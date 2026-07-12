@@ -79,7 +79,12 @@ D7_PASSED=$(echo "$D7_TEST_OUT" | grep -oE "[0-9]+ passed" | awk '{s+=$1} END{pr
 pass "d7 evaluator unit tests pass ($D7_PASSED passed)"
 
 # 5. Adjacent runtime gate still green.
-bash "$ROOT_DIR/scripts/apex_d6_check.sh" >/dev/null 2>&1 || fail "apex d6 gate regressed"
-pass "apex d6 gate still passes"
+if [ "${JEFF_SKIP_ADJACENT_GATES:-0}" != "1" ]; then
+  if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/apex_d6_check.sh" 2>&1); then
+    echo "$ADJACENT_OUT"
+    fail "apex d6 gate regressed"
+  fi
+  pass "apex d6 gate still passes"
+fi
 
 echo "--- apex d7 check passed ---"

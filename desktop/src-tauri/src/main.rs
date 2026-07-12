@@ -23,8 +23,8 @@ mod drive_core;
 mod embedding;
 mod errors;
 mod flow;
-mod goal_extraction;
 mod gmail_core;
+mod goal_extraction;
 mod judgment_eval_core;
 mod latency;
 mod local_runtime;
@@ -709,7 +709,10 @@ fn main() {
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     if let Some(state) = resume_handle.try_state::<JeffState>() {
-                        match agent_runtime::resume_incomplete_jobs(&state.store) {
+                        match agent_runtime::resume_incomplete_jobs_with_router(
+                            &state.store,
+                            &state.model_router,
+                        ) {
                             Ok(resumed) if !resumed.is_empty() => {
                                 eprintln!(
                                     "[jeff] resumed {} incomplete agent job(s) at startup",
@@ -737,12 +740,13 @@ fn main() {
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                         if let Some(state) = standing_handle.try_state::<JeffState>() {
-                            match agent_runtime::run_due_standing_jobs(&state.store, None) {
+                            match agent_runtime::run_due_standing_jobs_with_router(
+                                &state.store,
+                                &state.model_router,
+                                None,
+                            ) {
                                 Ok(ran) if !ran.is_empty() => {
-                                    eprintln!(
-                                        "[jeff] ran {} due standing job(s)",
-                                        ran.len()
-                                    );
+                                    eprintln!("[jeff] ran {} due standing job(s)", ran.len());
                                 }
                                 Ok(_) => {}
                                 Err(err) => {
@@ -783,7 +787,9 @@ fn main() {
                                 now,
                             ) {
                                 Ok(Some(cache_id)) => {
-                                    eprintln!("[jeff] speculation precomputed cache entry {cache_id}");
+                                    eprintln!(
+                                        "[jeff] speculation precomputed cache entry {cache_id}"
+                                    );
                                 }
                                 Ok(None) => {}
                                 Err(err) => {
@@ -912,6 +918,8 @@ fn main() {
             commands::approve_custom_tool,
             commands::kill_custom_tool,
             commands::run_custom_tool,
+            commands::approve_custom_tool_run,
+            commands::reject_custom_tool_run,
             commands::list_tool_connections,
             commands::add_tool_connection,
             commands::set_tool_connection_enabled,
@@ -930,14 +938,18 @@ fn main() {
             commands::register_email_reply_watch,
             commands::list_email_reply_watches,
             commands::draft_email_reply,
-            commands::notify_email_landed,
+            commands::propose_email_labels,
+            commands::approve_connected_action,
+            commands::reject_connected_action,
+            commands::poll_email_reply_watches,
             commands::full_day_calendar,
             commands::pre_meeting_prep,
             commands::propose_calendar_event,
-            commands::ingest_remote_doc,
+            commands::pull_remote_doc,
             commands::list_remote_docs,
             commands::remove_remote_doc,
             commands::set_inference_mode,
+            commands::configure_bundled_inference,
             commands::evaluate_next_suggestions,
             commands::list_suggestions,
             commands::accept_suggestion,

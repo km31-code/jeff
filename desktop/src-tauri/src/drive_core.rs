@@ -10,7 +10,7 @@
 
 #![cfg_attr(test, allow(dead_code))]
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,68 @@ pub struct RemoteDocDto {
     pub provenance: String,
     pub artifact_id: Option<i64>,
     pub created_at: String,
+}
+
+pub fn pull_remote_doc(store: &TaskStore, task_id: i64, query: &str) -> Result<RemoteDocDto> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(anyhow!("remote document query cannot be empty"));
+    }
+    let search = crate::tool_bus::invoke_first_enabled_tool(
+        store,
+        &["drive.search", "google_drive.search"],
+        serde_json::json!({"query": query, "limit": 10}),
+    )?;
+    let search_payload = crate::tool_bus::tool_result_payload(&search.output)?;
+    let document = search_payload
+        .get("documents")
+        .or_else(|| search_payload.get("files"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|documents| documents.first())
+        .ok_or_else(|| anyhow!("Drive search returned no documents"))?;
+    let remote_id = document
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("Drive search result omitted id"))?;
+    let title = document
+        .get("title")
+        .or_else(|| document.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("Drive search result omitted title"))?;
+    let url = document
+        .get("url")
+        .or_else(|| document.get("webViewLink"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("Drive search result omitted url"))?;
+    let parsed_url = reqwest::Url::parse(url).context("Drive result url is invalid")?;
+    if parsed_url.scheme() != "https" {
+        return Err(anyhow!("Drive result url must use https"));
+    }
+    let mime_type = document
+        .get("mime_type")
+        .or_else(|| document.get("mimeType"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let (tool_names, provenance): (&[&str], &str) = if mime_type.contains("google-apps.document") {
+        (&["docs.export", "google_docs.export"], PROVENANCE_DOCS)
+    } else {
+        (&["drive.read", "google_drive.read"], PROVENANCE_DRIVE)
+    };
+    let read = crate::tool_bus::invoke_first_enabled_tool(
+        store,
+        tool_names,
+        serde_json::json!({"id": remote_id, "format": "text/plain"}),
+    )?;
+    let read_payload = crate::tool_bus::tool_result_payload(&read.output)?;
+    let content = read_payload
+        .get("content")
+        .or_else(|| read_payload.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("Drive read/export result omitted content"))?;
+    if content.is_empty() || content.len() > 5 * 1024 * 1024 {
+        return Err(anyhow!("remote document content is empty or exceeds 5 MiB"));
+    }
+    ingest_remote_doc(store, task_id, title, url, provenance, content)
 }
 
 // ingest a remote document into retrieval, tagged with provenance. Content is
@@ -61,14 +123,8 @@ pub fn ingest_remote_doc(
         .collect::<Vec<_>>();
 
     // stored/original path carry the remote url so provenance survives end to end.
-    let artifact = store.insert_artifact_with_chunks(
-        task_id,
-        title,
-        "remote",
-        url,
-        url,
-        &chunks,
-    )?;
+    let artifact =
+        store.insert_artifact_with_chunks(task_id, title, "remote", url, url, &chunks)?;
 
     let conn = store.connect()?;
     conn.execute(
@@ -104,8 +160,11 @@ pub fn remove_remote_doc(store: &TaskStore, id: i64) -> Result<()> {
         conn.execute("DELETE FROM artifacts WHERE id = ?1", params![artifact_id])
             .context("failed to delete ingested artifact")?;
     }
-    conn.execute("DELETE FROM remote_ingested_docs WHERE id = ?1", params![id])
-        .context("failed to delete remote doc record")?;
+    conn.execute(
+        "DELETE FROM remote_ingested_docs WHERE id = ?1",
+        params![id],
+    )
+    .context("failed to delete remote doc record")?;
     Ok(())
 }
 
@@ -194,5 +253,35 @@ mod tests {
         // artifact deletion cascaded to its chunks; retrieval is purged.
         assert_eq!(chunk_count(&store, artifact_id), 0);
         assert!(list_remote_docs(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn e5_connected_drive_search_and_docs_export_ingest_trusted_content() {
+        let (_dir, store, task_id) = test_store();
+        let server = r#"import json,sys
+for line in sys.stdin:
+ m=json.loads(line)
+ if m.get('method')=='initialize': result={'protocolVersion':'2025-03-26','capabilities':{},'serverInfo':{'name':'drive-fixture','version':'1'}}
+ elif m.get('method')=='tools/list': result={'tools':[{'name':'drive.search','description':'search','inputSchema':{'type':'object'}},{'name':'docs.export','description':'export','inputSchema':{'type':'object'}}]}
+ elif m.get('method')=='tools/call' and m['params']['name']=='drive.search': result={'structuredContent':{'documents':[{'id':'doc-1','title':'Shared plan','url':'https://docs.google.com/document/d/doc-1','mimeType':'application/vnd.google-apps.document'}]}}
+ elif m.get('method')=='tools/call': result={'structuredContent':{'content':'Trusted remote paragraph one.\n\nTrusted remote paragraph two.'}}
+ else: continue
+ print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':result}),flush=True)"#;
+        let endpoint =
+            serde_json::to_string(&vec!["/usr/bin/python3", "-u", "-c", server]).unwrap();
+        let connection = crate::tool_bus::add_tool_connection(
+            &store,
+            "drive-fixture",
+            crate::tool_bus::TRANSPORT_STDIO,
+            &endpoint,
+            &[],
+        )
+        .unwrap();
+        crate::tool_bus::discover_connection_tools(&store, connection.id).unwrap();
+
+        let doc = pull_remote_doc(&store, task_id, "shared plan").unwrap();
+        assert_eq!(doc.provenance, PROVENANCE_DOCS);
+        assert_eq!(doc.title, "Shared plan");
+        assert_eq!(chunk_count(&store, doc.artifact_id.unwrap()), 2);
     }
 }

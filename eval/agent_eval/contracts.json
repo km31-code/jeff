@@ -176,7 +176,8 @@
     "require_assessment": true,
     "require_verification": true,
     "require_grounded_output": true,
-    "expected_source_files": ["source_related_work.md"],
+    "expected_source_files": ["https://research.example.org/tool-agents/source-ledgers"],
+    "require_zero_fabricated_citations": true,
     "must_contain": ["Three independent sources agree that citation enforcement prevents fabrication"]
   },
   {
@@ -188,7 +189,8 @@
     "require_assessment": true,
     "require_verification": true,
     "require_grounded_output": true,
-    "expected_source_files": ["source_verification.md"],
+    "expected_source_files": ["https://research.example.org/agents/verification-boundaries"],
+    "require_zero_fabricated_citations": true,
     "must_contain": ["compares every stated claim against a named source"]
   },
   {
@@ -200,7 +202,8 @@
     "require_assessment": true,
     "require_verification": true,
     "require_grounded_output": true,
-    "expected_source_files": ["source_grounding.md"],
+    "expected_source_files": ["https://research.example.org/local-first/retrieval-quality"],
+    "require_zero_fabricated_citations": true,
     "must_contain": ["On-device retrieval now matches cloud retrieval quality"]
   },
   {
@@ -212,7 +215,8 @@
     "require_assessment": true,
     "require_verification": true,
     "require_grounded_output": true,
-    "expected_source_files": ["source_verification.md"],
+    "expected_source_files": ["https://research.example.org/agents/verification-boundaries"],
+    "require_zero_fabricated_citations": true,
     "must_contain": ["flags unsupported claims"]
   },
   {
@@ -224,7 +228,8 @@
     "require_assessment": true,
     "require_verification": true,
     "require_grounded_output": true,
-    "expected_source_files": ["source_related_work.md"],
+    "expected_source_files": ["https://research.example.org/tool-agents/source-ledgers"],
+    "require_zero_fabricated_citations": true,
     "must_contain": ["explicit source ledgers mapping each claim to its source"]
   }
 ]

@@ -400,6 +400,31 @@ pub fn openai_generate_blocking(
 ) -> Result<(String, crate::model_router::LlmUsage)> {
     let api_key = crate::secrets::resolve_openai_api_key_required()?;
 
+    openai_generate_blocking_with_credentials(
+        "https://api.openai.com/v1/chat/completions",
+        &api_key,
+        model,
+        system,
+        user,
+        temperature,
+        max_tokens,
+        json_object,
+        timeout_ms,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn openai_generate_blocking_with_credentials(
+    endpoint: &str,
+    bearer_token: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+    temperature: f32,
+    max_tokens: Option<u32>,
+    json_object: bool,
+    timeout_ms: Option<u64>,
+) -> Result<(String, crate::model_router::LlmUsage)> {
     let mut builder = Client::builder();
     if let Some(timeout) = timeout_ms {
         builder = builder
@@ -408,17 +433,19 @@ pub fn openai_generate_blocking(
     }
     let client = builder.build().context("failed to build openai client")?;
 
-    let response = client
-        .post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(&api_key)
-        .json(&openai_chat_body(
+    let response = build_openai_blocking_request(
+        &client,
+        endpoint,
+        bearer_token,
+        &openai_chat_body(
             model,
             system,
             user,
             temperature,
             max_tokens,
             json_object,
-        ))
+        ),
+    )
         .send()
         .context("failed to call OpenAI chat completions API")?;
 
@@ -440,6 +467,15 @@ pub fn openai_generate_blocking(
     parse_openai_chat_response(payload)
 }
 
+fn build_openai_blocking_request(
+    client: &Client,
+    endpoint: &str,
+    bearer_token: &str,
+    body: &serde_json::Value,
+) -> reqwest::blocking::RequestBuilder {
+    client.post(endpoint).bearer_auth(bearer_token).json(body)
+}
+
 pub async fn openai_generate_async(
     model: &str,
     system: &str,
@@ -451,6 +487,32 @@ pub async fn openai_generate_async(
 ) -> Result<(String, crate::model_router::LlmUsage)> {
     let api_key = crate::secrets::resolve_openai_api_key_required()?;
 
+    openai_generate_async_with_credentials(
+        "https://api.openai.com/v1/chat/completions",
+        &api_key,
+        model,
+        system,
+        user,
+        temperature,
+        max_tokens,
+        json_object,
+        timeout_ms,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn openai_generate_async_with_credentials(
+    endpoint: &str,
+    bearer_token: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+    temperature: f32,
+    max_tokens: Option<u32>,
+    json_object: bool,
+    timeout_ms: Option<u64>,
+) -> Result<(String, crate::model_router::LlmUsage)> {
     let mut builder = reqwest::Client::builder();
     if let Some(timeout) = timeout_ms {
         builder = builder.timeout(Duration::from_millis(timeout));
@@ -458,8 +520,8 @@ pub async fn openai_generate_async(
     let client = builder.build().context("failed to build openai client")?;
 
     let response = client
-        .post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(&api_key)
+        .post(endpoint)
+        .bearer_auth(bearer_token)
         .json(&openai_chat_body(
             model,
             system,
@@ -545,4 +607,44 @@ struct OpenAiEmbeddingsResponse {
 #[allow(dead_code)]
 struct OpenAiEmbeddingData {
     embedding: Vec<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn e6_bundled_provider_uses_scoped_endpoint_and_reports_usage() {
+        let client = Client::new();
+        let body = openai_chat_body(
+            "relay-model",
+            "system",
+            "user",
+            0.0,
+            Some(100),
+            false,
+        );
+        let request = build_openai_blocking_request(
+            &client,
+            "https://relay.example/v1/chat/completions",
+            "scoped-test-token",
+            &body,
+        )
+        .build()
+        .unwrap();
+        assert_eq!(request.url().as_str(), "https://relay.example/v1/chat/completions");
+        assert_eq!(
+            request.headers().get("authorization").unwrap(),
+            "Bearer scoped-test-token"
+        );
+        let payload: ChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{ "message": { "content": "bundled answer" } }],
+            "usage": { "prompt_tokens": 11, "completion_tokens": 7 }
+        }))
+        .unwrap();
+        let (text, usage) = parse_openai_chat_response(payload).unwrap();
+        assert_eq!(text, "bundled answer");
+        assert_eq!(usage.input_tokens, 11);
+        assert_eq!(usage.output_tokens, 7);
+    }
 }

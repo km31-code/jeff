@@ -23,11 +23,14 @@ echo "--- apex d9 self-extension check ---"
 test -f "$SELF" || fail "self_extend.rs missing"
 grep -q "CREATE TABLE IF NOT EXISTS capability_gaps" "$STORE" || fail "capability_gaps table missing"
 grep -q "CREATE TABLE IF NOT EXISTS custom_tools" "$STORE" || fail "custom_tools table missing"
+grep -q "CREATE TABLE IF NOT EXISTS custom_tool_runs" "$STORE" || fail "custom_tool_runs table missing"
 grep -q "pub fn record_capability_gap" "$SELF" || fail "gap detection missing"
 grep -q "pub fn propose_tool_for_gap" "$SELF" || fail "tool proposal missing"
 grep -q "pub fn approve_custom_tool" "$SELF" || fail "approve/install missing"
 grep -q "pub fn kill_custom_tool" "$SELF" || fail "kill switch missing"
 grep -q "pub fn run_custom_tool" "$SELF" || fail "tool run path missing"
+grep -q "pub fn approve_custom_tool_run" "$SELF" || fail "per-run approval path missing"
+grep -q "pub fn reject_custom_tool_run" "$SELF" || fail "per-run rejection path missing"
 grep -q "MIN_GAP_OCCURRENCES" "$SELF" || fail "recurring-gap threshold missing"
 pass "self_extend module, tables, and gap->propose->approve->run/kill lifecycle present"
 
@@ -36,13 +39,18 @@ grep -q "HARD_CAP_TOOL_PREFIX" "$TRUST" || fail "tool.custom.* L1 hard cap missi
 grep -q "pub fn script_is_sandbox_safe" "$SELF" || fail "text_script static sandbox guard missing"
 grep -q "pub fn run_text_script_code" "$SELF" || fail "confined subprocess runner missing"
 grep -q "env_clear()" "$SELF" || fail "text_script subprocess does not strip env"
+grep -q "sandbox-exec" "$SELF" || fail "macOS operating-system sandbox missing"
+grep -q "(deny default)" "$SELF" || fail "sandbox is not deny-by-default"
+grep -q "(deny network\*)" "$SELF" || fail "sandbox network denial missing"
+grep -q "process_group(0)" "$SELF" || fail "sandbox process-group confinement missing"
+grep -q "MAX_TOOL_OUTPUT_BYTES" "$SELF" || fail "sandbox output bound missing"
 grep -q "pub fn tool_may_target" "$SELF" || fail "applescript allowlist rail missing"
 grep -q "RUN_STATUS_GUIDED" "$SELF" || fail "guided fallback status missing"
-pass "L1 cap, static sandbox guard + confined subprocess, allowlist, and guided fallback are enforced"
+pass "L1 cap, per-run approval, OS sandbox, bounded process tree, allowlist, and guided fallback are enforced"
 
 # 3. Gap recording wired at a real rejection point + commands registered.
 grep -q "self_extend::record_capability_gap" "$COMMANDS" || fail "capability gap recording not wired into a rejection path"
-for cmd in list_capability_gaps list_custom_tools propose_custom_tool approve_custom_tool kill_custom_tool run_custom_tool; do
+for cmd in list_capability_gaps list_custom_tools propose_custom_tool approve_custom_tool kill_custom_tool run_custom_tool approve_custom_tool_run reject_custom_tool_run; do
   grep -q "pub fn $cmd" "$COMMANDS" || fail "$cmd command missing"
   grep -q "commands::$cmd" "$MAIN" || fail "$cmd not registered"
 done
@@ -55,7 +63,9 @@ grep -q "privacy-surface-self-extend" "$APP_TSX" || fail "Privacy Center self-ex
 grep -q "capability-gap-propose" "$APP_TSX" || fail "propose-tool control missing"
 grep -q "custom-tool-approve" "$APP_TSX" || fail "approve control missing"
 grep -q "custom-tool-kill" "$APP_TSX" || fail "kill-switch control missing"
-pass "Privacy Center self-extension surface (gaps, propose, approve, kill) is wired"
+grep -q "custom-tool-run-approve" "$APP_TSX" || fail "per-run approval control missing"
+grep -q "custom-tool-run-reject" "$APP_TSX" || fail "per-run rejection control missing"
+pass "Privacy Center self-extension surface (gaps, install, per-run approve/reject, kill) is wired"
 
 # 5. Behavioral: lifecycle + rails covered by d9 tests.
 CHECK_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo check --quiet 2>&1)
@@ -67,7 +77,8 @@ pass "cargo check passes without warnings"
 
 for t in \
   d9_recurring_gap_proposes_stages_and_dry_runs \
-  d9_approve_then_run_produces_applied_receipt \
+  d9_each_run_requires_approval_before_execution \
+  d9_rejected_run_never_executes \
   d9_kill_switch_degrades_to_guided_fallback \
   d9_tool_custom_hard_capped_at_l1 \
   d9_sandbox_guard_refuses_network_and_escape \
@@ -78,7 +89,7 @@ D9_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test d9_ --quiet 2>&1)
 echo "$D9_TEST_OUT" | grep -q "test result: ok" || { echo "$D9_TEST_OUT"; fail "d9 tests failed"; }
 echo "$D9_TEST_OUT" | grep -q "FAILED" && { echo "$D9_TEST_OUT"; fail "d9 tests failed"; }
 D9_PASSED=$(echo "$D9_TEST_OUT" | grep -oE "[0-9]+ passed" | awk '{s+=$1} END{print s+0}')
-[ "$D9_PASSED" -ge 7 ] || { echo "$D9_TEST_OUT"; fail "expected >=7 d9 tests to run, saw $D9_PASSED"; }
+[ "$D9_PASSED" -ge 8 ] || { echo "$D9_TEST_OUT"; fail "expected >=8 d9 tests to run, saw $D9_PASSED"; }
 pass "d9 lifecycle + safety-rail tests pass ($D9_PASSED passed)"
 
 FRONTEND_LINT_OUT=$(cd "$DESKTOP" && npm run lint 2>&1)
@@ -90,7 +101,12 @@ echo "$FRONTEND_TEST_OUT" | grep -qE "Test Files.*passed" || { echo "$FRONTEND_T
 echo "$FRONTEND_TEST_OUT" | grep -qE "[0-9]+ failed" && { echo "$FRONTEND_TEST_OUT"; fail "frontend tests failed"; }
 pass "frontend tests pass"
 
-bash "$ROOT_DIR/scripts/apex_d8_check.sh" >/dev/null 2>&1 || fail "apex d8 speculation gate regressed"
-pass "apex d8 speculation gate still passes"
+if [ "${JEFF_SKIP_ADJACENT_GATES:-0}" != "1" ]; then
+  if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/apex_d8_check.sh" 2>&1); then
+    echo "$ADJACENT_OUT"
+    fail "apex d8 speculation gate regressed"
+  fi
+  pass "apex d8 speculation gate still passes"
+fi
 
 echo "--- apex d9 check passed ---"

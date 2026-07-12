@@ -110,7 +110,9 @@ fn parse_args() -> Result<Args> {
                 let value = raw
                     .next()
                     .ok_or_else(|| anyhow!("--min-passes requires a value"))?;
-                min_passes = value.parse::<usize>().context("failed to parse --min-passes")?;
+                min_passes = value
+                    .parse::<usize>()
+                    .context("failed to parse --min-passes")?;
             }
             other => return Err(anyhow!("unknown argument: {other}")),
         }

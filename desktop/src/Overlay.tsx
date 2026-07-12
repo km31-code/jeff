@@ -79,7 +79,7 @@ import {
   startVoiceSession,
   persistVoiceTranscript,
   handleVoiceToolCall,
-  setInferenceMode
+  configureBundledInference
 } from "./tauriClient";
 import { connectRealtimeVoice, type RealtimeConnection } from "./voiceRealtime";
 
@@ -1503,6 +1503,23 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
     }
   }, [apiKeyInput, maybeStoreAnthropicKey, onboardingStatus?.has_stored_api_key, refreshOnboarding]);
 
+  const handleConfigureBundledInference = useCallback(async () => {
+    setOnboardingBusy(true);
+    setApiKeyValidation(null);
+    try {
+      await configureBundledInference();
+      await refreshOnboarding(false);
+      setOnboardingStep(3);
+    } catch (error) {
+      setApiKeyValidation({
+        is_valid: false,
+        message: String(error)
+      });
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }, [refreshOnboarding]);
+
   const handleChooseWorkspaceFolder = useCallback(async () => {
     setOnboardingBusy(true);
     setErrorMessage(null);
@@ -2368,12 +2385,9 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
                     className="overlay-secondary"
                     data-testid="onboarding-inference-bundled"
                     disabled={onboardingBusy}
-                    onClick={() => {
-                      void setInferenceMode("bundled");
-                      setOnboardingStep(3);
-                    }}
+                    onClick={() => void handleConfigureBundledInference()}
                   >
-                    Use bundled inference (no key)
+                    {onboardingBusy ? "Connecting..." : "Use bundled inference (no key)"}
                   </button>
                 </div>
               ) : null}

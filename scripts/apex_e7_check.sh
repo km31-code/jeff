@@ -39,10 +39,10 @@ grep -q "bash scripts/judgment_eval.sh" "$RELEASE" || fail "judgment eval not in
 grep -q "bash scripts/agent_eval.sh" "$RELEASE" || fail "agent eval not in release workflow"
 grep -q "bash scripts/inbox_eval.sh" "$RELEASE" || fail "inbox eval not in release workflow"
 grep -q "bash scripts/character_eval.sh" "$RELEASE" || fail "character eval not in release workflow"
-grep -q "needs: test" "$RELEASE" || fail "build does not depend on the test/eval job"
-grep -q "needs: \[build, character-eval\]" "$RELEASE" || fail "sign does not depend on build + character eval"
+# character eval is an evaluation gate: it must run before build, not after.
+grep -q "needs: \[test, character-eval\]" "$RELEASE" || fail "build does not depend on test + character eval (eval must precede build)"
 grep -q "needs: sign" "$RELEASE" || fail "notarize does not depend on sign"
-pass "release workflow order is eval -> build -> sign -> notarize"
+pass "release workflow order is eval (incl. character) -> build -> sign -> notarize"
 
 # 4. Reliability: DB migrations are idempotent and preserve data across re-init.
 CHECK_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo check --quiet 2>&1)

@@ -47,6 +47,8 @@ pub struct AgentEvalContract {
     pub require_capability_request: bool,
     #[serde(default)]
     pub require_steering_reflected: bool,
+    #[serde(default)]
+    pub require_zero_fabricated_citations: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -96,8 +98,8 @@ pub fn evaluate_agent_contract_in_workspace(
 
     let job = &detail.job;
     let deliverable = job.deliverable_json.clone().unwrap_or_default();
-    let deliverable_json = serde_json::from_str::<serde_json::Value>(&deliverable)
-        .unwrap_or(serde_json::Value::Null);
+    let deliverable_json =
+        serde_json::from_str::<serde_json::Value>(&deliverable).unwrap_or(serde_json::Value::Null);
     let artifact_text = deliverable_json
         .get("deliverable")
         .and_then(serde_json::Value::as_str)
@@ -166,7 +168,9 @@ pub fn evaluate_agent_contract_in_workspace(
             .filter(|paragraph| !paragraph.trim().is_empty())
             .count();
         if actual != expected {
-            failures.push(format!("deliverable has {actual} paragraphs, expected {expected}"));
+            failures.push(format!(
+                "deliverable has {actual} paragraphs, expected {expected}"
+            ));
         }
     }
     for expected_file in &contract.expected_source_files {
@@ -175,14 +179,41 @@ pub fn evaluate_agent_contract_in_workspace(
             .and_then(serde_json::Value::as_array)
             .map(|items| {
                 items.iter().any(|item| {
-                    item.get("file_name")
-                        .and_then(serde_json::Value::as_str)
+                    item.get("file_name").and_then(serde_json::Value::as_str)
                         == Some(expected_file.as_str())
                 })
             })
             .unwrap_or(false);
         if !found {
             failures.push(format!("source ledger missing '{expected_file}'"));
+        }
+    }
+    if contract.require_zero_fabricated_citations {
+        let ledger_urls = deliverable_json
+            .get("source_ledger")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("file_name").and_then(serde_json::Value::as_str))
+                    .filter(|source| source.starts_with("https://"))
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let cited_urls = artifact_text
+            .split_whitespace()
+            .map(|token| token.trim_matches(|ch: char| "[](),.;".contains(ch)))
+            .filter(|token| token.starts_with("https://"))
+            .collect::<std::collections::HashSet<_>>();
+        if cited_urls.is_empty() {
+            failures.push("web deliverable contains no URL citation".to_string());
+        }
+        for cited in cited_urls {
+            if !ledger_urls.contains(cited) {
+                failures.push(format!(
+                    "fabricated citation '{cited}' is absent from source ledger"
+                ));
+            }
         }
     }
     if contract.require_grounded_output && !fixture_texts.is_empty() {
@@ -230,8 +261,23 @@ fn seed_fixture_workspace(
             continue;
         }
         let path = entry.path();
-        let content = fs::read_to_string(&path)
+        let raw_content = fs::read_to_string(&path)
             .with_context(|| format!("failed to read fixture {}", path.display()))?;
+        let (source_name, content) = if contract.category == "web_research" {
+            let mut lines = raw_content.lines();
+            let source = lines
+                .next()
+                .and_then(|line| line.strip_prefix("URL:"))
+                .map(str::trim)
+                .filter(|url| url.starts_with("https://"))
+                .ok_or_else(|| anyhow::anyhow!("web fixture must begin with an HTTPS URL line"))?;
+            (
+                source.to_string(),
+                lines.collect::<Vec<_>>().join("\n").trim().to_string(),
+            )
+        } else {
+            (entry.file_name().to_string_lossy().to_string(), raw_content)
+        };
         let chunks = content
             .split("\n\n")
             .map(str::trim)
@@ -244,13 +290,19 @@ fn seed_fixture_workspace(
                 embedding_model: "agent-eval-fixture".to_string(),
             })
             .collect::<Vec<_>>();
-        let file_name = entry.file_name().to_string_lossy().to_string();
+        let source_path = if contract.category == "web_research" {
+            source_name.clone()
+        } else {
+            path.to_string_lossy().to_string()
+        };
         store.insert_artifact_with_chunks(
             task_id,
-            &file_name,
-            path.extension().and_then(|ext| ext.to_str()).unwrap_or("txt"),
-            path.to_string_lossy().as_ref(),
-            path.to_string_lossy().as_ref(),
+            &source_name,
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("txt"),
+            &source_path,
+            &source_path,
             &chunks,
         )?;
         fixture_texts.push(content);
@@ -289,6 +341,7 @@ mod tests {
             require_verification: false,
             require_capability_request: false,
             require_steering_reflected: false,
+            require_zero_fabricated_citations: false,
         }
     }
 
@@ -340,7 +393,11 @@ mod tests {
     #[test]
     fn d7_steering_contract_is_reflected_in_steps() {
         let (_dir, store) = store();
-        let mut c = contract("d7-steer", "Draft a short note about the current task.", "completed");
+        let mut c = contract(
+            "d7-steer",
+            "Draft a short note about the current task.",
+            "completed",
+        );
         c.steering = vec!["Emphasize constraints.".to_string()];
         c.require_steering_reflected = true;
         let outcome = evaluate_agent_contract(&store, &c).unwrap();

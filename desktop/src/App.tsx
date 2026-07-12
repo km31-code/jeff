@@ -148,18 +148,29 @@ import {
   proposeCustomTool,
   approveCustomTool,
   killCustomTool,
+  approveCustomToolRun,
+  rejectCustomToolRun,
   ToolConnectionDto,
   ToolCallLogDto,
   listToolConnections,
+  addToolConnection,
+  discoverConnectionTools,
+  approveConnectedAction,
+  rejectConnectedAction,
   setToolConnectionEnabled,
   removeToolConnection,
   listToolCallLog,
   WebQueryLogDto,
+  WebSourceDto,
+  WebDocumentDto,
+  webSearch,
+  webFetch,
   listWebQueryLog,
   setWebUserNameGuard,
   EmailReplyWatchDto,
   listEmailReplyWatches,
   RemoteDocDto,
+  pullRemoteDoc,
   listRemoteDocs,
   removeRemoteDoc,
   getPrivacyCenterDashboard,
@@ -442,11 +453,19 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [capabilityGaps, setCapabilityGaps] = useState<CapabilityGapDto[]>([]);
   const [customTools, setCustomTools] = useState<CustomToolDto[]>([]);
   const [toolConnections, setToolConnections] = useState<ToolConnectionDto[]>([]);
+  const [toolConnectionName, setToolConnectionName] = useState("");
+  const [toolConnectionTransport, setToolConnectionTransport] = useState<"stdio" | "http">("stdio");
+  const [toolConnectionEndpoint, setToolConnectionEndpoint] = useState("");
+  const [toolConnectionScopes, setToolConnectionScopes] = useState("");
   const [toolCallLog, setToolCallLog] = useState<ToolCallLogDto[]>([]);
   const [webQueryLog, setWebQueryLog] = useState<WebQueryLogDto[]>([]);
   const [webUserGuard, setWebUserGuard] = useState("");
+  const [webResearchQuery, setWebResearchQuery] = useState("");
+  const [webResearchSources, setWebResearchSources] = useState<WebSourceDto[]>([]);
+  const [webResearchDocument, setWebResearchDocument] = useState<WebDocumentDto | null>(null);
   const [emailReplyWatches, setEmailReplyWatches] = useState<EmailReplyWatchDto[]>([]);
   const [remoteDocs, setRemoteDocs] = useState<RemoteDocDto[]>([]);
+  const [remoteDocQuery, setRemoteDocQuery] = useState("");
   const [interruptionAudit, setInterruptionAudit] = useState<InterruptionAuditDto | null>(null);
   const [debriefEnabled, setDebriefEnabledState] = useState(false);
   const [voiceEnabled, setVoiceEnabledState] = useState(false);
@@ -2214,6 +2233,50 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     }
   }
 
+  async function handleApproveCustomToolRun(receiptId: number) {
+    try {
+      await approveCustomToolRun(receiptId);
+      await refreshPrivacyCenter();
+      setPrivacyActionMessage(`Approved custom tool run #${receiptId}.`);
+    } catch (error) {
+      setOperationError("Failed to approve custom tool run", error);
+      await refreshPrivacyCenter();
+    }
+  }
+
+  async function handleRejectCustomToolRun(receiptId: number) {
+    try {
+      await rejectCustomToolRun(receiptId);
+      await refreshPrivacyCenter();
+      setPrivacyActionMessage(`Rejected custom tool run #${receiptId}.`);
+    } catch (error) {
+      setOperationError("Failed to reject custom tool run", error);
+      await refreshPrivacyCenter();
+    }
+  }
+
+  async function handleApproveConnectedAction(receiptId: number) {
+    try {
+      await approveConnectedAction(receiptId);
+      await refreshPrivacyCenter();
+      setPrivacyActionMessage(`Approved connected action #${receiptId}.`);
+    } catch (error) {
+      setOperationError("Failed to approve connected action", error);
+      await refreshPrivacyCenter();
+    }
+  }
+
+  async function handleRejectConnectedAction(receiptId: number) {
+    try {
+      await rejectConnectedAction(receiptId);
+      await refreshPrivacyCenter();
+      setPrivacyActionMessage(`Rejected connected action #${receiptId}.`);
+    } catch (error) {
+      setOperationError("Failed to reject connected action", error);
+      await refreshPrivacyCenter();
+    }
+  }
+
   async function handleSetTrustLevel(actionClass: string, level: "L1" | "L2" | "L3") {
     try {
       const trustLadder = await setTrustLevel(actionClass, level);
@@ -2773,11 +2836,45 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     }
   }
 
+  async function handlePullRemoteDoc() {
+    if (!activeTask || !remoteDocQuery.trim()) return;
+    try {
+      const doc = await pullRemoteDoc(activeTask.id, remoteDocQuery.trim());
+      setRemoteDocs((current) => [doc, ...current.filter((item) => item.id !== doc.id)]);
+      setRemoteDocQuery("");
+      setPrivacyActionMessage(`Pulled in ${doc.title} from ${doc.provenance}.`);
+    } catch (error) {
+      setOperationError("Failed to pull remote document", error);
+    }
+  }
+
   async function handleSaveWebUserGuard() {
     try {
       await setWebUserNameGuard(webUserGuard.trim());
     } catch (error) {
       setOperationError("Failed to save web guard", error);
+    }
+  }
+
+  async function handleWebResearchSearch() {
+    if (!webResearchQuery.trim()) return;
+    try {
+      const result = await webSearch(webResearchQuery.trim());
+      setWebResearchSources(result.sources);
+      setWebResearchDocument(null);
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to search the web", error);
+    }
+  }
+
+  async function handleWebResearchFetch(source: WebSourceDto) {
+    try {
+      const document = await webFetch(source.url);
+      setWebResearchDocument(document);
+      await refreshPrivacyCenter();
+    } catch (error) {
+      setOperationError("Failed to read selected web source", error);
     }
   }
 
@@ -2787,6 +2884,35 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setToolConnections((current) => current.map((c) => (c.id === updated.id ? updated : c)));
     } catch (error) {
       setOperationError("Failed to update connection", error);
+    }
+  }
+
+  async function handleAddToolConnection() {
+    try {
+      const connection = await addToolConnection({
+        name: toolConnectionName.trim(),
+        transport: toolConnectionTransport,
+        endpoint: toolConnectionEndpoint.trim(),
+        scopes: toolConnectionScopes.split(",").map((scope) => scope.trim()).filter(Boolean),
+      });
+      await discoverConnectionTools(connection.id);
+      setToolConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]);
+      setToolConnectionName("");
+      setToolConnectionEndpoint("");
+      setToolConnectionScopes("");
+      setPrivacyActionMessage(`Connected and discovered tools for ${connection.name}.`);
+    } catch (error) {
+      setOperationError("Failed to connect MCP server", error);
+      await refreshPrivacyCenter();
+    }
+  }
+
+  async function handleDiscoverConnectionTools(connectionId: number) {
+    try {
+      const tools = await discoverConnectionTools(connectionId);
+      setPrivacyActionMessage(`Discovered ${tools.length} tool(s).`);
+    } catch (error) {
+      setOperationError("Failed to discover MCP tools", error);
     }
   }
 
@@ -4449,7 +4575,43 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                                   {receipt.surface}; {receipt.level}; {receipt.status}; {receipt.description}
                                 </p>
                               </div>
-                              {receipt.undo_ref && receipt.status === "applied" ? (
+                              {(receipt.class === "email.draft" || receipt.class === "email.label" || receipt.class === "calendar.propose") &&
+                              receipt.status === "pending_approval" ? (
+                                <div className="inline-actions">
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleApproveConnectedAction(receipt.id)}
+                                    data-testid="connected-action-approve"
+                                  >
+                                    approve action
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleRejectConnectedAction(receipt.id)}
+                                    data-testid="connected-action-reject"
+                                  >
+                                    reject
+                                  </button>
+                                </div>
+                              ) : receipt.class.startsWith("tool.custom.") &&
+                              receipt.status === "pending_approval" ? (
+                                <div className="inline-actions">
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleApproveCustomToolRun(receipt.id)}
+                                    data-testid="custom-tool-run-approve"
+                                  >
+                                    approve run
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleRejectCustomToolRun(receipt.id)}
+                                    data-testid="custom-tool-run-reject"
+                                  >
+                                    reject
+                                  </button>
+                                </div>
+                              ) : receipt.undo_ref && receipt.status === "applied" ? (
                                 <button
                                   type="button"
                                   onClick={() => void handleRevertActionReceipt(receipt.id)}
@@ -4518,6 +4680,42 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                           layer. Connections receive only the specific query, never your context.
                           Disconnecting stops calls immediately.
                         </p>
+                        <div className="compact-form" data-testid="tool-connection-add-form">
+                          <input
+                            value={toolConnectionName}
+                            onChange={(event) => setToolConnectionName(event.target.value)}
+                            placeholder="connection name"
+                            aria-label="connection name"
+                          />
+                          <select
+                            value={toolConnectionTransport}
+                            onChange={(event) => setToolConnectionTransport(event.target.value as "stdio" | "http")}
+                            aria-label="connection transport"
+                          >
+                            <option value="stdio">stdio</option>
+                            <option value="http">http</option>
+                          </select>
+                          <input
+                            value={toolConnectionEndpoint}
+                            onChange={(event) => setToolConnectionEndpoint(event.target.value)}
+                            placeholder={toolConnectionTransport === "stdio" ? '["/absolute/path","arg"]' : "https://server/mcp"}
+                            aria-label="connection endpoint"
+                          />
+                          <input
+                            value={toolConnectionScopes}
+                            onChange={(event) => setToolConnectionScopes(event.target.value)}
+                            placeholder="scopes, comma separated"
+                            aria-label="connection scopes"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handleAddToolConnection()}
+                            disabled={!toolConnectionName.trim() || !toolConnectionEndpoint.trim()}
+                            data-testid="tool-connection-add"
+                          >
+                            connect
+                          </button>
+                        </div>
                         <div className="compact-list" data-testid="tool-connection-list">
                           {toolConnections.slice(0, 6).map((connection) => (
                             <div className="action-receipt-row" key={connection.id}>
@@ -4529,6 +4727,14 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                                 </p>
                               </div>
                               <div className="row-actions">
+                                <button
+                                  type="button"
+                                  data-testid="tool-connection-discover"
+                                  onClick={() => void handleDiscoverConnectionTools(connection.id)}
+                                  disabled={!connection.enabled}
+                                >
+                                  discover
+                                </button>
                                 <button
                                   type="button"
                                   data-testid="tool-connection-toggle"
@@ -4569,6 +4775,23 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                           Documents pulled in from Drive or Docs are ingested with provenance.
                           Removing one purges its content from retrieval.
                         </p>
+                        <div className="compact-form">
+                          <input
+                            value={remoteDocQuery}
+                            onChange={(event) => setRemoteDocQuery(event.target.value)}
+                            placeholder="shared document title or query"
+                            aria-label="remote document query"
+                            data-testid="remote-doc-query"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handlePullRemoteDoc()}
+                            disabled={!activeTask || !remoteDocQuery.trim()}
+                            data-testid="remote-doc-pull"
+                          >
+                            pull in
+                          </button>
+                        </div>
                         <div className="compact-list" data-testid="remote-doc-list">
                           {remoteDocs.slice(0, 6).map((doc) => (
                             <div className="action-receipt-row" key={doc.id}>
@@ -4631,6 +4854,47 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                             save
                           </button>
                         </div>
+                        <div className="compact-form" data-testid="web-research-search-form">
+                          <input
+                            type="text"
+                            value={webResearchQuery}
+                            onChange={(event) => setWebResearchQuery(event.target.value)}
+                            placeholder="research query"
+                            aria-label="web research query"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handleWebResearchSearch()}
+                            disabled={!webResearchQuery.trim()}
+                            data-testid="web-research-search"
+                          >
+                            search
+                          </button>
+                        </div>
+                        <div className="compact-list" data-testid="web-source-selection-card">
+                          {webResearchSources.map((source) => (
+                            <div className="action-receipt-row" key={source.url}>
+                              <div>
+                                <strong>{source.title}</strong>
+                                <p className="task-meta">{source.snippet}</p>
+                                <p className="task-meta">{source.url}</p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => void handleWebResearchFetch(source)}
+                                data-testid="web-source-select"
+                              >
+                                read source
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        {webResearchDocument ? (
+                          <div className="task-meta" data-testid="web-selected-document">
+                            <strong>{webResearchDocument.title}</strong>
+                            <p>{webResearchDocument.content.slice(0, 1200)}</p>
+                          </div>
+                        ) : null}
                         <div className="compact-list" data-testid="web-query-log">
                           {webQueryLog.slice(0, 6).map((entry) => (
                             <p className="task-meta" key={entry.id}>

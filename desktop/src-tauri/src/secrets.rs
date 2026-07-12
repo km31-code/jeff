@@ -6,6 +6,8 @@ use crate::onboarding::{API_KEY_SOURCE_ENV, API_KEY_SOURCE_KEYCHAIN, API_KEY_SOU
 pub const OPENAI_KEYCHAIN_SERVICE: &str = "com.jeff.desktop";
 pub const OPENAI_KEYCHAIN_ACCOUNT: &str = "openai_api_key";
 pub const ANTHROPIC_KEYCHAIN_ACCOUNT: &str = "anthropic_api_key";
+pub const BUNDLED_TOKEN_KEYCHAIN_ACCOUNT: &str = "bundled_inference_token";
+pub const BUNDLED_TOKEN_ENV_VAR: &str = "JEFF_BUNDLED_INFERENCE_TOKEN";
 pub const PREFER_ENV_OPENAI_KEY_VAR: &str = "JEFF_PREFER_ENV_OPENAI_API_KEY";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +209,47 @@ pub fn delete_anthropic_api_key() -> Result<()> {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
         Err(err) => Err(anyhow!(
             "failed to delete Anthropic API key from keychain: {err}"
+        )),
+    }
+}
+
+fn bundled_token_entry() -> Result<Entry> {
+    Entry::new(OPENAI_KEYCHAIN_SERVICE, BUNDLED_TOKEN_KEYCHAIN_ACCOUNT)
+        .context("failed to initialize bundled inference token keychain entry")
+}
+
+pub fn resolve_bundled_inference_token() -> Option<String> {
+    match bundled_token_entry().and_then(|entry| match entry.get_password() {
+        Ok(value) => Ok(Some(value.trim().to_string()).filter(|v| !v.is_empty())),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(err) => Err(anyhow!(
+            "failed to read bundled inference token from keychain: {err}"
+        )),
+    }) {
+        Ok(Some(token)) => Some(token),
+        Ok(None) | Err(_) => std::env::var(BUNDLED_TOKEN_ENV_VAR)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    }
+}
+
+pub fn store_bundled_inference_token(token: &str) -> Result<()> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("bundled inference token cannot be empty"));
+    }
+    bundled_token_entry()?
+        .set_password(trimmed)
+        .context("failed to store bundled inference token in keychain")
+}
+
+#[allow(dead_code)]
+pub fn delete_bundled_inference_token() -> Result<()> {
+    match bundled_token_entry()?.delete_credential() {
+        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+        Err(err) => Err(anyhow!(
+            "failed to delete bundled inference token from keychain: {err}"
         )),
     }
 }

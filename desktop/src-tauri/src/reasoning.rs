@@ -14,11 +14,25 @@ pub use crate::providers::ReasoningModelProvider as ReasoningProvider;
 #[derive(Clone)]
 pub struct OpenAiStreamingReasoningProvider {
     model: String,
+    endpoint: String,
+    bearer_token: Option<String>,
 }
 
 impl OpenAiStreamingReasoningProvider {
     pub fn with_model(model: String) -> Self {
-        Self { model }
+        Self {
+            model,
+            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            bearer_token: None,
+        }
+    }
+
+    pub fn with_endpoint_and_token(model: String, endpoint: String, bearer_token: String) -> Self {
+        Self {
+            model,
+            endpoint,
+            bearer_token: Some(bearer_token),
+        }
     }
 
     // streams LLM tokens through an mpsc channel. spawns a tokio task that
@@ -30,7 +44,11 @@ impl OpenAiStreamingReasoningProvider {
         user_prompt: &str,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<mpsc::Receiver<Result<String>>> {
-        let api_key = crate::secrets::resolve_openai_api_key_required()?;
+        let api_key = match &self.bearer_token {
+            Some(token) => token.clone(),
+            None => crate::secrets::resolve_openai_api_key_required()?,
+        };
+        let endpoint = self.endpoint.clone();
 
         let body = serde_json::json!({
             "model": self.model,
@@ -47,7 +65,7 @@ impl OpenAiStreamingReasoningProvider {
         tokio::spawn(async move {
             let client = reqwest::Client::new();
             let response = match client
-                .post("https://api.openai.com/v1/chat/completions")
+                .post(endpoint)
                 .bearer_auth(&api_key)
                 .json(&body)
                 .send()

@@ -13,19 +13,21 @@
 // - A killed tool is removed from the active registry immediately; subsequent
 //   attempts degrade to guided fallback.
 // - applescript tools may only target apps in their declared allowlist.
-// - text_script tools run in a confined subprocess (workspace-only cwd,
-//   stripped env) behind a static pre-execution guard that refuses network and
-//   filesystem-escape operations. This is a static + confinement guard, NOT a
-//   kernel sandbox; a real OS sandbox is the hardening upgrade.
+// - text_script tools run in a deny-by-default operating-system sandbox with
+//   no network and workspace-only mutable filesystem access. The static guard
+//   remains defense in depth, never the security boundary.
 
 #![cfg_attr(test, allow(dead_code))]
 
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::PathBuf,
     process::{Command, Stdio},
 };
+
+#[cfg(target_os = "macos")]
+use std::os::unix::process::CommandExt;
 
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, OptionalExtension, Row};
@@ -50,19 +52,49 @@ pub const STATUS_KILLED: &str = "killed";
 pub const RUN_STATUS_APPLIED: &str = "applied";
 pub const RUN_STATUS_GUIDED: &str = "guided";
 pub const RUN_STATUS_FAILED: &str = "failed";
+pub const RUN_STATUS_PENDING_APPROVAL: &str = "pending_approval";
+pub const RUN_STATUS_REJECTED: &str = "rejected";
 
 pub const GAP_REASON_NO_ADAPTER: &str = "no_adapter";
 pub const GAP_REASON_UNSUPPORTED_SURFACE: &str = "unsupported_surface";
 
 const TEXT_SCRIPT_TIMEOUT_SECS: u64 = 5;
+const MAX_TOOL_INPUT_BYTES: usize = 64 * 1024;
+const MAX_TOOL_OUTPUT_BYTES: u64 = 1024 * 1024;
 
-// static pre-execution denylist for text_script sandboxing. imperfect by design
-// (see module note) -- the confinement boundary, not a kernel sandbox.
+// static pre-execution denylist for text_script sandboxing. This is only a
+// fast, legible rejection layer; the operating-system sandbox is authoritative.
 const BLOCKED_SCRIPT_TOKENS: &[&str] = &[
-    "http://", "https://", "curl", "wget", "netcat", "nc ", "socket", "ftp",
-    "ssh", "scp", "telnet", "/etc/", "/usr/local", "/var/", "~/", ".ssh",
-    "subprocess", "os.system", "import socket", "requests.", "urllib", "fetch(",
-    "xmlhttprequest", "..", "sudo", "rm -rf", "dd if", "mkfs", ":(){", "> /dev",
+    "http://",
+    "https://",
+    "curl",
+    "wget",
+    "netcat",
+    "nc ",
+    "socket",
+    "ftp",
+    "ssh",
+    "scp",
+    "telnet",
+    "/etc/",
+    "/usr/local",
+    "/var/",
+    "~/",
+    ".ssh",
+    "subprocess",
+    "os.system",
+    "import socket",
+    "requests.",
+    "urllib",
+    "fetch(",
+    "xmlhttprequest",
+    "..",
+    "sudo",
+    "rm -rf",
+    "dd if",
+    "mkfs",
+    ":(){",
+    "> /dev",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -149,7 +181,14 @@ pub fn propose_tool_for_gap(store: &TaskStore, gap_id: i64) -> Result<CustomTool
     let code = generate_tool_code(&spec);
     stage_tool_files(store, &spec, &code)?;
     let transcript = dry_run_test(store, &spec, &code)?;
-    insert_custom_tool(store, &spec, &code, &transcript, STATUS_STAGED, Some(gap_id))
+    insert_custom_tool(
+        store,
+        &spec,
+        &code,
+        &transcript,
+        STATUS_STAGED,
+        Some(gap_id),
+    )
 }
 
 // deterministic ToolSpec draft. the Craft-tier drafter is the env-gated upgrade
@@ -175,10 +214,16 @@ pub fn draft_tool_spec(gap: &CapabilityGapDto) -> SelfExtendToolSpec {
 
 pub fn infer_kind(surface: &str) -> &'static str {
     let lower = surface.to_ascii_lowercase();
-    if lower.contains("http") || lower.contains(".com") || lower.contains("site") || lower.contains("docs.google")
+    if lower.contains("http")
+        || lower.contains(".com")
+        || lower.contains("site")
+        || lower.contains("docs.google")
     {
         KIND_SITE_ADAPTER
-    } else if lower.contains("pages") || lower.contains("word") || lower.contains("app") || lower.contains("keynote")
+    } else if lower.contains("pages")
+        || lower.contains("word")
+        || lower.contains("app")
+        || lower.contains("keynote")
     {
         KIND_APPLESCRIPT
     } else {
@@ -264,14 +309,21 @@ pub fn is_tool_active(store: &TaskStore, name: &str) -> bool {
 
 // ---- running -------------------------------------------------------------
 
-// run an installed custom tool. Killed/absent tools degrade to guided fallback
-// and re-record the gap. Every path produces an action receipt (L1).
+// Propose an installed custom-tool run. Killed/absent tools degrade to guided
+// fallback and re-record the gap. Installed tools never execute here: every
+// exact input requires a separate approval command and receipt transition.
 pub fn run_custom_tool(
     store: &TaskStore,
     task_id: i64,
     name: &str,
     input: &str,
 ) -> Result<CustomToolRunResultDto> {
+    if input.len() > MAX_TOOL_INPUT_BYTES {
+        return Err(anyhow!(
+            "custom tool input exceeds the {} byte limit",
+            MAX_TOOL_INPUT_BYTES
+        ));
+    }
     let class = ActionClass::ToolCustom(name.to_string());
     // hard cap: tool.custom.* can never run above L1.
     let level = crate::trust::level_for_action(store, &class.as_str())?;
@@ -301,46 +353,42 @@ pub fn run_custom_tool(
     };
 
     match tool.kind.as_str() {
-        KIND_TEXT_SCRIPT => match run_text_script_code(store, &tool.code, input) {
-            Ok(output) => {
-                let receipt = store.create_action_receipt(
+        KIND_TEXT_SCRIPT => {
+            let receipt = crate::action_bus::ActionBus::dispatch_proposal(
+                store,
+                &crate::action_bus::ActionRequest {
                     task_id,
-                    &class.as_str(),
-                    "self_extend",
-                    &level,
-                    &format!("ran custom text tool '{name}'"),
-                    output.chars().take(200).collect::<String>().as_str(),
-                    RUN_STATUS_APPLIED,
-                    None,
-                    None,
-                )?;
-                Ok(CustomToolRunResultDto {
-                    status: RUN_STATUS_APPLIED.to_string(),
-                    output: Some(output),
-                    message: format!("ran '{name}'"),
-                    receipt_id: Some(receipt.id),
-                })
-            }
-            Err(err) => {
-                let receipt = store.create_action_receipt(
-                    task_id,
-                    &class.as_str(),
-                    "self_extend",
-                    &level,
-                    &format!("custom text tool '{name}' refused/failed"),
-                    err.to_string().chars().take(200).collect::<String>().as_str(),
+                    class,
+                    surface: "self_extend".to_string(),
+                    description: format!("run custom text tool '{name}'"),
+                    payload: serde_json::json!({
+                        "tool_id": tool.id,
+                        "input_excerpt": input.chars().take(200).collect::<String>(),
+                    }),
+                    reversibility: crate::action_bus::Reversibility::Irreversible,
+                },
+            )?;
+            let conn = store.connect()?;
+            if let Err(err) = conn.execute(
+                "INSERT INTO custom_tool_runs (receipt_id, task_id, tool_id, input)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![receipt.id, task_id, tool.id, input],
+            ) {
+                let _ = store.update_action_receipt_status(
+                    receipt.id,
                     RUN_STATUS_FAILED,
-                    Some(&err.to_string()),
+                    Some("failed to persist exact custom-tool run"),
                     None,
-                )?;
-                Ok(CustomToolRunResultDto {
-                    status: RUN_STATUS_FAILED.to_string(),
-                    output: None,
-                    message: err.to_string(),
-                    receipt_id: Some(receipt.id),
-                })
+                );
+                return Err(err).context("failed to persist custom-tool run");
             }
-        },
+            Ok(CustomToolRunResultDto {
+                status: RUN_STATUS_PENDING_APPROVAL.to_string(),
+                output: None,
+                message: format!("'{name}' requires approval for this exact run"),
+                receipt_id: Some(receipt.id),
+            })
+        }
         // applescript / site_adapter live execution is automation/extension
         // gated; produce a guided receipt.
         _ => {
@@ -349,7 +397,10 @@ pub fn run_custom_tool(
                 &class.as_str(),
                 "self_extend",
                 &level,
-                &format!("custom tool '{name}' ({}) staged; live execution is permission gated", tool.kind),
+                &format!(
+                    "custom tool '{name}' ({}) staged; live execution is permission gated",
+                    tool.kind
+                ),
                 input.chars().take(200).collect::<String>().as_str(),
                 RUN_STATUS_GUIDED,
                 None,
@@ -363,6 +414,164 @@ pub fn run_custom_tool(
             })
         }
     }
+}
+
+#[derive(Debug)]
+struct PendingCustomToolRun {
+    receipt_id: i64,
+    name: String,
+    kind: String,
+    code: String,
+    input: String,
+}
+
+pub fn approve_custom_tool_run(
+    store: &TaskStore,
+    receipt_id: i64,
+) -> Result<CustomToolRunResultDto> {
+    let pending = claim_custom_tool_run(store, receipt_id)?;
+    if pending.kind != KIND_TEXT_SCRIPT {
+        return Err(anyhow!(
+            "custom tool kind '{}' is not executable",
+            pending.kind
+        ));
+    }
+
+    match run_text_script_code(store, &pending.code, &pending.input) {
+        Ok(output) => {
+            finish_custom_tool_run(store, receipt_id, RUN_STATUS_APPLIED, Some(&output), None)?;
+            Ok(CustomToolRunResultDto {
+                status: RUN_STATUS_APPLIED.to_string(),
+                output: Some(output),
+                message: format!("ran '{}' after explicit approval", pending.name),
+                receipt_id: Some(pending.receipt_id),
+            })
+        }
+        Err(err) => {
+            let message = err.to_string();
+            finish_custom_tool_run(store, receipt_id, RUN_STATUS_FAILED, None, Some(&message))?;
+            Ok(CustomToolRunResultDto {
+                status: RUN_STATUS_FAILED.to_string(),
+                output: None,
+                message,
+                receipt_id: Some(pending.receipt_id),
+            })
+        }
+    }
+}
+
+pub fn reject_custom_tool_run(
+    store: &TaskStore,
+    receipt_id: i64,
+) -> Result<CustomToolRunResultDto> {
+    let mut conn = store.connect()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "UPDATE custom_tool_runs
+         SET status = 'rejected', resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE receipt_id = ?1 AND status = 'pending_approval'",
+        params![receipt_id],
+    )?;
+    if changed != 1 {
+        return Err(anyhow!("custom tool run is not pending approval"));
+    }
+    let receipt_changed = tx.execute(
+        "UPDATE action_receipts
+         SET status = 'rejected', resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ?1 AND status = 'pending_approval' AND class LIKE 'tool.custom.%'",
+        params![receipt_id],
+    )?;
+    if receipt_changed != 1 {
+        return Err(anyhow!("custom tool receipt is not pending approval"));
+    }
+    tx.commit()?;
+    Ok(CustomToolRunResultDto {
+        status: RUN_STATUS_REJECTED.to_string(),
+        output: None,
+        message: "custom tool run rejected".to_string(),
+        receipt_id: Some(receipt_id),
+    })
+}
+
+fn claim_custom_tool_run(store: &TaskStore, receipt_id: i64) -> Result<PendingCustomToolRun> {
+    let mut conn = store.connect()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let pending = tx
+        .query_row(
+            "SELECT r.receipt_id, t.name, t.kind, t.code, r.input
+             FROM custom_tool_runs r
+             JOIN custom_tools t ON t.id = r.tool_id
+             JOIN action_receipts a ON a.id = r.receipt_id
+             WHERE r.receipt_id = ?1
+               AND r.status = 'pending_approval'
+               AND a.status = 'pending_approval'
+               AND a.class LIKE 'tool.custom.%'
+               AND t.status = 'installed'",
+            params![receipt_id],
+            |row| {
+                Ok(PendingCustomToolRun {
+                    receipt_id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    code: row.get(3)?,
+                    input: row.get(4)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| {
+            anyhow!("custom tool run is not pending approval or its tool is disabled")
+        })?;
+    let run_changed = tx.execute(
+        "UPDATE custom_tool_runs SET status = 'running'
+         WHERE receipt_id = ?1 AND status = 'pending_approval'",
+        params![receipt_id],
+    )?;
+    let receipt_changed = tx.execute(
+        "UPDATE action_receipts SET status = 'approved'
+         WHERE id = ?1 AND status = 'pending_approval'",
+        params![receipt_id],
+    )?;
+    if run_changed != 1 || receipt_changed != 1 {
+        return Err(anyhow!("custom tool run approval lost a concurrent race"));
+    }
+    tx.commit()?;
+    Ok(pending)
+}
+
+fn finish_custom_tool_run(
+    store: &TaskStore,
+    receipt_id: i64,
+    status: &str,
+    output: Option<&str>,
+    error_message: Option<&str>,
+) -> Result<()> {
+    if !matches!(status, RUN_STATUS_APPLIED | RUN_STATUS_FAILED) {
+        return Err(anyhow!("invalid terminal custom tool run status"));
+    }
+    let mut conn = store.connect()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let run_changed = tx.execute(
+        "UPDATE custom_tool_runs
+         SET status = ?1, output = ?2, error_message = ?3,
+             resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE receipt_id = ?4 AND status = 'running'",
+        params![status, output, error_message, receipt_id],
+    )?;
+    let receipt_changed = tx.execute(
+        "UPDATE action_receipts
+         SET status = ?1, failure_reason = ?2,
+             resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ?3 AND status = 'approved'",
+        params![status, error_message, receipt_id],
+    )?;
+    if run_changed != 1 || receipt_changed != 1 {
+        return Err(anyhow!(
+            "custom tool run could not be finalized consistently"
+        ));
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 // applescript allowlist rail: a tool may only target declared apps.
@@ -386,8 +595,8 @@ pub fn script_is_sandbox_safe(code: &str) -> Result<()> {
     Ok(())
 }
 
-// execute a text_script in a confined subprocess: workspace-only cwd, stripped
-// env, minimal PATH, behind the static guard. NOT a kernel sandbox.
+// execute a text_script in a deny-by-default operating-system sandbox. macOS
+// is the supported desktop runtime; other platforms fail closed.
 pub fn run_text_script_code(store: &TaskStore, code: &str, input: &str) -> Result<String> {
     script_is_sandbox_safe(code)?;
     let workspace = store.workspace_root_path();
@@ -398,29 +607,76 @@ pub fn run_text_script_code(store: &TaskStore, code: &str, input: &str) -> Resul
         std::env::temp_dir()
     };
 
-    let mut child = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(code)
-        .current_dir(&cwd)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to spawn text_script subprocess")?;
+    #[cfg(not(target_os = "macos"))]
+    return Err(anyhow!(
+        "text_script execution is disabled: no supported operating-system sandbox"
+    ));
+
+    #[cfg(target_os = "macos")]
+    let sandbox_profile = macos_text_script_sandbox_profile(&cwd)?;
+
+    #[cfg(target_os = "macos")]
+    let mut child = {
+        let mut command = Command::new("/usr/bin/sandbox-exec");
+        command
+            .arg("-p")
+            .arg(sandbox_profile)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(code)
+            .current_dir(&cwd)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        command
+            .spawn()
+            .context("failed to spawn text_script subprocess")?
+    };
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("text_script stdout pipe missing"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("text_script stderr pipe missing"))?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take(MAX_TOOL_OUTPUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr
+            .take(MAX_TOOL_OUTPUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(input.as_bytes());
     }
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(TEXT_SCRIPT_TIMEOUT_SECS);
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(TEXT_SCRIPT_TIMEOUT_SECS);
     loop {
         match child.try_wait().context("failed to poll text_script")? {
             Some(_) => break,
             None => {
                 if std::time::Instant::now() > deadline {
-                    let _ = child.kill();
+                    #[cfg(target_os = "macos")]
+                    unsafe {
+                        libc::kill(-(child.id() as i32), libc::SIGKILL);
+                    }
+                    let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
                     return Err(anyhow!("text_script timed out"));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -428,17 +684,51 @@ pub fn run_text_script_code(store: &TaskStore, code: &str, input: &str) -> Resul
         }
     }
 
-    let output = child
-        .wait_with_output()
-        .context("failed to collect text_script output")?;
-    if !output.status.success() {
+    let status = child
+        .wait()
+        .context("failed to collect text_script status")?;
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| anyhow!("text_script stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| anyhow!("text_script stderr reader panicked"))??;
+    if stdout.len() as u64 > MAX_TOOL_OUTPUT_BYTES || stderr.len() as u64 > MAX_TOOL_OUTPUT_BYTES {
+        return Err(anyhow!("text_script output exceeded the 1 MiB limit"));
+    }
+    if !status.success() {
         return Err(anyhow!(
             "text_script exited with status {:?}: {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            status.code(),
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+    Ok(String::from_utf8_lossy(&stdout).trim_end().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_text_script_sandbox_profile(workspace: &std::path::Path) -> Result<String> {
+    let workspace = workspace
+        .canonicalize()
+        .context("failed to canonicalize custom-tool workspace")?;
+    let escaped = workspace
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    Ok(format!(
+        "(version 1)\n\
+         (deny default)\n\
+         (import \"system.sb\")\n\
+         (allow process-exec process-fork)\n\
+         (allow signal (target self))\n\
+         (allow file-read* (subpath \"/usr/bin\") (subpath \"/bin\") \
+          (literal \"/private/var/select/sh\") \
+          (subpath \"{escaped}\"))\n\
+         (allow file-write* (subpath \"{escaped}\"))\n\
+         (deny network*)\n\
+         (deny file-read* (literal \"/private/etc/passwd\") \
+          (literal \"/private/etc/master.passwd\"))"
+    ))
 }
 
 // ---- store helpers -------------------------------------------------------
@@ -549,7 +839,13 @@ fn custom_tool_from_row(row: &Row<'_>) -> rusqlite::Result<CustomToolDto> {
 
 fn sanitize_name(raw: &str) -> String {
     raw.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_string()
@@ -585,13 +881,15 @@ mod tests {
     fn d9_recurring_gap_proposes_stages_and_dry_runs() {
         let (_dir, store, _task) = test_store();
         record_capability_gap(&store, "textutil", GAP_REASON_UNSUPPORTED_SURFACE).unwrap();
-        let gap_id = record_capability_gap(&store, "textutil", GAP_REASON_UNSUPPORTED_SURFACE).unwrap();
+        let gap_id =
+            record_capability_gap(&store, "textutil", GAP_REASON_UNSUPPORTED_SURFACE).unwrap();
         assert_eq!(recurring_gaps(&store).unwrap().len(), 1);
 
         let tool = propose_tool_for_gap(&store, gap_id).unwrap();
         assert_eq!(tool.kind, KIND_TEXT_SCRIPT);
         assert_eq!(tool.status, STATUS_STAGED);
-        assert!(tool.test_transcript.unwrap().contains("HELLO WORLD"));
+        let transcript = tool.test_transcript.unwrap();
+        assert!(transcript.contains("HELLO WORLD"), "{transcript}");
     }
 
     #[test]
@@ -602,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn d9_approve_then_run_produces_applied_receipt() {
+    fn d9_each_run_requires_approval_before_execution() {
         let (_dir, store, task_id) = test_store();
         record_capability_gap(&store, "textutil", "unsupported").unwrap();
         let gap_id = record_capability_gap(&store, "textutil", "unsupported").unwrap();
@@ -613,11 +911,44 @@ mod tests {
         assert!(is_tool_active(&store, &installed.name));
 
         let result = run_custom_tool(&store, task_id, &installed.name, "hello world").unwrap();
-        assert_eq!(result.status, RUN_STATUS_APPLIED);
+        assert_eq!(result.status, RUN_STATUS_PENDING_APPROVAL);
+        assert!(result.output.is_none());
+        let receipt_id = result.receipt_id.unwrap();
+        let pending = store.get_action_receipt(receipt_id).unwrap().unwrap();
+        assert_eq!(pending.status, RUN_STATUS_PENDING_APPROVAL);
+
+        let result = approve_custom_tool_run(&store, receipt_id).unwrap();
+        assert_eq!(result.status, RUN_STATUS_APPLIED, "{}", result.message);
         assert_eq!(result.output.as_deref(), Some("HELLO WORLD"));
         // a receipt exists for the run, classed tool.custom.<name>.
         let receipts = store.list_action_receipts(Some(task_id), 10).unwrap();
-        assert!(receipts.iter().any(|r| r.class.starts_with("tool.custom.") && r.status == RUN_STATUS_APPLIED));
+        assert!(receipts
+            .iter()
+            .any(|r| r.class.starts_with("tool.custom.") && r.status == RUN_STATUS_APPLIED));
+        assert!(approve_custom_tool_run(&store, receipt_id).is_err());
+    }
+
+    #[test]
+    fn d9_rejected_run_never_executes() {
+        let (_dir, store, task_id) = test_store();
+        record_capability_gap(&store, "textutil", "unsupported").unwrap();
+        let gap_id = record_capability_gap(&store, "textutil", "unsupported").unwrap();
+        let tool = propose_tool_for_gap(&store, gap_id).unwrap();
+        let installed = approve_custom_tool(&store, tool.id).unwrap();
+        let proposed = run_custom_tool(&store, task_id, &installed.name, "secret").unwrap();
+        let receipt_id = proposed.receipt_id.unwrap();
+
+        let rejected = reject_custom_tool_run(&store, receipt_id).unwrap();
+        assert_eq!(rejected.status, RUN_STATUS_REJECTED);
+        assert!(approve_custom_tool_run(&store, receipt_id).is_err());
+        assert_eq!(
+            store
+                .get_action_receipt(receipt_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            RUN_STATUS_REJECTED
+        );
     }
 
     #[test]
@@ -660,6 +991,13 @@ mod tests {
         assert!(run_text_script_code(&store, "curl https://example.com", "x").is_err());
         assert!(script_is_sandbox_safe("cat ../../etc/passwd").is_err());
         assert!(script_is_sandbox_safe("python -c 'import socket'").is_err());
+        assert!(run_text_script_code(&store, "p=/e${x}tc/passwd; cat \"$p\"", "").is_err());
+        assert!(run_text_script_code(
+            &store,
+            "u=u; /usr/bin/c${u}rl -s http${x}://127.0.0.1:9",
+            ""
+        )
+        .is_err());
     }
 
     #[test]

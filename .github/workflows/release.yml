@@ -1,6 +1,7 @@
 # jeff release pipeline
 # triggers on push to the `release` branch only.
-# job order: test -> build -> character-eval -> sign -> notarize -> release
+# job order: test -> character-eval -> build -> sign -> notarize -> release
+# (all evaluation gates, including character eval, run before any build/sign)
 # all secrets are resolved from GitHub Actions secrets; no values are committed here.
 #
 # required secrets:
@@ -69,7 +70,7 @@ jobs:
         run: npm --prefix desktop test -- --run
 
   build:
-    needs: test
+    needs: [test, character-eval]
     runs-on: macos-14
     steps:
       - name: checkout
@@ -117,7 +118,7 @@ jobs:
           retention-days: 1
 
   character-eval:
-    needs: build
+    needs: test
     runs-on: macos-14
     steps:
       - name: checkout
@@ -156,7 +157,7 @@ jobs:
             bash scripts/character_eval.sh /tmp/jeff_voice_character_eval.json
 
   sign:
-    needs: [build, character-eval]
+    needs: build
     runs-on: macos-14
     steps:
       - name: checkout

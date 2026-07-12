@@ -29,6 +29,7 @@ pub mod relational_model;
 pub mod secrets;
 pub mod similarity;
 pub mod store;
+pub mod tool_bus;
 pub mod trust;
 pub mod voice_naturalness;
 pub mod workspace;

@@ -78,11 +78,19 @@ FRONTEND_LINT_OUT=$(cd "$DESKTOP" && npm run lint 2>&1)
 echo "$FRONTEND_LINT_OUT" | grep -q "tsc --noEmit" || { echo "$FRONTEND_LINT_OUT"; fail "frontend TypeScript check did not run"; }
 pass "frontend TypeScript check passes"
 
-bash "$ROOT_DIR/scripts/apex_d1_check.sh" >/dev/null 2>&1 || fail "apex d1 action bus gate regressed"
-pass "apex d1 action bus gate still passes"
+if [ "${JEFF_SKIP_ADJACENT_GATES:-0}" != "1" ]; then
+  if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/apex_d1_check.sh" 2>&1); then
+    echo "$ADJACENT_OUT"
+    fail "apex d1 action bus gate regressed"
+  fi
+  pass "apex d1 action bus gate still passes"
 
-bash "$ROOT_DIR/scripts/apex_d2_check.sh" >/dev/null 2>&1 || fail "apex d2 Google Docs gate regressed"
-pass "apex d2 Google Docs gate still passes"
+  if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/apex_d2_check.sh" 2>&1); then
+    echo "$ADJACENT_OUT"
+    fail "apex d2 Google Docs gate regressed"
+  fi
+  pass "apex d2 Google Docs gate still passes"
+fi
 
 echo "SKIP: live Pages/Word execution requires macOS Apple Events permission,"
 echo "      the target app installed, and an active document. Static/local checks"

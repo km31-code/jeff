@@ -152,11 +152,7 @@ pub fn deterministic_predictions(
             0.6,
         ));
     }
-    if let Some(last) = recent_requests
-        .iter()
-        .rev()
-        .find(|r| !r.trim().is_empty())
-    {
+    if let Some(last) = recent_requests.iter().rev().find(|r| !r.trim().is_empty()) {
         predictions.push(SpeculationPrediction::new(
             &format!("Follow up on the previous request: {}", last.trim()),
             0.55,
@@ -176,12 +172,18 @@ fn deterministic_predictions_with_context(
     if predictions.len() < 3 {
         if let Some(memory) = recall.iter().find(|item| !item.trim().is_empty()) {
             predictions.push(SpeculationPrediction::new(
-                &format!("Prepare a follow-up using remembered context: {}", memory.trim()),
+                &format!(
+                    "Prepare a follow-up using remembered context: {}",
+                    memory.trim()
+                ),
                 0.52,
             ));
         } else if !snapshot.trim().is_empty() {
             predictions.push(SpeculationPrediction::new(
-                &format!("Prepare the next useful step from this task state: {}", snapshot.trim()),
+                &format!(
+                    "Prepare the next useful step from this task state: {}",
+                    snapshot.trim()
+                ),
                 0.5,
             ));
         }
@@ -290,7 +292,13 @@ pub fn run_speculation_cycle(
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .and_then(|value| value.get("verified").and_then(serde_json::Value::as_bool))
         .unwrap_or(false);
-    if !verified || artifact.as_deref().map(str::trim).filter(|raw| !raw.is_empty()).is_none() {
+    if !verified
+        || artifact
+            .as_deref()
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .is_none()
+    {
         append_event(store, task_id, EVENT_REJECTED, Some(&top.signature))?;
         return Ok(None);
     }
@@ -404,7 +412,9 @@ pub fn invalidate_stale(store: &TaskStore, now: i64) -> Result<usize> {
              WHERE status != ?1 AND created_at <= ?2",
         )?;
         let ids = stmt
-            .query_map(params![STATUS_INVALIDATED, cutoff_rfc.clone()], |row| row.get::<_, i64>(0))?
+            .query_map(params![STATUS_INVALIDATED, cutoff_rfc.clone()], |row| {
+                row.get::<_, i64>(0)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         ids
     };
@@ -501,13 +511,16 @@ pub fn discard_speculation_entry(store: &TaskStore, cache_id: i64) -> Result<()>
         .map(|task| task.id)
         .ok_or_else(|| anyhow::anyhow!("no active task for speculation discard"))?;
     let conn = store.connect()?;
-    let changed = conn.execute(
-        "DELETE FROM speculation_cache WHERE id = ?1 AND task_id = ?2",
-        params![cache_id, task_id],
-    )
-    .context("failed to discard speculation cache entry")?;
+    let changed = conn
+        .execute(
+            "DELETE FROM speculation_cache WHERE id = ?1 AND task_id = ?2",
+            params![cache_id, task_id],
+        )
+        .context("failed to discard speculation cache entry")?;
     if changed == 0 {
-        return Err(anyhow::anyhow!("speculation cache entry not found for active task"));
+        return Err(anyhow::anyhow!(
+            "speculation cache entry not found for active task"
+        ));
     }
     Ok(())
 }
@@ -585,7 +598,11 @@ fn event_counts_today(store: &TaskStore, task_id: i64) -> Result<(i64, i64, i64)
         )
         .context("failed to count speculation events")
     };
-    Ok((count(EVENT_PREDICTED)?, count(EVENT_HIT)?, count(EVENT_MISS)?))
+    Ok((
+        count(EVENT_PREDICTED)?,
+        count(EVENT_HIT)?,
+        count(EVENT_MISS)?,
+    ))
 }
 
 fn fresh_cached_count(store: &TaskStore, task_id: i64) -> Result<i64> {
@@ -636,16 +653,10 @@ pub fn maybe_run_for_active_task(
     let goal = crate::relational_model::latest_active_goal_text(store, task.id);
     let snapshot = store.get_task_summary(task.id)?.summary_text;
     let recall = gather_recent_recall(store, task.id, 8)?;
-    let predictions = predict_via_model(
-        router,
-        &recent,
-        goal.as_deref(),
-        &snapshot,
-        &recall,
-    )
-    .unwrap_or_else(|_| {
-        deterministic_predictions_with_context(&recent, goal.as_deref(), &snapshot, &recall)
-    });
+    let predictions = predict_via_model(router, &recent, goal.as_deref(), &snapshot, &recall)
+        .unwrap_or_else(|_| {
+            deterministic_predictions_with_context(&recent, goal.as_deref(), &snapshot, &recall)
+        });
     run_speculation_cycle(store, task.id, &predictions, now)
 }
 
@@ -719,7 +730,9 @@ fn gather_recent_recall(store: &TaskStore, task_id: i64, limit: usize) -> Result
          ORDER BY salience DESC, created_at DESC, id DESC LIMIT ?2",
     )?;
     let rows = stmt
-        .query_map(params![task_id, limit.min(32) as i64], |row| row.get::<_, String>(0))?
+        .query_map(params![task_id, limit.min(32) as i64], |row| {
+            row.get::<_, String>(0)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -779,7 +792,10 @@ mod tests {
     #[test]
     fn d8_cache_hit_serves_and_marks_precomputed() {
         let (_dir, store, task_id) = test_store();
-        let predictions = vec![SpeculationPrediction::new("Summarize the methods section", 0.7)];
+        let predictions = vec![SpeculationPrediction::new(
+            "Summarize the methods section",
+            0.7,
+        )];
         let cache_id = run_speculation_cycle(&store, task_id, &predictions, 10_000)
             .unwrap()
             .expect("expected a cached prediction");
@@ -804,13 +820,18 @@ mod tests {
     #[test]
     fn d8_document_delta_invalidates_cache_entry() {
         let (_dir, store, task_id) = test_store();
-        let predictions = vec![SpeculationPrediction::new("Summarize the methods section", 0.8)];
+        let predictions = vec![SpeculationPrediction::new(
+            "Summarize the methods section",
+            0.8,
+        )];
         run_speculation_cycle(&store, task_id, &predictions, 10_000).unwrap();
 
         let invalidated = invalidate_for_task(&store, task_id).unwrap();
         assert_eq!(invalidated, 1);
         // a previously-cached ask now misses.
-        assert!(serve_speculation(&store, "summarize the methods section").unwrap().is_none());
+        assert!(serve_speculation(&store, "summarize the methods section")
+            .unwrap()
+            .is_none());
         let status = speculation_status(&store).unwrap();
         assert_eq!(status.miss_count, 1);
         assert_eq!(status.fresh_cached, 0);
@@ -849,7 +870,11 @@ mod tests {
     fn d8_budget_and_daily_cap_gate_scheduling() {
         let (_dir, store, task_id) = test_store();
         // idle + interval satisfied by default (last_run=0).
-        assert!(should_run_speculation(&store, SPECULATION_IDLE_MIN_SECONDS, 1_000_000));
+        assert!(should_run_speculation(
+            &store,
+            SPECULATION_IDLE_MIN_SECONDS,
+            1_000_000
+        ));
 
         // over the speculation sub-budget -> should not run.
         set_daily_budget_usd(&store, SPECULATION_BUDGET_KEY, 0.0).unwrap();
@@ -865,7 +890,11 @@ mod tests {
             })
             .unwrap();
         assert!(!within_speculation_budget(&store));
-        assert!(!should_run_speculation(&store, SPECULATION_IDLE_MIN_SECONDS, 1_000_000));
+        assert!(!should_run_speculation(
+            &store,
+            SPECULATION_IDLE_MIN_SECONDS,
+            1_000_000
+        ));
 
         let (_dir2, capped_store, capped_task_id) = test_store();
         for _ in 0..SPECULATION_DAILY_PREDICTION_CAP {
@@ -880,20 +909,31 @@ mod tests {
         )
         .unwrap()
         .is_none());
-        assert_eq!(predicted_today(&capped_store, capped_task_id).unwrap(), SPECULATION_DAILY_PREDICTION_CAP);
+        assert_eq!(
+            predicted_today(&capped_store, capped_task_id).unwrap(),
+            SPECULATION_DAILY_PREDICTION_CAP
+        );
         assert!(task_id > 0);
     }
 
     #[test]
     fn d8_disabled_and_low_idle_block_scheduling() {
         let (_dir, store, _task_id) = test_store();
-        assert!(should_run_speculation(&store, SPECULATION_IDLE_MIN_SECONDS, 1_000_000));
+        assert!(should_run_speculation(
+            &store,
+            SPECULATION_IDLE_MIN_SECONDS,
+            1_000_000
+        ));
         // below idle threshold.
         assert!(!should_run_speculation(&store, 60, 1_000_000));
         // disabled.
         set_enabled(&store, false).unwrap();
         assert!(!is_enabled(&store));
-        assert!(!should_run_speculation(&store, SPECULATION_IDLE_MIN_SECONDS, 1_000_000));
+        assert!(!should_run_speculation(
+            &store,
+            SPECULATION_IDLE_MIN_SECONDS,
+            1_000_000
+        ));
     }
 
     #[test]
@@ -920,17 +960,21 @@ mod tests {
         .unwrap();
         let second = store.create_task("second task").unwrap();
         store.set_active_task(second.id).unwrap();
-        assert!(serve_speculation_for_task(&store, second.id, "Summarize the shared ask")
-            .unwrap()
-            .is_none());
+        assert!(
+            serve_speculation_for_task(&store, second.id, "Summarize the shared ask")
+                .unwrap()
+                .is_none()
+        );
         let served = serve_speculation_for_task(&store, first_task_id, "Summarize the shared ask")
             .unwrap()
             .unwrap();
         assert_eq!(served.cache_id, first_cache);
         assert_eq!(invalidate_for_task(&store, first_task_id).unwrap(), 1);
-        assert!(serve_speculation_for_task(&store, first_task_id, "Summarize the shared ask")
-            .unwrap()
-            .is_none());
+        assert!(
+            serve_speculation_for_task(&store, first_task_id, "Summarize the shared ask")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -939,7 +983,10 @@ mod tests {
         let cache = run_speculation_cycle(
             &store,
             task_id,
-            &[SpeculationPrediction::new("Search the live web for a source", 0.9)],
+            &[SpeculationPrediction::new(
+                "Search the live web for a source",
+                0.9,
+            )],
             10_000,
         )
         .unwrap();

@@ -12,7 +12,8 @@
 
 #![cfg_attr(test, allow(dead_code))]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{models::ActionReceiptDto, store::TaskStore};
@@ -44,6 +45,40 @@ pub fn full_day_events(events: &[FullCalendarEvent]) -> Vec<FullCalendarEvent> {
         .collect::<Vec<_>>();
     upcoming.sort_by_key(|event| event.minutes_until);
     upcoming
+}
+
+pub fn connected_full_day_events(store: &TaskStore) -> Result<Vec<FullCalendarEvent>> {
+    let now = Utc::now();
+    let end = now + Duration::hours(36);
+    let result = crate::tool_bus::invoke_first_enabled_tool(
+        store,
+        &["calendar.list_events", "calendar.get_events"],
+        serde_json::json!({
+            "start": now.to_rfc3339(),
+            "end": end.to_rfc3339(),
+            "include_attendees": true,
+        }),
+    )?;
+    let payload = crate::tool_bus::tool_result_payload(&result.output)?;
+    let events = payload
+        .get("events")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("calendar tool result omitted events"))?;
+    let mut parsed = events
+        .iter()
+        .take(500)
+        .map(|event| {
+            let mut event: FullCalendarEvent =
+                serde_json::from_value(event.clone()).context("invalid calendar event")?;
+            let start = DateTime::parse_from_rfc3339(&event.start)
+                .context("calendar event start must be RFC 3339")?
+                .with_timezone(&Utc);
+            event.minutes_until = (start - now).num_minutes();
+            Ok(event)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    parsed = full_day_events(&parsed);
+    Ok(parsed)
 }
 
 pub fn next_meeting(events: &[FullCalendarEvent]) -> Option<FullCalendarEvent> {
@@ -99,26 +134,40 @@ pub fn propose_event(
     start: &str,
     end: &str,
 ) -> Result<ActionReceiptDto> {
-    let class = crate::action_bus::ActionClass::CalendarPropose.as_str();
+    let action_class = crate::action_bus::ActionClass::CalendarPropose;
+    let class = action_class.as_str();
     crate::trust::assert_runtime_level_allowed(&class, crate::trust::TRUST_LEVEL_L1)?;
     let payload = serde_json::json!({
         "title": title,
         "start": start,
         "end": end,
-    })
-    .to_string();
-    let receipt = store.create_action_receipt(
-        task_id,
-        &class,
-        "calendar",
-        crate::trust::TRUST_LEVEL_L1,
-        &format!("Propose event: {title}"),
-        &payload,
-        "pending_approval",
-        None,
-        None,
+    });
+    let receipt = crate::action_bus::ActionBus::dispatch_proposal(
+        store,
+        &crate::action_bus::ActionRequest {
+            task_id,
+            class: action_class,
+            surface: "calendar".to_string(),
+            description: format!("Propose event: {title}"),
+            payload,
+            reversibility: crate::action_bus::Reversibility::Guided,
+        },
     )?;
-    crate::trust::record_receipt_outcome(store, &receipt)?;
+    if let Err(error) = crate::tool_bus::persist_connected_action(
+        store,
+        receipt.id,
+        task_id,
+        &["calendar.create_event", "calendar.propose_event"],
+        serde_json::json!({"title": title, "start": start, "end": end}),
+    ) {
+        let _ = store.update_action_receipt_status(
+            receipt.id,
+            "failed",
+            Some("failed to persist exact calendar proposal"),
+            None,
+        );
+        return Err(error);
+    }
     Ok(receipt)
 }
 
@@ -176,7 +225,10 @@ mod tests {
 
         // no offer when the meeting is far off.
         let far = vec![event("r", "Draft review", 40, &["Sarah"])];
-        assert!(pre_meeting_prep_offer(&far, Some("changed something"), &["Sarah".to_string()]).is_none());
+        assert!(
+            pre_meeting_prep_offer(&far, Some("changed something"), &["Sarah".to_string()])
+                .is_none()
+        );
         // no offer when nothing changed.
         assert!(pre_meeting_prep_offer(&events, None, &["Sarah".to_string()]).is_none());
     }
@@ -184,12 +236,51 @@ mod tests {
     #[test]
     fn e4_event_proposal_round_trips_as_calendar_propose() {
         let (_dir, store, task_id) = test_store();
-        let receipt = propose_event(&store, task_id, "Sync", "2026-07-12T14:00", "2026-07-12T14:30")
-            .unwrap();
+        let receipt = propose_event(
+            &store,
+            task_id,
+            "Sync",
+            "2026-07-12T14:00",
+            "2026-07-12T14:30",
+        )
+        .unwrap();
         assert_eq!(receipt.class, "calendar.propose");
         assert_eq!(receipt.level, "L1");
         assert_eq!(receipt.status, "pending_approval");
         let receipts = store.list_action_receipts(Some(task_id), 10).unwrap();
         assert!(receipts.iter().any(|r| r.class == "calendar.propose"));
+        let rejected = crate::tool_bus::reject_connected_action(&store, receipt.id).unwrap();
+        assert_eq!(rejected.status, "rejected");
+        assert!(crate::tool_bus::approve_connected_action(&store, receipt.id).is_err());
+    }
+
+    #[test]
+    fn e4_connected_calendar_reads_real_full_day_tool_result() {
+        let (_dir, store, _task_id) = test_store();
+        let start = (Utc::now() + Duration::minutes(5)).to_rfc3339();
+        let server = r#"import json,sys
+for line in sys.stdin:
+ m=json.loads(line)
+ if m.get('method')=='initialize': result={'protocolVersion':'2025-03-26','capabilities':{},'serverInfo':{'name':'calendar-fixture','version':'1'}}
+ elif m.get('method')=='tools/list': result={'tools':[{'name':'calendar.list_events','description':'events','inputSchema':{'type':'object'}}]}
+ elif m.get('method')=='tools/call': result={'structuredContent':{'events':[{'id':'meeting-1','title':'Review','start':'__START__','attendees':['sarah@example.com'],'acknowledged':False}]}}
+ else: continue
+ print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':result}),flush=True)"#
+            .replace("__START__", &start);
+        let endpoint =
+            serde_json::to_string(&vec!["/usr/bin/python3", "-u", "-c", server.as_str()]).unwrap();
+        let connection = crate::tool_bus::add_tool_connection(
+            &store,
+            "calendar-fixture",
+            crate::tool_bus::TRANSPORT_STDIO,
+            &endpoint,
+            &[],
+        )
+        .unwrap();
+        crate::tool_bus::discover_connection_tools(&store, connection.id).unwrap();
+        let events = connected_full_day_events(&store).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title, "Review");
+        assert!((4..=5).contains(&events[0].minutes_until));
     }
 }

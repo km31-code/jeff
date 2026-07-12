@@ -24,11 +24,13 @@ echo "--- apex d1 action bus check ---"
 # 1. Bus taxonomy, request, adapter seam, receipt statuses, and undo policy.
 test -f "$ACTION_BUS" || fail "action_bus.rs missing"
 grep -q "pub enum ActionClass" "$ACTION_BUS" || fail "ActionClass taxonomy missing"
-for class in "doc.insert" "doc.replace" "doc.suggest" "file.write" "file.delete" "email.draft" "email.send" "calendar.propose" "system.open" "tool.custom."; do
+for class in "doc.insert" "doc.replace" "doc.suggest" "file.write" "file.delete" "email.draft" "email.label" "email.send" "calendar.propose" "system.open" "tool.custom."; do
   grep -q "$class" "$ACTION_BUS" || fail "ActionClass missing $class"
 done
 grep -q "pub struct ActionRequest" "$ACTION_BUS" || fail "ActionRequest missing"
 grep -q "pub trait ActionAdapter" "$ACTION_BUS" || fail "ActionAdapter trait missing"
+grep -q "pub fn dispatch_proposal" "$ACTION_BUS" || fail "central proposal dispatch missing"
+grep -q "pub struct ProposalAdapter" "$ACTION_BUS" || fail "proposal adapter missing"
 grep -q "UNDO_RETENTION_DAYS: u64 = 30" "$ACTION_BUS" || fail "30-day undo retention constant missing"
 grep -q "snapshot_for_file_write" "$ACTION_BUS" || fail "pre-mutation snapshot missing"
 grep -q "restore_file_write_snapshot" "$ACTION_BUS" || fail "revert restore path missing"
@@ -64,6 +66,17 @@ if echo "$APPROVE_SECTION" | grep -q "fs::write"; then
 fi
 grep -q "record_rejected_action" "$COMMANDS" || fail "reject path does not create unified receipt"
 pass "file-write approval and rejection flow through the action bus"
+
+# 3a. every currently implemented external proposal surface enters through the
+# central typed bus. surface modules may persist private undo data afterward,
+# but they may not mint their own pending external-action receipt.
+for module in native_docs.rs gmail_core.rs calendar_core.rs self_extend.rs; do
+  grep -q "ActionBus::dispatch_proposal" "$SRC/$module" || fail "$module bypasses central proposal dispatch"
+done
+grep -q "ActionBus::dispatch_proposal" "$ACTION_BUS" || fail "Google Docs proposal bypasses central dispatch"
+grep -q "d1_all_proposal_surfaces_route_through_registered_adapters" "$ACTION_BUS" || fail "proposal routing matrix test missing"
+grep -q "d1_proposal_only_surfaces_reject_execution_without_surface_approval" "$ACTION_BUS" || fail "proposal authorization test missing"
+pass "Google Docs, native docs, Gmail, calendar, and custom tools share the typed proposal spine"
 
 # 3b. Global mutation gate: no production filesystem mutation outside the action
 # bus adapter and the explicitly allowlisted infrastructure modules. This is the
@@ -117,8 +130,13 @@ echo "$D1_TEST_OUT" | grep -q "test result: ok" || { echo "$D1_TEST_OUT"; fail "
 echo "$D1_TEST_OUT" | grep -q "FAILED" && { echo "$D1_TEST_OUT"; fail "d1 tests failed"; }
 pass "d1 taxonomy and undo/revert tests pass"
 
-bash "$ROOT_DIR/scripts/phase16_check.sh" >/dev/null 2>&1 || fail "phase16 file-write regression gate failed"
-pass "phase16 file-write approval regression still passes"
+if [ "${JEFF_SKIP_ADJACENT_GATES:-0}" != "1" ]; then
+  if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/phase16_check.sh" 2>&1); then
+    echo "$ADJACENT_OUT"
+    fail "phase16 file-write regression gate failed"
+  fi
+  pass "phase16 file-write approval regression still passes"
+fi
 
 FRONTEND_LINT_OUT=$(cd "$DESKTOP" && npm run lint 2>&1)
 echo "$FRONTEND_LINT_OUT" | grep -q "tsc --noEmit" || { echo "$FRONTEND_LINT_OUT"; fail "frontend TypeScript check did not run"; }

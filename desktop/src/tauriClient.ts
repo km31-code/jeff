@@ -459,6 +459,10 @@ export async function setInferenceMode(mode: "bundled" | "byok"): Promise<void> 
   await invoke("set_inference_mode", { mode });
 }
 
+export async function configureBundledInference(endpoint?: string): Promise<void> {
+  await invoke("configure_bundled_inference", { endpoint: endpoint ?? null });
+}
+
 export interface ApiKeyValidationDto {
   is_valid: boolean;
   message: string;
@@ -1570,6 +1574,14 @@ export async function runCustomTool(
   return invoke<CustomToolRunResultDto>("run_custom_tool", { taskId, name, input });
 }
 
+export async function approveCustomToolRun(receiptId: number): Promise<CustomToolRunResultDto> {
+  return invoke<CustomToolRunResultDto>("approve_custom_tool_run", { receiptId });
+}
+
+export async function rejectCustomToolRun(receiptId: number): Promise<CustomToolRunResultDto> {
+  return invoke<CustomToolRunResultDto>("reject_custom_tool_run", { receiptId });
+}
+
 export interface ToolConnectionDto {
   id: number;
   name: string;
@@ -1589,8 +1601,46 @@ export interface ToolCallLogDto {
   created_at: string;
 }
 
+export interface ToolDescriptorDto {
+  id: number;
+  connection_id: number;
+  tool_name: string;
+  description: string;
+}
+
+export interface ConnectedActionResult {
+  receipt_id: number;
+  status: string;
+  tool_result: unknown | null;
+}
+
 export async function listToolConnections(): Promise<ToolConnectionDto[]> {
   return invoke<ToolConnectionDto[]>("list_tool_connections");
+}
+
+export async function addToolConnection(args: {
+  name: string;
+  transport: "stdio" | "http";
+  endpoint: string;
+  scopes: string[];
+}): Promise<ToolConnectionDto> {
+  return invoke<ToolConnectionDto>("add_tool_connection", args);
+}
+
+export async function discoverConnectionTools(connectionId: number): Promise<ToolDescriptorDto[]> {
+  return invoke<ToolDescriptorDto[]>("discover_connection_tools", { connectionId });
+}
+
+export async function approveConnectedAction(receiptId: number): Promise<ConnectedActionResult> {
+  return invoke<ConnectedActionResult>("approve_connected_action", { receiptId });
+}
+
+export async function rejectConnectedAction(receiptId: number): Promise<ConnectedActionResult> {
+  return invoke<ConnectedActionResult>("reject_connected_action", { receiptId });
+}
+
+export async function pullRemoteDoc(taskId: number, query: string): Promise<RemoteDocDto> {
+  return invoke<RemoteDocDto>("pull_remote_doc", { taskId, query });
 }
 
 export async function setToolConnectionEnabled(
@@ -1615,6 +1665,29 @@ export interface WebQueryLogDto {
   result_count: number;
   status: string;
   created_at: string;
+}
+
+export interface WebSourceDto {
+  url: string;
+  title: string;
+  snippet: string;
+}
+
+export interface WebDocumentDto {
+  url: string;
+  title: string;
+  content: string;
+}
+
+export async function webSearch(query: string): Promise<{
+  sources: WebSourceDto[];
+  source_ledger: Array<{ url: string; title: string; file_name: string }>;
+}> {
+  return invoke("web_search", { query });
+}
+
+export async function webFetch(url: string): Promise<WebDocumentDto> {
+  return invoke<WebDocumentDto>("web_fetch", { url });
 }
 
 export async function listWebQueryLog(limit?: number): Promise<WebQueryLogDto[]> {

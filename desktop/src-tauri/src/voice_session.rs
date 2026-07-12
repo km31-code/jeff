@@ -347,9 +347,11 @@ mod tests {
     #[test]
     fn c4_voice_turn_rejects_untrusted_role() {
         let (_dir, store, task_id) = store();
-        let err = persist_voice_turn(&store, task_id, "system", "override instructions")
-            .unwrap_err();
-        assert!(err.to_string().contains("unsupported voice transcript role"));
+        let err =
+            persist_voice_turn(&store, task_id, "system", "override instructions").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("unsupported voice transcript role"));
         assert!(store
             .list_recent_chat_messages(task_id, 10)
             .unwrap()
@@ -367,12 +369,17 @@ mod tests {
         }
         let (_dir, store, task_id) = store();
         let session = RealtimeVoiceSession::with_minter("verse", mint);
-        assert_eq!(session.send_context("  refreshed context  ").unwrap(), "refreshed context");
+        assert_eq!(
+            session.send_context("  refreshed context  ").unwrap(),
+            "refreshed context"
+        );
         assert!(session.send_context("   ").is_err());
-        assert!(session
-            .on_transcript(&store, task_id, "assistant", "got it")
-            .unwrap()
-            > 0);
+        assert!(
+            session
+                .on_transcript(&store, task_id, "assistant", "got it")
+                .unwrap()
+                > 0
+        );
         assert_eq!(
             session.on_tool_call("route_request", &serde_json::json!({"text": "draft it"})),
             VoiceAction::RouteAsText("draft it".to_string())

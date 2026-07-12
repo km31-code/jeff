@@ -100,7 +100,12 @@ echo "$FRONTEND_TEST_OUT" | grep -qE "Test Files.*passed" || { echo "$FRONTEND_T
 echo "$FRONTEND_TEST_OUT" | grep -qE "[0-9]+ failed" && { echo "$FRONTEND_TEST_OUT"; fail "frontend tests failed"; }
 pass "frontend tests pass"
 
-bash "$ROOT_DIR/scripts/apex_d7_check.sh" >/dev/null 2>&1 || fail "apex d7 agent eval gate regressed"
-pass "apex d7 agent eval gate still passes"
+if [ "${JEFF_SKIP_ADJACENT_GATES:-0}" != "1" ]; then
+  if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/apex_d7_check.sh" 2>&1); then
+    echo "$ADJACENT_OUT"
+    fail "apex d7 agent eval gate regressed"
+  fi
+  pass "apex d7 agent eval gate still passes"
+fi
 
 echo "--- apex d8 check passed ---"

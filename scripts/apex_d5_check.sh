@@ -37,7 +37,15 @@ grep -q "TOOL_DOCUMENT_MODEL_READ" "$RUNTIME" || fail "document model read tool 
 grep -q "TOOL_SNAPSHOT_READ" "$RUNTIME" || fail "snapshot read tool missing"
 grep -q "TOOL_FILE_PROPOSAL_BUS" "$RUNTIME" || fail "file proposal bus tool missing"
 grep -q "TOOL_ACTION_PROPOSAL_BUS" "$RUNTIME" || fail "action proposal bus tool missing"
-grep -q "ROUTER_TOOL_CALL_PASSTHROUGH" "$RUNTIME" || fail "router tool-call passthrough seam missing"
+grep -q "create_and_run_job_with_router" "$RUNTIME" || fail "production routed job entrypoint missing"
+grep -q "compose_routed_deliverable" "$RUNTIME" || fail "craft-tier drafting path missing"
+grep -q "Tier::Craft" "$RUNTIME" || fail "agent runtime does not declare the craft tier"
+grep -q "tier_available(Tier::Craft)" "$RUNTIME" || fail "provider-unavailable fallback guard missing"
+grep -q "create_and_run_job_with_router" "$COMMANDS" || fail "create command bypasses model router"
+grep -q "run_job_to_completion_with_router" "$COMMANDS" || fail "run command bypasses model router"
+if grep -q "ROUTER_TOOL_CALL_PASSTHROUGH" "$RUNTIME"; then
+  fail "marker-only router passthrough remains in the runtime"
+fi
 grep -q "JobBudget" "$RUNTIME" || fail "job budget struct missing"
 grep -q "finish_budget_exhausted" "$RUNTIME" || fail "budget exhaustion handler missing"
 grep -q "fresh-context deterministic verification" "$RUNTIME" || fail "mandatory verification transcript missing"
@@ -71,7 +79,10 @@ if [ -n "$CHECK_OUT" ]; then
 fi
 pass "cargo check passes without warnings"
 
-D5_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test d5_ --quiet 2>&1)
+if ! D5_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test d5_ --quiet 2>&1); then
+  echo "$D5_TEST_OUT"
+  fail "d5 tests failed"
+fi
 echo "$D5_TEST_OUT" | grep -q "test result: ok" || { echo "$D5_TEST_OUT"; fail "d5 tests failed"; }
 echo "$D5_TEST_OUT" | grep -q "FAILED" && { echo "$D5_TEST_OUT"; fail "d5 tests failed"; }
 pass "d5 agent runtime tests pass"
@@ -80,7 +91,12 @@ FRONTEND_LINT_OUT=$(cd "$DESKTOP" && npm run lint 2>&1)
 echo "$FRONTEND_LINT_OUT" | grep -q "tsc --noEmit" || { echo "$FRONTEND_LINT_OUT"; fail "frontend TypeScript check did not run"; }
 pass "frontend TypeScript check passes"
 
-bash "$ROOT_DIR/scripts/apex_d4_check.sh" >/dev/null 2>&1 || fail "apex d4 trust ladder gate regressed"
-pass "apex d4 trust ladder gate still passes"
+if [ "${JEFF_SKIP_ADJACENT_GATES:-0}" != "1" ]; then
+  if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/apex_d4_check.sh" 2>&1); then
+    echo "$ADJACENT_OUT"
+    fail "apex d4 trust ladder gate regressed"
+  fi
+  pass "apex d4 trust ladder gate still passes"
+fi
 
 echo "--- apex d5 check passed ---"

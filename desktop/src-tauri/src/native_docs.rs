@@ -135,12 +135,7 @@ pub fn request_native_doc_write(
     validate_request_shape(&request)?;
 
     let Some(observed_text) = request.observed_text.as_deref() else {
-        return create_guided_receipt(
-            store,
-            &request,
-            app,
-            FALLBACK_OBSERVED_TEXT_REQUIRED,
-        );
+        return create_guided_receipt(store, &request, app, FALLBACK_OBSERVED_TEXT_REQUIRED);
     };
     if observed_text.chars().count() > MAX_OBSERVED_TEXT_CHARS {
         return Err(anyhow!("observed native document text exceeds safe length"));
@@ -159,7 +154,7 @@ pub fn request_native_doc_write(
     let _ax_fallback_allowed = ax_buffer_writeback_enabled(store)?;
     let scripts = build_native_doc_scripts(app, &request)?;
     let class = action_class_for_request(&request);
-    let payload_excerpt = serde_json::json!({
+    let payload = serde_json::json!({
         "app": app.label(),
         "document_title": request.document_title,
         "mode": class.as_str(),
@@ -170,23 +165,22 @@ pub fn request_native_doc_write(
         "apply_script_kind": "apple_events_scripting_dictionary",
         "revert_script_kind": "persisted_apple_events_scripting_dictionary",
         "approval_required": true,
-    })
-    .to_string();
+    });
 
-    let receipt = store.create_action_receipt(
-        request.task_id,
-        &class.as_str(),
-        app.surface(),
-        "L1",
-        &format!(
-            "Native {} edit for {}",
-            app.label(),
-            request.document_title.trim()
-        ),
-        &payload_excerpt,
-        "pending_approval",
-        None,
-        None,
+    let receipt = crate::action_bus::ActionBus::dispatch_proposal(
+        store,
+        &crate::action_bus::ActionRequest {
+            task_id: request.task_id,
+            class,
+            surface: app.surface().to_string(),
+            description: format!(
+                "Native {} edit for {}",
+                app.label(),
+                request.document_title.trim()
+            ),
+            payload,
+            reversibility: crate::action_bus::Reversibility::Reversible,
+        },
     )?;
 
     let bundle = NativeDocOperationBundle {
@@ -208,7 +202,10 @@ pub fn request_native_doc_write(
             Some(&path.to_string_lossy()),
         ),
         Err(error) => {
-            let reason = excerpt(&format!("failed to persist native-doc undo bundle: {error}"), 240);
+            let reason = excerpt(
+                &format!("failed to persist native-doc undo bundle: {error}"),
+                240,
+            );
             let failed = store.update_action_receipt_status(
                 receipt.id,
                 ACTION_STATUS_FAILED,
@@ -225,16 +222,9 @@ pub fn request_native_doc_write(
 // permission probe is non-mutating and runs while the receipt is still pending,
 // so a denied Automation grant can transition cleanly to guided apply.
 #[allow(dead_code)]
-pub fn approve_native_doc_write(
-    store: &TaskStore,
-    receipt_id: i64,
-) -> Result<ActionReceiptDto> {
+pub fn approve_native_doc_write(store: &TaskStore, receipt_id: i64) -> Result<ActionReceiptDto> {
     if !cfg!(target_os = "macos") {
-        return guide_pending_native_receipt(
-            store,
-            receipt_id,
-            FALLBACK_AUTOMATION_UNAVAILABLE,
-        );
+        return guide_pending_native_receipt(store, receipt_id, FALLBACK_AUTOMATION_UNAVAILABLE);
     }
     approve_native_doc_write_with_executor(store, receipt_id, execute_osascript)
 }
@@ -265,12 +255,11 @@ pub fn reject_native_doc_write(store: &TaskStore, receipt_id: i64) -> Result<Act
 }
 
 #[allow(dead_code)]
-pub fn revert_native_doc_write(
-    store: &TaskStore,
-    receipt_id: i64,
-) -> Result<ActionReceiptDto> {
+pub fn revert_native_doc_write(store: &TaskStore, receipt_id: i64) -> Result<ActionReceiptDto> {
     if !cfg!(target_os = "macos") {
-        return Err(anyhow!("native document revert is unavailable on this platform"));
+        return Err(anyhow!(
+            "native document revert is unavailable on this platform"
+        ));
     }
     revert_native_doc_write_with_executor(store, receipt_id, execute_osascript)
 }
@@ -299,11 +288,7 @@ where
     if let Err(error) = executor(&bundle.scripts.permission_probe_script) {
         let reason = error.to_string();
         if is_automation_permission_error(&reason) && receipt.status == "pending_approval" {
-            return guide_pending_native_receipt(
-                store,
-                receipt_id,
-                FALLBACK_AUTOMATION_PERMISSION,
-            );
+            return guide_pending_native_receipt(store, receipt_id, FALLBACK_AUTOMATION_PERMISSION);
         }
         let failed = store.update_action_receipt_status(
             receipt_id,
@@ -400,12 +385,8 @@ pub fn build_native_doc_scripts(
     request: &NativeDocsWriteRequest,
 ) -> Result<NativeDocScripts> {
     let permission_probe_script = match app {
-        NativeDocApp::Pages => {
-            "tell application \"Pages\" to return version".to_string()
-        }
-        NativeDocApp::Word => {
-            "tell application \"Microsoft Word\" to return version".to_string()
-        }
+        NativeDocApp::Pages => "tell application \"Pages\" to return version".to_string(),
+        NativeDocApp::Word => "tell application \"Microsoft Word\" to return version".to_string(),
         NativeDocApp::Unsupported => return Err(anyhow!("unsupported native document app")),
     };
     let build = |before: &str, after: &str| match app {
@@ -579,11 +560,31 @@ fn validate_request_shape(request: &NativeDocsWriteRequest) -> Result<()> {
         return Err(anyhow!("native document title is missing or too long"));
     }
     for (label, value, limit) in [
-        ("document_title", request.document_title.as_str(), MAX_DOCUMENT_TITLE_CHARS),
-        ("before_text", request.before_text.as_str(), MAX_OPERATION_TEXT_CHARS),
-        ("after_text", request.after_text.as_str(), MAX_OPERATION_TEXT_CHARS),
-        ("anchor_before", request.anchor_before.as_str(), MAX_ANCHOR_CHARS),
-        ("anchor_after", request.anchor_after.as_str(), MAX_ANCHOR_CHARS),
+        (
+            "document_title",
+            request.document_title.as_str(),
+            MAX_DOCUMENT_TITLE_CHARS,
+        ),
+        (
+            "before_text",
+            request.before_text.as_str(),
+            MAX_OPERATION_TEXT_CHARS,
+        ),
+        (
+            "after_text",
+            request.after_text.as_str(),
+            MAX_OPERATION_TEXT_CHARS,
+        ),
+        (
+            "anchor_before",
+            request.anchor_before.as_str(),
+            MAX_ANCHOR_CHARS,
+        ),
+        (
+            "anchor_after",
+            request.anchor_after.as_str(),
+            MAX_ANCHOR_CHARS,
+        ),
     ] {
         if value.contains('\0') {
             return Err(anyhow!("native document {label} contains a NUL byte"));
@@ -596,14 +597,20 @@ fn validate_request_shape(request: &NativeDocsWriteRequest) -> Result<()> {
         return Err(anyhow!("native document edit would be a no-op"));
     }
     if request.anchor_before.is_empty() && request.anchor_after.is_empty() {
-        return Err(anyhow!("native document edit requires surrounding anchor context"));
+        return Err(anyhow!(
+            "native document edit requires surrounding anchor context"
+        ));
     }
     Ok(())
 }
 
-fn persist_operation_bundle(store: &TaskStore, bundle: &NativeDocOperationBundle) -> Result<PathBuf> {
+fn persist_operation_bundle(
+    store: &TaskStore,
+    bundle: &NativeDocOperationBundle,
+) -> Result<PathBuf> {
     let directory = native_docs_bundle_root(store)?;
-    let bytes = serde_json::to_vec_pretty(bundle).context("failed to serialize native-doc bundle")?;
+    let bytes =
+        serde_json::to_vec_pretty(bundle).context("failed to serialize native-doc bundle")?;
     let digest = sha256_hex(&bytes);
     let path = directory.join(format!("receipt-{}-{digest}.json", bundle.receipt_id));
     let mut options = OpenOptions::new();
@@ -618,14 +625,19 @@ fn persist_operation_bundle(store: &TaskStore, bundle: &NativeDocOperationBundle
         .with_context(|| format!("failed to create native-doc bundle {}", path.display()))?;
     file.write_all(&bytes)
         .context("failed to write native-doc bundle")?;
-    file.sync_all().context("failed to sync native-doc bundle")?;
+    file.sync_all()
+        .context("failed to sync native-doc bundle")?;
     Ok(path)
 }
 
 fn native_docs_bundle_root(store: &TaskStore) -> Result<PathBuf> {
     let directory = store.action_undo_root().join("native_docs");
-    fs::create_dir_all(&directory)
-        .with_context(|| format!("failed to create native-doc undo root {}", directory.display()))?;
+    fs::create_dir_all(&directory).with_context(|| {
+        format!(
+            "failed to create native-doc undo root {}",
+            directory.display()
+        )
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -640,10 +652,12 @@ fn load_operation_bundle(
     store: &TaskStore,
     receipt: &ActionReceiptDto,
 ) -> Result<NativeDocOperationBundle> {
-    let undo_ref = receipt
-        .undo_ref
-        .as_deref()
-        .ok_or_else(|| anyhow!("native document receipt id={} has no operation bundle", receipt.id))?;
+    let undo_ref = receipt.undo_ref.as_deref().ok_or_else(|| {
+        anyhow!(
+            "native document receipt id={} has no operation bundle",
+            receipt.id
+        )
+    })?;
     let path = validated_bundle_path(store, undo_ref)?;
     let bytes = fs::read(&path)
         .with_context(|| format!("failed to read native-doc bundle {}", path.display()))?;
@@ -655,7 +669,9 @@ fn load_operation_bundle(
         .map(|name| name.ends_with(&expected_suffix))
         .unwrap_or(false)
     {
-        return Err(anyhow!("native document operation bundle integrity check failed"));
+        return Err(anyhow!(
+            "native document operation bundle integrity check failed"
+        ));
     }
     let bundle: NativeDocOperationBundle =
         serde_json::from_slice(&bytes).context("failed to parse native-doc bundle")?;
@@ -664,12 +680,16 @@ fn load_operation_bundle(
         || bundle.task_id != receipt.task_id
         || bundle.app.surface() != receipt.surface
     {
-        return Err(anyhow!("native document operation bundle does not match receipt"));
+        return Err(anyhow!(
+            "native document operation bundle does not match receipt"
+        ));
     }
     validate_request_shape(&bundle.request)?;
     let regenerated = build_native_doc_scripts(bundle.app, &bundle.request)?;
     if regenerated != bundle.scripts {
-        return Err(anyhow!("native document operation scripts failed regeneration check"));
+        return Err(anyhow!(
+            "native document operation scripts failed regeneration check"
+        ));
     }
     Ok(bundle)
 }
@@ -683,7 +703,9 @@ fn validated_bundle_path(store: &TaskStore, undo_ref: &str) -> Result<PathBuf> {
     let metadata = fs::symlink_metadata(requested)
         .with_context(|| format!("native-doc bundle is unavailable: {}", requested.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(anyhow!("native-doc bundle must be a regular non-symlink file"));
+        return Err(anyhow!(
+            "native-doc bundle must be a regular non-symlink file"
+        ));
     }
     let canonical = requested
         .canonicalize()
@@ -705,11 +727,18 @@ fn require_native_receipt(store: &TaskStore, receipt_id: i64) -> Result<ActionRe
     let receipt = store
         .get_action_receipt(receipt_id)?
         .ok_or_else(|| anyhow!("action receipt id={receipt_id} not found"))?;
-    if !matches!(receipt.surface.as_str(), "native_docs.pages" | "native_docs.word") {
-        return Err(anyhow!("receipt id={receipt_id} is not a native document action"));
+    if !matches!(
+        receipt.surface.as_str(),
+        "native_docs.pages" | "native_docs.word"
+    ) {
+        return Err(anyhow!(
+            "receipt id={receipt_id} is not a native document action"
+        ));
     }
     if !matches!(receipt.class.as_str(), "doc.insert" | "doc.replace") {
-        return Err(anyhow!("receipt id={receipt_id} has an invalid native document class"));
+        return Err(anyhow!(
+            "receipt id={receipt_id} has an invalid native document class"
+        ));
     }
     Ok(receipt)
 }
@@ -937,7 +966,10 @@ mod tests {
         req.task_id = task.id;
         let receipt = request_native_doc_write(&store, req).unwrap();
         assert_eq!(receipt.status, "guided");
-        assert_eq!(receipt.failure_reason.as_deref(), Some(FALLBACK_UNSUPPORTED_SURFACE));
+        assert_eq!(
+            receipt.failure_reason.as_deref(),
+            Some(FALLBACK_UNSUPPORTED_SURFACE)
+        );
         let cards = store.get_unresolved_live_edits().unwrap();
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].status, "fallback");
@@ -971,12 +1003,14 @@ mod tests {
 
         let mut ambiguous = request("Word");
         ambiguous.task_id = task.id;
-        ambiguous.observed_text = Some(
-            "Intro old sentence outro / Intro old sentence outro".to_string(),
-        );
+        ambiguous.observed_text =
+            Some("Intro old sentence outro / Intro old sentence outro".to_string());
         let receipt = request_native_doc_write(&store, ambiguous).unwrap();
         assert_eq!(receipt.status, "guided");
-        assert_eq!(receipt.failure_reason.as_deref(), Some(FALLBACK_ANCHOR_MISS));
+        assert_eq!(
+            receipt.failure_reason.as_deref(),
+            Some(FALLBACK_ANCHOR_MISS)
+        );
     }
 
     #[test]
@@ -993,7 +1027,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         let bundle = load_operation_bundle(&store, &receipt).unwrap();
         assert!(bundle.scripts.revert_script.contains("new sentence"));

@@ -34,6 +34,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 # objective-c runtime for macos ServiceManagement and NSWorkspace calls.
 objc2 = "0.6.4"
 chrono = { version = "0.4", features = ["serde"] }
+libc = "0.2"
 
 [dev-dependencies]
 tauri = { version = "2.0.0", features = ["test", "tray-icon", "image-png"] }

@@ -1,11 +1,8 @@
-// apex d5: durable agent jobs. The local executor is deterministic for gates,
-// but preserves the production loop shape: plan -> act -> observe -> revise ->
-// verify -> deliver, with persistent steps/events and honest blocked output.
+// apex d5: durable agent jobs. production uses the craft-tier model router for
+// drafting inside a persisted plan -> act -> observe -> revise -> verify ->
+// deliver loop. deterministic composition is only the no-provider fallback.
 
-use std::{
-    collections::HashSet,
-    time::Instant,
-};
+use std::{collections::HashSet, time::Instant};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{Duration, Local, NaiveTime, SecondsFormat, TimeZone, Utc};
@@ -16,6 +13,7 @@ use crate::{
     action_bus::ActionClass,
     crisis_core::{CrisisCandidate, CrisisClass},
     message_kind::MessageKind,
+    model_router::{GenerateOptions, ModelRouter, Tier},
     models::{
         AgentJobArtifactDto, AgentJobCheckpointDto, AgentJobDetailDto, AgentJobDto,
         AgentJobEventDto, AgentJobSteeringDto, AgentJobStepDto, StandingJobDto,
@@ -31,7 +29,6 @@ pub const JOB_STATUS_COMPLETED: &str = "completed";
 pub const JOB_STATUS_BLOCKED: &str = "blocked";
 pub const JOB_STATUS_BUDGET_EXHAUSTED: &str = "budget_exhausted";
 pub const JOB_STATUS_CANCELLED_PARTIAL: &str = "cancelled_partial";
-pub const ROUTER_TOOL_CALL_PASSTHROUGH: &str = "router_tool_call_passthrough";
 #[allow(dead_code)]
 pub const SUBTASK_CHAIN_RETIRED_BY_D5: &str = "start_subtask_chain_retired_agent_jobs_primary";
 pub const STANDING_JOB_CRITICAL_EVENT_TYPE: &str = "standing_job_critical";
@@ -191,6 +188,21 @@ pub fn create_and_run_job(
     run_job_to_completion(store, job.id)
 }
 
+pub fn create_and_run_job_with_router(
+    store: &TaskStore,
+    router: &ModelRouter,
+    task_id: i64,
+    goal_contract: &str,
+    budget_json: Option<&str>,
+    speculative: bool,
+) -> Result<AgentJobDetailDto> {
+    let job = create_job(store, task_id, goal_contract, budget_json, speculative)?;
+    if job.status == JOB_STATUS_QUEUED {
+        return get_job_detail(store, job.id);
+    }
+    run_job_to_completion_with_router(store, router, job.id)
+}
+
 pub fn create_job(
     store: &TaskStore,
     task_id: i64,
@@ -256,6 +268,22 @@ pub fn create_job(
 }
 
 pub fn run_job_to_completion(store: &TaskStore, job_id: i64) -> Result<AgentJobDetailDto> {
+    run_job_to_completion_internal(store, None, job_id)
+}
+
+pub fn run_job_to_completion_with_router(
+    store: &TaskStore,
+    router: &ModelRouter,
+    job_id: i64,
+) -> Result<AgentJobDetailDto> {
+    run_job_to_completion_internal(store, Some(router), job_id)
+}
+
+fn run_job_to_completion_internal(
+    store: &TaskStore,
+    router: Option<&ModelRouter>,
+    job_id: i64,
+) -> Result<AgentJobDetailDto> {
     let mut job = get_job(store, job_id)?.ok_or_else(|| anyhow!("job id={} not found", job_id))?;
     if matches!(
         job.status.as_str(),
@@ -271,10 +299,10 @@ pub fn run_job_to_completion(store: &TaskStore, job_id: i64) -> Result<AgentJobD
     }
     let budget = parse_budget(Some(&job.budget_json))?;
     let plan = if job.plan_json.trim() == "[]" || job.plan_json.trim().is_empty() {
-        build_plan_json(&job.goal_contract, job.speculative)
+        build_plan_json(store, &job.goal_contract, job.speculative)
     } else {
         serde_json::from_str(&job.plan_json)
-            .unwrap_or_else(|_| build_plan_json(&job.goal_contract, job.speculative))
+            .unwrap_or_else(|_| build_plan_json(store, &job.goal_contract, job.speculative))
     };
     claim_job_for_run(store, job_id, &plan.to_string())?;
     job = get_job(store, job_id)?.ok_or_else(|| anyhow!("job id={} disappeared", job_id))?;
@@ -300,12 +328,13 @@ pub fn run_job_to_completion(store: &TaskStore, job_id: i64) -> Result<AgentJobD
         )?;
     }
     for (index, phase) in JOB_PHASES.iter().enumerate().skip(start_index) {
-        let current = get_job(store, job_id)?.ok_or_else(|| anyhow!("job id={} disappeared", job_id))?;
+        let current =
+            get_job(store, job_id)?.ok_or_else(|| anyhow!("job id={} disappeared", job_id))?;
         if current.status == JOB_STATUS_CANCELLED_PARTIAL {
             return get_job_detail(store, job_id);
         }
-        runtime.elapsed_ms = persisted_elapsed_ms
-            .saturating_add(call_started.elapsed().as_millis() as u64);
+        runtime.elapsed_ms =
+            persisted_elapsed_ms.saturating_add(call_started.elapsed().as_millis() as u64);
         if let Some(reason) = budget_exhausted_reason(&budget, &runtime, 0, 0) {
             return finish_budget_exhausted(store, job_id, &runtime, &job.goal_contract, &reason);
         }
@@ -323,15 +352,9 @@ pub fn run_job_to_completion(store: &TaskStore, job_id: i64) -> Result<AgentJobD
             &step_input.to_string(),
         )?;
         start_job_step(store, step.id)?;
-        let execution = execute_phase(
-            store,
-            &job,
-            phase,
-            &runtime,
-            &steering,
-        )?;
-        let elapsed_after_phase = persisted_elapsed_ms
-            .saturating_add(call_started.elapsed().as_millis() as u64);
+        let execution = execute_phase(store, router, &job, phase, &runtime, &steering)?;
+        let elapsed_after_phase =
+            persisted_elapsed_ms.saturating_add(call_started.elapsed().as_millis() as u64);
         let mut next_state = execution.next_state;
         next_state.elapsed_ms = elapsed_after_phase;
         if let Some(reason) = budget_exhausted_reason(
@@ -520,7 +543,22 @@ pub fn cancel_job_preserving_checkpoints(
     get_job_detail(store, job_id)
 }
 
+#[allow(dead_code)]
 pub fn resume_incomplete_jobs(store: &TaskStore) -> Result<Vec<AgentJobDetailDto>> {
+    resume_incomplete_jobs_internal(store, None)
+}
+
+pub fn resume_incomplete_jobs_with_router(
+    store: &TaskStore,
+    router: &ModelRouter,
+) -> Result<Vec<AgentJobDetailDto>> {
+    resume_incomplete_jobs_internal(store, Some(router))
+}
+
+fn resume_incomplete_jobs_internal(
+    store: &TaskStore,
+    router: Option<&ModelRouter>,
+) -> Result<Vec<AgentJobDetailDto>> {
     let conn = store.connect()?;
     let mut stmt = conn.prepare(
         "SELECT id, task_id, goal_contract, plan_json, budget_json, status, speculative,
@@ -539,9 +577,9 @@ pub fn resume_incomplete_jobs(store: &TaskStore) -> Result<Vec<AgentJobDetailDto
 
     let mut resumed = Vec::new();
     for job in jobs {
-        resumed.push(run_job_to_completion(store, job.id)?);
+        resumed.push(run_job_to_completion_internal(store, router, job.id)?);
     }
-    resumed.extend(run_pending_jobs(store)?);
+    resumed.extend(run_pending_jobs_internal(store, router)?);
     Ok(resumed)
 }
 
@@ -577,10 +615,7 @@ pub fn create_standing_job(
     get_standing_job(store, id)?.ok_or_else(|| anyhow!("standing job id={} missing", id))
 }
 
-pub fn list_standing_jobs(
-    store: &TaskStore,
-    task_id: Option<i64>,
-) -> Result<Vec<StandingJobDto>> {
+pub fn list_standing_jobs(store: &TaskStore, task_id: Option<i64>) -> Result<Vec<StandingJobDto>> {
     let conn = store.connect()?;
     let mut jobs = Vec::new();
     if let Some(task_id) = task_id {
@@ -629,22 +664,52 @@ pub fn set_standing_job_enabled(
         .ok_or_else(|| anyhow!("standing job id={standing_job_id} missing after update"))
 }
 
+#[allow(dead_code)]
 pub fn run_due_standing_jobs(
     store: &TaskStore,
+    event_name: Option<&str>,
+) -> Result<Vec<AgentJobDetailDto>> {
+    run_due_standing_jobs_internal(store, None, event_name)
+}
+
+pub fn run_due_standing_jobs_with_router(
+    store: &TaskStore,
+    router: &ModelRouter,
+    event_name: Option<&str>,
+) -> Result<Vec<AgentJobDetailDto>> {
+    run_due_standing_jobs_internal(store, Some(router), event_name)
+}
+
+fn run_due_standing_jobs_internal(
+    store: &TaskStore,
+    router: Option<&ModelRouter>,
     event_name: Option<&str>,
 ) -> Result<Vec<AgentJobDetailDto>> {
     let due = due_standing_jobs(store, event_name)?;
     let mut details = Vec::new();
     for standing in due {
-        let detail = create_and_run_job(
-            store,
-            standing.task_id,
-            &standing.goal_contract,
-            None,
-            false,
-        )?;
+        let detail = match router {
+            Some(router) => create_and_run_job_with_router(
+                store,
+                router,
+                standing.task_id,
+                &standing.goal_contract,
+                None,
+                false,
+            )?,
+            None => create_and_run_job(
+                store,
+                standing.task_id,
+                &standing.goal_contract,
+                None,
+                false,
+            )?,
+        };
         record_standing_job_run_receipt(store, &standing, &detail)?;
-        if standing.critical && detail.job.status == JOB_STATUS_COMPLETED && standing_guard_tripped(&detail) {
+        if standing.critical
+            && detail.job.status == JOB_STATUS_COMPLETED
+            && standing_guard_tripped(&detail)
+        {
             append_job_event(
                 store,
                 detail.job.id,
@@ -757,7 +822,9 @@ fn finish_completed(
     if !speculative {
         let conversation_text = format!(
             "{}\n\n{}",
-            deliverable["assessment"].as_str().unwrap_or("Job completed."),
+            deliverable["assessment"]
+                .as_str()
+                .unwrap_or("Job completed."),
             deliverable["deliverable"].as_str().unwrap_or_default()
         );
         store.append_chat_message(
@@ -785,9 +852,8 @@ fn finish_blocked(
         .get("reason")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("missing evidence or capability");
-    let verification = format!(
-        "fresh-context deterministic verification: couldn't verify, here's why: {reason}."
-    );
+    let verification =
+        format!("fresh-context deterministic verification: couldn't verify, here's why: {reason}.");
     let deliverable = serde_json::json!({
         "assessment": "I couldn't verify this job against the goal contract.",
         "deliverable": runtime.draft.clone().unwrap_or_else(|| format!("Partial work only for: {goal_contract}")),
@@ -829,7 +895,9 @@ fn finish_blocked(
             "assistant",
             "agent_job",
             MessageKind::AssistantAnswer,
-            deliverable["honesty"].as_str().unwrap_or("I couldn't verify this job."),
+            deliverable["honesty"]
+                .as_str()
+                .unwrap_or("I couldn't verify this job."),
         )?;
     }
     promote_next_queued_job(store)?;
@@ -905,7 +973,9 @@ fn finish_budget_exhausted(
             "assistant",
             "agent_job",
             MessageKind::AssistantAnswer,
-            deliverable["honesty"].as_str().unwrap_or("Budget exhausted."),
+            deliverable["honesty"]
+                .as_str()
+                .unwrap_or("Budget exhausted."),
         )?;
     }
     promote_next_queued_job(store)?;
@@ -915,13 +985,15 @@ fn finish_budget_exhausted(
 fn parse_budget(raw: Option<&str>) -> Result<JobBudget> {
     match raw.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => {
-            let budget: JobBudget = serde_json::from_str(value)
-                .context("invalid agent job budget JSON")?;
+            let budget: JobBudget =
+                serde_json::from_str(value).context("invalid agent job budget JSON")?;
             if budget.max_steps == 0 {
                 return Err(anyhow!("job budget max_steps must be greater than zero"));
             }
             if budget.max_wall_seconds == 0 {
-                return Err(anyhow!("job budget max_wall_seconds must be greater than zero"));
+                return Err(anyhow!(
+                    "job budget max_wall_seconds must be greater than zero"
+                ));
             }
             if budget.max_tokens == 0 {
                 return Err(anyhow!("job budget max_tokens must be greater than zero"));
@@ -939,22 +1011,49 @@ fn parse_budget(raw: Option<&str>) -> Result<JobBudget> {
     }
 }
 
-fn build_plan_json(goal_contract: &str, speculative: bool) -> serde_json::Value {
+fn build_plan_json(store: &TaskStore, goal_contract: &str, speculative: bool) -> serde_json::Value {
     // apex d8: speculative jobs advertise only the read-only registry, so the
     // scheduler boundary never hands them a mutating tool.
-    let tool_registry = if speculative {
+    let static_tools = if speculative {
         speculative_tool_registry()
     } else {
         tool_registry_v1()
     };
+    let mut tool_registry = static_tools
+        .into_iter()
+        .filter_map(|tool| serde_json::to_value(tool).ok())
+        .collect::<Vec<_>>();
+    if let Ok(connections) = crate::tool_bus::list_tool_connections(store) {
+        for connection in connections
+            .into_iter()
+            .filter(|connection| connection.enabled)
+        {
+            let read_only = connection.scopes.iter().any(|scope| scope == "read_only");
+            if speculative && !read_only {
+                continue;
+            }
+            if let Ok(tools) = crate::tool_bus::list_connection_tools(store, connection.id) {
+                tool_registry.extend(tools.into_iter().map(|tool| {
+                    serde_json::json!({
+                        "name": format!("mcp::{}::{}", connection.name, tool.tool_name),
+                        "description": tool.description,
+                        "action_class": null,
+                        "read_only": read_only,
+                        "connection": connection.name,
+                        "mcp_tool": tool.tool_name,
+                    })
+                }));
+            }
+        }
+    }
     serde_json::json!({
         "loop": JOB_PHASES,
         "goal_contract": goal_contract,
         "speculative": speculative,
         "read_only": speculative,
         "tool_registry": tool_registry,
-        "router_tool_use": ROUTER_TOOL_CALL_PASSTHROUGH,
-        "executor": "deterministic_local_context_v2",
+        "router_tier": "craft",
+        "executor": "craft_router_with_unavailable_provider_fallback",
         "verification_required": true,
         "delivery_contract": "assessment_first_card_with_action_bus_placement_proposal"
     })
@@ -962,6 +1061,7 @@ fn build_plan_json(goal_contract: &str, speculative: bool) -> serde_json::Value 
 
 fn execute_phase(
     store: &TaskStore,
+    router: Option<&ModelRouter>,
     job: &AgentJobDto,
     phase: &str,
     runtime: &RuntimeState,
@@ -996,8 +1096,14 @@ fn execute_phase(
             next.evidence = context.evidence.clone();
             next.observations = vec![
                 format!("read {} task artifact(s)", context.artifact_names.len()),
-                format!("retrieved {} relevant local chunk(s)", context.evidence.len()),
-                format!("read {} recent conversation turn(s)", context.recent_messages.len()),
+                format!(
+                    "retrieved {} relevant local chunk(s)",
+                    context.evidence.len()
+                ),
+                format!(
+                    "read {} recent conversation turn(s)",
+                    context.recent_messages.len()
+                ),
             ];
             (
                 serde_json::json!({
@@ -1021,12 +1127,16 @@ fn execute_phase(
             0,
         ),
         "revise" => {
-            let draft = compose_grounded_deliverable(
+            let draft = compose_routed_deliverable(
+                router,
                 &goal,
                 &next.evidence,
                 next.task_snapshot.as_deref(),
                 &next.applied_steering,
-            );
+            )?;
+            let used_router = router
+                .map(|router| router.tier_available(Tier::Craft))
+                .unwrap_or(false);
             next.draft = Some(draft.clone());
             (
                 serde_json::json!({
@@ -1034,6 +1144,7 @@ fn execute_phase(
                     "draft": draft,
                     "applied_steering": next.applied_steering,
                     "source_chunk_ids": next.evidence.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>(),
+                    "craft_router_used": used_router,
                     "status": "completed"
                 }),
                 0,
@@ -1120,8 +1231,24 @@ fn goal_instruction(raw: &str) -> String {
 
 fn goal_terms(goal: &str, steering: &[String]) -> HashSet<String> {
     const STOP: &[&str] = &[
-        "the", "and", "from", "this", "that", "with", "into", "about", "against", "draft",
-        "revise", "check", "make", "please", "local", "section", "paragraph", "notes",
+        "the",
+        "and",
+        "from",
+        "this",
+        "that",
+        "with",
+        "into",
+        "about",
+        "against",
+        "draft",
+        "revise",
+        "check",
+        "make",
+        "please",
+        "local",
+        "section",
+        "paragraph",
+        "notes",
     ];
     format!("{} {}", goal, steering.join(" "))
         .to_ascii_lowercase()
@@ -1167,14 +1294,21 @@ fn collect_local_context(
                 artifact_id: row.get(1)?,
                 file_name: row.get(2)?,
                 position_index: row.get(3)?,
-                text: row.get::<_, String>(4)?.chars().take(MAX_EVIDENCE_CHARS).collect(),
+                text: row
+                    .get::<_, String>(4)?
+                    .chars()
+                    .take(MAX_EVIDENCE_CHARS)
+                    .collect(),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
         .map(|chunk| {
             let lower = chunk.text.to_ascii_lowercase();
-            let score = terms.iter().filter(|term| lower.contains(term.as_str())).count();
+            let score = terms
+                .iter()
+                .filter(|term| lower.contains(term.as_str()))
+                .count();
             (score, chunk)
         })
         .collect::<Vec<_>>();
@@ -1219,32 +1353,36 @@ fn compose_grounded_deliverable(
     if concise && extracts.len() > 3 {
         extracts.truncate(3);
     }
-    let mut draft = if lower_goal.contains("citation") || lower_goal.contains("bibliograph") {
-        evidence
-            .iter()
-            .map(|chunk| format!("- [{}] {}", chunk.file_name, chunk.text.trim()))
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else if !extracts.is_empty() {
-        if two_paragraphs {
-            let midpoint = extracts.len().div_ceil(2).max(1);
-            let first = extracts[..midpoint].join(" ");
-            let second = if midpoint < extracts.len() {
-                extracts[midpoint..].join(" ")
+    let web_evidence = evidence
+        .iter()
+        .any(|chunk| chunk.file_name.starts_with("https://"));
+    let mut draft =
+        if lower_goal.contains("citation") || lower_goal.contains("bibliograph") || web_evidence {
+            evidence
+                .iter()
+                .map(|chunk| format!("- [{}] {}", chunk.file_name, chunk.text.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else if !extracts.is_empty() {
+            if two_paragraphs {
+                let midpoint = extracts.len().div_ceil(2).max(1);
+                let first = extracts[..midpoint].join(" ");
+                let second = if midpoint < extracts.len() {
+                    extracts[midpoint..].join(" ")
+                } else {
+                    format!("This evidence directly supports the requested focus: {goal}")
+                };
+                format!("{first}\n\n{second}")
             } else {
-                format!("This evidence directly supports the requested focus: {goal}")
-            };
-            format!("{first}\n\n{second}")
+                extracts.join(" ")
+            }
         } else {
-            extracts.join(" ")
-        }
-    } else {
-        format!(
-            "Current task assessment for '{}': {}",
-            goal,
-            snapshot.unwrap_or("no local task snapshot is available")
-        )
-    };
+            format!(
+                "Current task assessment for '{}': {}",
+                goal,
+                snapshot.unwrap_or("no local task snapshot is available")
+            )
+        };
     let generic_steering = steering
         .iter()
         .filter(|message| {
@@ -1261,6 +1399,57 @@ fn compose_grounded_deliverable(
         draft.push_str(&generic_steering.join("; "));
     }
     draft
+}
+
+fn compose_routed_deliverable(
+    router: Option<&ModelRouter>,
+    goal: &str,
+    evidence: &[EvidenceChunk],
+    snapshot: Option<&str>,
+    steering: &[String],
+) -> Result<String> {
+    let Some(router) = router else {
+        return Ok(compose_grounded_deliverable(
+            goal, evidence, snapshot, steering,
+        ));
+    };
+    if !router.tier_available(Tier::Craft) {
+        return Ok(compose_grounded_deliverable(
+            goal, evidence, snapshot, steering,
+        ));
+    }
+    let evidence = evidence
+        .iter()
+        .map(|chunk| {
+            serde_json::json!({
+                "chunk_id": chunk.chunk_id,
+                "file_name": chunk.file_name,
+                "text": chunk.text,
+            })
+        })
+        .collect::<Vec<_>>();
+    let input = serde_json::json!({
+        "goal_contract": goal,
+        "task_snapshot": snapshot,
+        "steering": steering,
+        "evidence": evidence,
+    });
+    let draft = router.generate_with(
+        Tier::Craft,
+        "Produce the requested work using only the supplied local evidence. Follow steering exactly. Do not invent facts, citations, completed actions, or capabilities. Return only the deliverable text.",
+        &input.to_string(),
+        GenerateOptions {
+            temperature: 0.0,
+            max_tokens: Some(2_000),
+            json_object: false,
+            timeout_ms: Some(90_000),
+        },
+    )?;
+    let clean = draft.trim();
+    if clean.is_empty() {
+        return Err(anyhow!("craft-tier router returned an empty deliverable"));
+    }
+    Ok(clean.to_string())
 }
 
 fn verify_with_fresh_context(
@@ -1334,9 +1523,15 @@ fn missing_capability(
             "needed_from_user": "Attach the source PDF."
         }));
     }
-    let requires_local_sources = ["local notes", "local outline", "local draft", "bibliography", "rubric"]
-        .iter()
-        .any(|needle| lower.contains(needle));
+    let requires_local_sources = [
+        "local notes",
+        "local outline",
+        "local draft",
+        "bibliography",
+        "rubric",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
     if requires_local_sources && evidence.is_empty() {
         return Some(serde_json::json!({
             "capability": "local_source_material",
@@ -1357,13 +1552,22 @@ fn budget_exhausted_reason(
         return Some(format!("step limit {} reached", budget.max_steps));
     }
     if runtime.tool_calls.saturating_add(additional_tool_calls) > budget.max_tool_calls {
-        return Some(format!("tool-call limit {} would be exceeded", budget.max_tool_calls));
+        return Some(format!(
+            "tool-call limit {} would be exceeded",
+            budget.max_tool_calls
+        ));
     }
     if runtime.tokens_used.saturating_add(additional_tokens) > budget.max_tokens {
-        return Some(format!("token limit {} would be exceeded", budget.max_tokens));
+        return Some(format!(
+            "token limit {} would be exceeded",
+            budget.max_tokens
+        ));
     }
     if runtime.elapsed_ms >= budget.max_wall_seconds.saturating_mul(1_000) {
-        return Some(format!("wall-time limit {}s reached", budget.max_wall_seconds));
+        return Some(format!(
+            "wall-time limit {}s reached",
+            budget.max_wall_seconds
+        ));
     }
     None
 }
@@ -1410,7 +1614,8 @@ fn load_runtime_state(store: &TaskStore, job_id: i64) -> Result<(RuntimeState, u
     let Some(latest) = checkpoints.last() else {
         return Ok((RuntimeState::default(), 0));
     };
-    let envelope = serde_json::from_str::<serde_json::Value>(&latest.state_json).unwrap_or_default();
+    let envelope =
+        serde_json::from_str::<serde_json::Value>(&latest.state_json).unwrap_or_default();
     let mut runtime = envelope
         .get("runtime_state")
         .cloned()
@@ -1581,16 +1786,25 @@ fn promote_next_queued_job(store: &TaskStore) -> Result<()> {
 /// Drain jobs that have reserved a pending slot. Integration should call this
 /// from a lightweight background worker; it is also deterministic for startup
 /// recovery and tests. Queue promotion remains FIFO.
+#[allow(dead_code)]
 pub fn run_pending_jobs(store: &TaskStore) -> Result<Vec<AgentJobDetailDto>> {
+    run_pending_jobs_internal(store, None)
+}
+
+fn run_pending_jobs_internal(
+    store: &TaskStore,
+    router: Option<&ModelRouter>,
+) -> Result<Vec<AgentJobDetailDto>> {
     let mut completed = Vec::new();
     loop {
         let ids = {
             let conn = store.connect()?;
-            let mut stmt = conn.prepare(
-                "SELECT id FROM jobs WHERE status = ?1 ORDER BY id ASC LIMIT ?2",
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT id FROM jobs WHERE status = ?1 ORDER BY id ASC LIMIT ?2")?;
             let ids = stmt
-                .query_map(params![JOB_STATUS_PENDING, MAX_RUNNING_JOBS], |row| row.get(0))?
+                .query_map(params![JOB_STATUS_PENDING, MAX_RUNNING_JOBS], |row| {
+                    row.get(0)
+                })?
                 .collect::<rusqlite::Result<Vec<i64>>>()?;
             ids
         };
@@ -1598,7 +1812,7 @@ pub fn run_pending_jobs(store: &TaskStore) -> Result<Vec<AgentJobDetailDto>> {
             break;
         }
         for id in ids {
-            completed.push(run_job_to_completion(store, id)?);
+            completed.push(run_job_to_completion_internal(store, router, id)?);
         }
     }
     Ok(completed)
@@ -1886,10 +2100,7 @@ fn get_standing_job(store: &TaskStore, standing_job_id: i64) -> Result<Option<St
     .map_err(Into::into)
 }
 
-fn due_standing_jobs(
-    store: &TaskStore,
-    event_name: Option<&str>,
-) -> Result<Vec<StandingJobDto>> {
+fn due_standing_jobs(store: &TaskStore, event_name: Option<&str>) -> Result<Vec<StandingJobDto>> {
     let conn = store.connect()?;
     let mut jobs = Vec::new();
     if let Some(event_name) = event_name.map(str::trim).filter(|value| !value.is_empty()) {
@@ -1957,7 +2168,9 @@ fn next_daily_run_at(clock: &str) -> Result<String> {
         }
         day += Duration::days(1);
     }
-    Err(anyhow!("could not resolve local daily schedule '{clock}' across DST"))
+    Err(anyhow!(
+        "could not resolve local daily schedule '{clock}' across DST"
+    ))
 }
 
 fn update_standing_job_after_run(
@@ -2184,6 +2397,50 @@ mod tests {
     }
 
     #[test]
+    fn d5_craft_router_falls_back_only_when_effective_provider_is_unavailable() {
+        let mut config = crate::model_router::RouterConfig::default();
+        config.craft = crate::model_router::TierConfig {
+            provider: crate::model_router::ProviderKind::Local,
+            model: crate::local_runtime::LOCAL_REASONING_MODEL_ID.to_string(),
+        };
+        let router = ModelRouter::new(config);
+        assert!(!router.tier_available(Tier::Craft));
+
+        let fallback = compose_routed_deliverable(
+            Some(&router),
+            "summarize",
+            &[],
+            Some("local snapshot"),
+            &[],
+        )
+        .unwrap();
+        assert!(fallback.contains("local snapshot"));
+    }
+
+    #[test]
+    fn d5_connected_mcp_tools_enter_runtime_registry_with_speculation_scope() {
+        let (_dir, store) = store();
+        let connection = crate::tool_bus::add_tool_connection(
+            &store,
+            "research",
+            crate::tool_bus::TRANSPORT_LOOPBACK,
+            "loopback://",
+            &[],
+        )
+        .unwrap();
+        crate::tool_bus::register_connection_tools(
+            &store,
+            connection.id,
+            &[("search".to_string(), "search sources".to_string())],
+        )
+        .unwrap();
+        let normal = build_plan_json(&store, "research", false).to_string();
+        let speculative = build_plan_json(&store, "research", true).to_string();
+        assert!(normal.contains("mcp::research::search"));
+        assert!(!speculative.contains("mcp::research::search"));
+    }
+
+    #[test]
     fn d5_unattended_job_runs_plan_act_observe_revise_verify_deliver() {
         let (_dir, store) = store();
         let task = store.create_task("d5").unwrap();
@@ -2317,7 +2574,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(detail.job.status, JOB_STATUS_BUDGET_EXHAUSTED);
-        assert!(detail.job.error_message.unwrap().contains("budget exhausted"));
+        assert!(detail
+            .job
+            .error_message
+            .unwrap()
+            .contains("budget exhausted"));
     }
 
     #[test]
@@ -2328,9 +2589,19 @@ mod tests {
             &store,
             task.id,
             "notes.md",
-            &["Evidence one supports the claim.", "Evidence two limits the claim."],
+            &[
+                "Evidence one supports the claim.",
+                "Evidence two limits the claim.",
+            ],
         );
-        let job = create_job(&store, task.id, "Draft a short note from local notes.", None, false).unwrap();
+        let job = create_job(
+            &store,
+            task.id,
+            "Draft a short note from local notes.",
+            None,
+            false,
+        )
+        .unwrap();
 
         enqueue_job_steering(&store, job.id, "Make it two paragraphs.").unwrap();
         let detail = run_job_to_completion(&store, job.id).unwrap();
@@ -2364,7 +2635,8 @@ mod tests {
         let task = store.create_task("d6 resume").unwrap();
         let job = create_job(&store, task.id, "Resume the interrupted job.", None, false).unwrap();
         update_job_plan_and_status(&store, job.id, "[]", JOB_STATUS_RUNNING).unwrap();
-        let execution = execute_phase(&store, &job, "plan", &RuntimeState::default(), &[]).unwrap();
+        let execution =
+            execute_phase(&store, None, &job, "plan", &RuntimeState::default(), &[]).unwrap();
         let mut state = execution.next_state;
         state.completed_steps = 1;
         state.tokens_used = execution.token_cost;
@@ -2384,15 +2656,8 @@ mod tests {
         // Simulate a crash after the next step was inserted and marked running,
         // but before it completed or checkpointed. Recovery must reuse the row,
         // not violate UNIQUE(job_id, step_index).
-        let interrupted = recover_or_create_job_step(
-            &store,
-            job.id,
-            1,
-            "act",
-            phase_title("act"),
-            "{}",
-        )
-        .unwrap();
+        let interrupted =
+            recover_or_create_job_step(&store, job.id, 1, "act", phase_title("act"), "{}").unwrap();
         start_job_step(&store, interrupted.id).unwrap();
 
         let detail = run_job_to_completion(&store, job.id).unwrap();
@@ -2543,7 +2808,9 @@ mod tests {
         let task = store.create_task("d8 speculative").unwrap();
 
         // the speculative registry drops every mutating tool.
-        assert!(speculative_tool_registry().iter().all(|tool| tool.read_only));
+        assert!(speculative_tool_registry()
+            .iter()
+            .all(|tool| tool.read_only));
         assert!(speculative_tool_registry().len() < tool_registry_v1().len());
 
         let job = create_job(&store, task.id, "Prep the methods answer.", None, true).unwrap();

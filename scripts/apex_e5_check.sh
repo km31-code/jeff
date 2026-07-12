@@ -23,6 +23,8 @@ echo "--- apex e5 drive/docs remote read check ---"
 test -f "$DRIVE" || fail "drive_core.rs missing"
 grep -q "CREATE TABLE IF NOT EXISTS remote_ingested_docs" "$STORE" || fail "remote_ingested_docs table missing"
 grep -q "pub fn ingest_remote_doc" "$DRIVE" || fail "on-demand ingestion missing"
+grep -q "pub fn pull_remote_doc" "$DRIVE" || fail "connected Drive/Docs pull missing"
+grep -q "invoke_first_enabled_tool" "$DRIVE" || fail "Drive/Docs does not use the governed MCP bus"
 grep -q "pub fn list_remote_docs" "$DRIVE" || fail "remote doc listing missing"
 grep -q "pub fn remove_remote_doc" "$DRIVE" || fail "per-item removal missing"
 grep -q "provenance" "$DRIVE" || fail "provenance tagging missing"
@@ -36,22 +38,28 @@ pass "cargo check passes without warnings"
 
 for t in \
   e5_ingest_remote_doc_grounds_with_provenance \
-  e5_removal_purges_ingested_chunks; do
+  e5_removal_purges_ingested_chunks \
+  e5_connected_drive_search_and_docs_export_ingest_trusted_content; do
   grep -q "fn $t" "$DRIVE" || fail "expected e5 test $t is missing"
 done
-E5_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test e5_ --quiet 2>&1)
+if ! E5_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test e5_ --quiet 2>&1); then
+  echo "$E5_TEST_OUT"
+  fail "e5 tests failed"
+fi
 echo "$E5_TEST_OUT" | grep -q "test result: ok" || { echo "$E5_TEST_OUT"; fail "e5 tests failed"; }
 echo "$E5_TEST_OUT" | grep -q "FAILED" && { echo "$E5_TEST_OUT"; fail "e5 tests failed"; }
 pass "e5 ingest-provenance + purge-on-removal tests pass"
 
 # 3. Commands + Privacy Center surface with per-item removal.
-for cmd in ingest_remote_doc list_remote_docs remove_remote_doc; do
+for cmd in pull_remote_doc list_remote_docs remove_remote_doc; do
   grep -q "pub fn $cmd" "$COMMANDS" || fail "$cmd command missing"
   grep -q "commands::$cmd" "$MAIN" || fail "$cmd not registered"
 done
 grep -q "listRemoteDocs" "$TAURI_CLIENT" || fail "frontend remote doc binding missing"
+grep -q "pullRemoteDoc" "$TAURI_CLIENT" || fail "frontend connected remote-doc pull binding missing"
 grep -q "privacy-surface-remote-docs" "$APP_TSX" || fail "Privacy Center remote docs surface missing"
 grep -q "remote-doc-remove" "$APP_TSX" || fail "per-item removal control missing"
+grep -q "remote-doc-pull" "$APP_TSX" || fail "connected remote-doc pull control missing"
 pass "commands and Privacy Center remote-docs surface (with removal) are wired"
 
 FRONTEND_LINT_OUT=$(cd "$DESKTOP" && npm run lint 2>&1)
@@ -63,7 +71,12 @@ echo "$FRONTEND_TEST_OUT" | grep -qE "Test Files.*passed" || { echo "$FRONTEND_T
 echo "$FRONTEND_TEST_OUT" | grep -qE "[0-9]+ failed" && { echo "$FRONTEND_TEST_OUT"; fail "frontend tests failed"; }
 pass "frontend tests pass"
 
-bash "$ROOT_DIR/scripts/apex_e4_check.sh" >/dev/null 2>&1 || fail "apex e4 calendar gate regressed"
-pass "apex e4 calendar gate still passes"
+if [ "${JEFF_SKIP_ADJACENT_GATES:-0}" != "1" ]; then
+  if ! ADJACENT_OUT=$(JEFF_SKIP_ADJACENT_GATES=1 bash "$ROOT_DIR/scripts/apex_e4_check.sh" 2>&1); then
+    echo "$ADJACENT_OUT"
+    fail "apex e4 calendar gate regressed"
+  fi
+  pass "apex e4 calendar gate still passes"
+fi
 
 echo "--- apex e5 check passed ---"

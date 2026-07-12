@@ -231,6 +231,7 @@ pub enum ProviderKind {
     Local,
     OpenAi,
     Anthropic,
+    Bundled,
 }
 
 impl ProviderKind {
@@ -239,15 +240,11 @@ impl ProviderKind {
             ProviderKind::Local => "local",
             ProviderKind::OpenAi => "openai",
             ProviderKind::Anthropic => "anthropic",
+            ProviderKind::Bundled => BUNDLED_PROVIDER_LABEL,
         }
     }
 }
 
-// apex e6: bundled inference is delivered as an OpenAI-compatible metered relay.
-// When bundled mode is selected and the relay endpoint is configured, the router
-// points its OpenAI provider at the relay with a scoped token (no user key).
-// Live relay dispatch + token issuance are env-gated.
-#[allow(dead_code)]
 pub const BUNDLED_PROVIDER_LABEL: &str = "bundled";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +417,16 @@ impl ModelRouter {
         self.local_runtime.is_some()
             || crate::secrets::resolve_openai_api_key().api_key.is_some()
             || crate::secrets::resolve_anthropic_api_key().is_some()
+            || self.bundled_credentials().is_ok()
+    }
+
+    pub fn tier_available(&self, tier: Tier) -> bool {
+        match self.resolve(tier).provider {
+            ProviderKind::Local => self.local_runtime.is_some(),
+            ProviderKind::OpenAi => crate::secrets::resolve_openai_api_key().api_key.is_some(),
+            ProviderKind::Anthropic => crate::secrets::resolve_anthropic_api_key().is_some(),
+            ProviderKind::Bundled => self.bundled_credentials().is_ok(),
+        }
     }
 
     // resolves the effective provider/model for a tier, applying the
@@ -427,6 +434,19 @@ impl ModelRouter {
     // back to openai with a logged notice rather than failing.
     pub fn resolve(&self, tier: Tier) -> TierConfig {
         let configured = self.config().for_tier(tier).clone();
+        if configured.provider != ProviderKind::Local
+            && self
+                .store
+                .as_ref()
+                .map(crate::onboarding::get_inference_mode)
+                .as_deref()
+                == Some(crate::onboarding::INFERENCE_MODE_BUNDLED)
+        {
+            return TierConfig {
+                provider: ProviderKind::Bundled,
+                model: OPENAI_FALLBACK_MODEL.to_string(),
+            };
+        }
         match configured.provider {
             ProviderKind::Anthropic => {
                 if crate::secrets::resolve_anthropic_api_key().is_some() {
@@ -445,7 +465,30 @@ impl ModelRouter {
             }
             ProviderKind::Local => configured,
             ProviderKind::OpenAi => configured,
+            ProviderKind::Bundled => configured,
         }
+    }
+
+    fn bundled_credentials(&self) -> Result<(String, String)> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| anyhow!("bundled inference requires a persistent store"))?;
+        if !crate::onboarding::bundled_inference_configured(store) {
+            return Err(anyhow!(
+                "bundled inference token is missing, expired, or unscoped"
+            ));
+        }
+        let endpoint = crate::onboarding::get_bundled_relay_endpoint(store)
+            .ok_or_else(|| anyhow!("bundled relay endpoint is missing"))?;
+        let completion_url = reqwest::Url::parse(&endpoint)
+            .context("invalid bundled relay endpoint")?
+            .join("v1/chat/completions")
+            .context("failed to build bundled completion endpoint")?
+            .to_string();
+        let token = crate::secrets::resolve_bundled_inference_token()
+            .ok_or_else(|| anyhow!("bundled inference token is missing"))?;
+        Ok((completion_url, token))
     }
 
     fn log_usage(&self, tier: Tier, cfg: &TierConfig, usage: &LlmUsage, purpose: &str) {
@@ -518,6 +561,7 @@ impl ModelRouter {
     }
 
     fn generate_blocking_with_config(
+        &self,
         cfg: &TierConfig,
         request: &ModelRequest,
         system: &str,
@@ -546,6 +590,20 @@ impl ModelRouter {
             ProviderKind::Local => {
                 Err(anyhow!("local provider cannot be used as a cloud fallback"))
             }
+            ProviderKind::Bundled => {
+                let (endpoint, token) = self.bundled_credentials()?;
+                crate::providers::openai_generate_blocking_with_credentials(
+                    &endpoint,
+                    &token,
+                    &cfg.model,
+                    system,
+                    user,
+                    request.temperature,
+                    request.max_tokens,
+                    json_object,
+                    request.timeout_ms,
+                )
+            }
         }
     }
 
@@ -558,7 +616,19 @@ impl ModelRouter {
     }
 
     fn local_cloud_fallback(&self) -> Option<TierConfig> {
-        if crate::secrets::resolve_openai_api_key().api_key.is_some() {
+        if self
+            .store
+            .as_ref()
+            .map(crate::onboarding::get_inference_mode)
+            .as_deref()
+            == Some(crate::onboarding::INFERENCE_MODE_BUNDLED)
+            && self.bundled_credentials().is_ok()
+        {
+            Some(TierConfig {
+                provider: ProviderKind::Bundled,
+                model: OPENAI_FALLBACK_MODEL.to_string(),
+            })
+        } else if crate::secrets::resolve_openai_api_key().api_key.is_some() {
             Some(TierConfig {
                 provider: ProviderKind::OpenAi,
                 model: OPENAI_FALLBACK_MODEL.to_string(),
@@ -611,8 +681,8 @@ impl ModelRouter {
         let cfg = self.resolve(request.tier);
         let json_object = request.json_schema.is_some();
         let (effective_cfg, text, usage) = match cfg.provider {
-            ProviderKind::OpenAi | ProviderKind::Anthropic => {
-                let (text, usage) = Self::generate_blocking_with_config(
+            ProviderKind::OpenAi | ProviderKind::Anthropic | ProviderKind::Bundled => {
+                let (text, usage) = self.generate_blocking_with_config(
                     &cfg,
                     &request,
                     &system,
@@ -646,7 +716,7 @@ impl ModelRouter {
                             fallback.model,
                             err
                         );
-                        let (text, usage) = Self::generate_blocking_with_config(
+                        let (text, usage) = self.generate_blocking_with_config(
                             &fallback,
                             &request,
                             &system,
@@ -788,6 +858,22 @@ impl ModelRouter {
                 })
                 .await?
             }
+            ProviderKind::Bundled => {
+                let system = join_system_blocks(&system_blocks);
+                let (endpoint, token) = self.bundled_credentials()?;
+                crate::providers::openai_generate_async_with_credentials(
+                    &endpoint,
+                    &token,
+                    &cfg.model,
+                    &system,
+                    user,
+                    options.temperature,
+                    options.max_tokens,
+                    options.json_object,
+                    options.timeout_ms,
+                )
+                .await?
+            }
         };
         self.log_usage(effective_tier, &cfg, &usage, purpose);
         Ok(text)
@@ -852,6 +938,15 @@ impl ModelRouter {
             }
             ProviderKind::Anthropic => {
                 anthropic::stream(cfg.model.clone(), system_blocks, user.to_string(), cancel)
+            }
+            ProviderKind::Bundled => {
+                let (endpoint, token) = self.bundled_credentials()?;
+                crate::reasoning::OpenAiStreamingReasoningProvider::with_endpoint_and_token(
+                    cfg.model.clone(),
+                    endpoint,
+                    token,
+                )
+                .stream_response(&system, user, cancel)
             }
         }?;
         self.log_usage(effective_tier, &cfg, &LlmUsage::default(), purpose);
@@ -928,6 +1023,7 @@ impl ModelRouter {
                 CLASSIFY_TIMEOUT_OPENAI_MS,
             ),
             ProviderKind::Anthropic => CLASSIFY_TIMEOUT_ANTHROPIC_MS,
+            ProviderKind::Bundled => CLASSIFY_TIMEOUT_ANTHROPIC_MS,
             ProviderKind::Local => CLASSIFY_TIMEOUT_OPENAI_MS,
         };
         let request = ModelRequest::new(Tier::Reflex, crate::classifier::SYSTEM_PROMPT, trimmed)
@@ -940,7 +1036,7 @@ impl ModelRouter {
         let system = join_system_blocks(&request.system_blocks);
         let user = Self::request_user_text(&request)?;
         let (raw, usage) =
-            Self::generate_blocking_with_config(cfg, &request, &system, &user, true)?;
+            self.generate_blocking_with_config(cfg, &request, &system, &user, true)?;
         self.log_usage(Tier::Reflex, cfg, &usage, "intent_classification");
         Ok(raw)
     }
@@ -1050,6 +1146,21 @@ mod tests {
             config.reflex.model,
             crate::local_runtime::LOCAL_REASONING_MODEL_ID
         );
+    }
+
+    #[test]
+    fn e6_bundled_mode_routes_every_cloud_tier_through_relay_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        crate::onboarding::set_inference_mode(&store, crate::onboarding::INFERENCE_MODE_BUNDLED)
+            .unwrap();
+        let router = ModelRouter::from_store(&store);
+        assert_eq!(router.resolve(Tier::Reflex).provider, ProviderKind::Local);
+        for tier in [Tier::Conversation, Tier::Judgment, Tier::Craft] {
+            let resolved = router.resolve(tier);
+            assert_eq!(resolved.provider, ProviderKind::Bundled);
+            assert_eq!(resolved.model, OPENAI_FALLBACK_MODEL);
+        }
     }
 
     #[test]
