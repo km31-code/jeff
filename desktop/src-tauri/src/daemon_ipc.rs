@@ -284,19 +284,15 @@ mod tests {
     }
 
     fn spawn_server(path: &Path) -> EventSink {
+        // bind() creates and listens on the socket synchronously, so it is
+        // connectable the moment this returns -- no probe connection (a probe
+        // would register a dead client in the event sink and race the real
+        // listener's registration). serve() accepts on its own thread.
         let server = IpcServer::bind(path).expect("bind server");
         let sink = server.event_sink();
         thread::spawn(move || {
             let _ = server.serve(Arc::new(SkeletonHandler));
         });
-        // wait for the socket to be connectable.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while UnixStream::connect(path).is_err() {
-            if Instant::now() > deadline {
-                panic!("server never became connectable");
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
         sink
     }
 
