@@ -3998,3 +3998,59 @@ mod tests {
         assert_eq!(normalize_message_source(Some("".to_string())), "text");
     }
 }
+
+// apex f1b-3b: background daemon control (Privacy Center).
+// off by default. enabling takes effect on the next launch -- starting the
+// daemon while this app's schedulers are already running would double-run them
+// against the shared store. disabling terminates a running daemon immediately,
+// so the kill switch is real.
+fn daemon_socket(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|err| format!("failed to resolve app data dir: {err}"))?;
+    Ok(crate::daemon_ipc::default_socket_path(&dir))
+}
+
+#[tauri::command]
+pub fn get_background_daemon(
+    app: tauri::AppHandle,
+    state: State<'_, JeffState>,
+) -> Result<crate::models::BackgroundDaemonDto, String> {
+    let socket = daemon_socket(&app)?;
+    let enabled = crate::daemon_supervisor::is_enabled(&state.store);
+    let running = crate::daemon_client::probe(&socket).owns_background_schedulers();
+    Ok(crate::models::BackgroundDaemonDto {
+        enabled,
+        running,
+        pending_restart: enabled && !running,
+    })
+}
+
+#[tauri::command]
+pub fn set_background_daemon_enabled(
+    app: tauri::AppHandle,
+    state: State<'_, JeffState>,
+    enabled: bool,
+) -> Result<crate::models::BackgroundDaemonDto, String> {
+    let socket = daemon_socket(&app)?;
+    crate::daemon_supervisor::set_enabled(&state.store, enabled)
+        .map_err(|err| format!("failed to save the setting: {err}"))?;
+
+    if !enabled {
+        // kill switch: stop the background process now, not next launch.
+        crate::daemon_supervisor::stop(&socket);
+        return Ok(crate::models::BackgroundDaemonDto {
+            enabled: false,
+            running: false,
+            pending_restart: false,
+        });
+    }
+
+    let running = crate::daemon_client::probe(&socket).owns_background_schedulers();
+    Ok(crate::models::BackgroundDaemonDto {
+        enabled: true,
+        running,
+        pending_restart: !running,
+    })
+}

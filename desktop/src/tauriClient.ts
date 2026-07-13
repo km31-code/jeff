@@ -2081,3 +2081,20 @@ export async function listLiveEditReceipts(taskId: number): Promise<LiveEditRece
 export async function getPendingLiveEdits(): Promise<PendingLiveEditDto[]> {
   return invoke<PendingLiveEditDto[]>("get_pending_live_edits");
 }
+
+// apex f1b-3b: background daemon (Privacy Center control).
+export interface BackgroundDaemonDto {
+  enabled: boolean;
+  running: boolean;
+  pending_restart: boolean;
+}
+
+export async function getBackgroundDaemon(): Promise<BackgroundDaemonDto> {
+  return invoke<BackgroundDaemonDto>("get_background_daemon");
+}
+
+export async function setBackgroundDaemonEnabled(
+  enabled: boolean,
+): Promise<BackgroundDaemonDto> {
+  return invoke<BackgroundDaemonDto>("set_background_daemon_enabled", { enabled });
+}

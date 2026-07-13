@@ -27,6 +27,7 @@ pub mod crisis_core;
 pub mod daemon_client;
 pub mod daemon_host;
 pub mod daemon_ipc;
+pub mod daemon_supervisor;
 pub mod document_model;
 pub mod drive_core;
 pub mod embedding;

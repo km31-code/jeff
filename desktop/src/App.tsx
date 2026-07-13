@@ -139,6 +139,9 @@ import {
   DataClearResultDto,
   SpeculationCacheDto,
   setSpeculationEnabled,
+  getBackgroundDaemon,
+  setBackgroundDaemonEnabled,
+  type BackgroundDaemonDto,
   listSpeculationCache,
   discardSpeculationCacheEntry,
   CapabilityGapDto,
@@ -449,6 +452,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   // phase 21: privacy and trust control center
   const [privacyCenterOpen, setPrivacyCenterOpen] = useState(false);
   const [privacyDashboard, setPrivacyDashboard] = useState<PrivacyCenterDashboardDto | null>(null);
+  const [backgroundDaemon, setBackgroundDaemon] = useState<BackgroundDaemonDto | null>(null);
   const [speculationCache, setSpeculationCache] = useState<SpeculationCacheDto[]>([]);
   const [capabilityGaps, setCapabilityGaps] = useState<CapabilityGapDto[]>([]);
   const [customTools, setCustomTools] = useState<CustomToolDto[]>([]);
@@ -1221,6 +1225,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
         listRemoteDocs().catch(() => [])
       ]);
       setPrivacyDashboard(dashboard);
+      setBackgroundDaemon(await getBackgroundDaemon().catch(() => null));
       setSpeculationCache(speculation);
       setCapabilityGaps(gaps);
       setCustomTools(tools);
@@ -2806,6 +2811,14 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       await refreshActionCenterState(activeTask.id);
     } catch (error) {
       setOperationError("Failed to run due standing jobs", error);
+    }
+  }
+
+  async function handleToggleBackgroundDaemon(enabled: boolean) {
+    try {
+      setBackgroundDaemon(await setBackgroundDaemonEnabled(enabled));
+    } catch (error) {
+      setOperationError("Failed to update the background daemon", error);
     }
   }
 
@@ -4625,6 +4638,28 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                         </div>
                       </li>
 
+                      <li data-testid="privacy-surface-background-daemon">
+                        <label className="toggle-row">
+                          <span>Background daemon</span>
+                          <input
+                            type="checkbox"
+                            checked={backgroundDaemon?.enabled ?? false}
+                            onChange={(event) =>
+                              void handleToggleBackgroundDaemon(event.target.checked)
+                            }
+                            data-testid="privacy-toggle-background-daemon"
+                          />
+                        </label>
+                        <p className="task-meta">
+                          Keeps standing jobs, queued work, and speculation running when Jeff is
+                          closed. Off by default. Turning it off stops the background process now.
+                          {backgroundDaemon?.running
+                            ? " Running."
+                            : backgroundDaemon?.pending_restart
+                              ? " Starts the next time you open Jeff."
+                              : ""}
+                        </p>
+                      </li>
                       <li data-testid="privacy-surface-speculation">
                         <label className="toggle-row">
                           <span>Speculation</span>

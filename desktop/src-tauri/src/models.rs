@@ -1062,3 +1062,15 @@ pub struct PendingLiveEditDto {
     pub timestamp: String,
     pub status: String,
 }
+
+// apex f1b-3b: the Privacy Center's view of the background daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackgroundDaemonDto {
+    // the user's setting (off by default).
+    pub enabled: bool,
+    // whether a daemon is actually up and owns the background schedulers.
+    pub running: bool,
+    // enabling takes effect on the next launch: starting a daemon while this
+    // app's schedulers are already running would double-run them.
+    pub pending_restart: bool,
+}

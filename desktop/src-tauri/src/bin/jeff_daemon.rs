@@ -53,6 +53,17 @@ impl IpcHandler for DaemonHandler {
                 "core_running": self.core_running,
                 "pid": std::process::id(),
             })),
+            // the app's kill switch: turning the Privacy Center control off must
+            // actually terminate the background process, not just ignore it.
+            "shutdown" => {
+                eprintln!("[jeff-daemon] shutdown requested; exiting");
+                std::thread::spawn(|| {
+                    // let the response flush before the process goes away.
+                    std::thread::sleep(Duration::from_millis(100));
+                    std::process::exit(0);
+                });
+                Ok(serde_json::json!("shutting down"))
+            }
             other => Err(format!("unknown method: {other}")),
         }
     }

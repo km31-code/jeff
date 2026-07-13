@@ -12,7 +12,7 @@ use jeff_desktop::store::TaskStore;
 use jeff_desktop::typing_activity::{self, TypingActivityState};
 use jeff_desktop::voice::OpenAiVoiceProvider;
 use jeff_desktop::{
-    daemon_client, daemon_ipc,
+    daemon_ipc, daemon_supervisor,
     awareness_core, commands, core_runtime, crisis, local_runtime, login_item, model_router,
     subtask, wake_word,
 };
@@ -290,7 +290,14 @@ fn main() {
             // against the shared store. if the daemon is absent, unreachable, or
             // speaks a different protocol, the app runs the full core exactly as
             // it did before, and nothing is lost.
-            let daemon = daemon_client::probe(&daemon_ipc::default_socket_path(&app_local_data_dir));
+            // apex f1b-3b: the app owns the daemon's lifecycle. if the user
+            // enabled the background daemon in the Privacy Center, start it (or
+            // adopt the one already running). it defaults to off.
+            let daemon_socket = daemon_ipc::default_socket_path(&app_local_data_dir);
+            let daemon = daemon_supervisor::ensure_running(
+                &app.state::<JeffState>().store,
+                &daemon_socket,
+            );
             let profile = if daemon.owns_background_schedulers() {
                 eprintln!("[jeff] daemon is hosting the core; running as client");
                 core_runtime::CoreProfile::AppClient
@@ -563,6 +570,9 @@ fn main() {
             commands::set_content_observation_enabled,
             commands::get_content_observation_enabled,
             commands::clear_content_observation,
+            // apex f1b-3b: background daemon control
+            commands::get_background_daemon,
+            commands::set_background_daemon_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Jeff desktop app");

@@ -39,7 +39,12 @@ test -f "$CLIENT" || fail "daemon_client.rs missing"
 grep -q "pub fn probe" "$CLIENT" || fail "daemon probe missing"
 grep -q "fn owns_background_schedulers" "$CLIENT" || fail "ownership predicate missing"
 grep -q "protocol_matches" "$CLIENT" || fail "probe does not check the protocol version"
-grep -q "daemon_client::probe" "$MAIN" || fail "app does not probe for a daemon"
+# f1b-3b: the app reaches the daemon through the supervisor, which probes (and
+# starts it when the user has enabled it).
+grep -qE "daemon_client::probe|daemon_supervisor::ensure_running" "$MAIN" \
+  || fail "app does not probe for a daemon"
+grep -q "daemon_client::probe" "$SRC/daemon_supervisor.rs" \
+  || fail "supervisor does not probe the daemon"
 grep -q "CoreProfile::AppClient" "$MAIN" || fail "app never defers to the daemon"
 grep -q "CoreProfile::Full" "$MAIN" || fail "app has no standalone fallback"
 pass "app probes the daemon and falls back to the full core when it is absent"
