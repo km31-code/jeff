@@ -22,6 +22,7 @@ use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::ambient::AmbientState;
+use crate::models::CalendarEventDto;
 use crate::state::{CalendarState, ContextState, JeffState};
 use crate::typing_activity::TypingActivityState;
 use crate::{
@@ -44,10 +45,24 @@ pub trait CoreHost: Send + Sync {
     fn with_context_state(&self, f: &mut dyn FnMut(&ContextState));
     fn with_calendar_state(&self, f: &mut dyn FnMut(&CalendarState));
     fn with_typing_state(&self, f: &mut dyn FnMut(&TypingActivityState));
-    // transitional bridge (f1b-1b): returns the in-process AppHandle so loops can
-    // call helper modules not yet ported to CoreHost. a headless daemon host
-    // returns None; those helpers must be decoupled before f1b-3.
-    fn tauri_app(&self) -> Option<AppHandle>;
+    // f1b-1b: the world-model side effects the loops trigger, expressed as
+    // tauri-agnostic intents. TauriHost implements them via the AppHandle-based
+    // helpers (awareness_core, crisis, workload, proactive, poll helpers); a
+    // headless daemon host implements them against its own owned state and IPC.
+    // no AppHandle appears in the seam, so the core is fully tauri-agnostic.
+    fn request_awareness_update(&self, trigger: awareness_core::SnapshotTrigger, task_id: i64);
+    fn fire_meeting_imminent(
+        &self,
+        task_id: i64,
+        event: &CalendarEventDto,
+        movement_toward_event: bool,
+    );
+    fn fire_deadline_collision(&self, task_id: i64, minutes_until: i64, far_from_done: bool);
+    fn check_stale_tasks(&self, quiet: bool);
+    // start the side-channel background tasks (proactive monitor + content,
+    // goal, memory, consolidation, and update polls). these are detached; the
+    // host owns their lifetime.
+    fn spawn_side_tasks(&self);
 }
 
 // the in-process host: delegates every capability to the Tauri AppHandle, so the
@@ -92,8 +107,47 @@ impl CoreHost for TauriHost {
             f(&state);
         }
     }
-    fn tauri_app(&self) -> Option<AppHandle> {
-        Some(self.app.clone())
+    fn request_awareness_update(&self, trigger: awareness_core::SnapshotTrigger, task_id: i64) {
+        awareness_core::spawn_awareness_update(&self.app, trigger, task_id);
+    }
+    fn fire_meeting_imminent(
+        &self,
+        task_id: i64,
+        event: &CalendarEventDto,
+        movement_toward_event: bool,
+    ) {
+        crisis::maybe_fire_meeting_imminent(&self.app, task_id, event, movement_toward_event);
+    }
+    fn fire_deadline_collision(&self, task_id: i64, minutes_until: i64, far_from_done: bool) {
+        crisis::maybe_fire_deadline_collision(&self.app, task_id, minutes_until, far_from_done);
+    }
+    fn check_stale_tasks(&self, quiet: bool) {
+        if let Some(state) = self.app.try_state::<JeffState>() {
+            let _ = workload::check_stale_task_notifications(&state.store, &self.app, quiet);
+        }
+    }
+    fn spawn_side_tasks(&self) {
+        proactive::spawn_ambient_monitor(self.app.clone());
+        let app = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::spawn_content_observation_poll(app).await;
+        });
+        let app = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::spawn_goal_extraction_poll(app).await;
+        });
+        let app = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::spawn_memory_session_summary_poll(app).await;
+        });
+        let app = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::spawn_memory_consolidation_poll(app).await;
+        });
+        let app = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::perform_update_check(app).await;
+        });
     }
 }
 
@@ -146,21 +200,13 @@ pub fn start(host: Arc<dyn CoreHost>) -> CoreHandle {
     joins.push(spawn_typing_activity_sync(host.clone(), shutdown.clone()));
     joins.push(spawn_calendar_poll(host.clone(), shutdown.clone()));
     joins.push(spawn_stale_task_check(host.clone(), shutdown.clone()));
-
-    // phase 27: the proactive ambient monitor self-spawns its own task. still
-    // AppHandle-coupled (f1b-1b), so it is started through the bridge.
-    if let Some(app) = host.tauri_app() {
-        proactive::spawn_ambient_monitor(app);
-    }
-
-    joins.push(spawn_content_observation(host.clone()));
-    joins.push(spawn_goal_extraction(host.clone()));
-    joins.push(spawn_memory_session_summary(host.clone()));
-    joins.push(spawn_memory_consolidation(host.clone()));
-    joins.push(spawn_update_check(host.clone(), shutdown.clone()));
     joins.push(spawn_job_resume(host.clone(), shutdown.clone()));
     joins.push(spawn_standing_job_scheduler(host.clone(), shutdown.clone()));
-    joins.push(spawn_speculation_scheduler(host, shutdown.clone()));
+    joins.push(spawn_speculation_scheduler(host.clone(), shutdown.clone()));
+
+    // proactive ambient monitor + content/goal/memory/consolidation/update polls
+    // are detached side tasks whose lifetime the host owns.
+    host.spawn_side_tasks();
 
     CoreHandle { shutdown, joins }
 }
@@ -252,13 +298,10 @@ fn spawn_active_window_context_poll(host: Arc<dyn CoreHost>, shutdown: CoreShutd
                         task_id = s.store.get_active_task().ok().flatten().map(|t| t.id);
                     });
                     if let Some(task_id) = task_id {
-                        if let Some(app) = host.tauri_app() {
-                            awareness_core::spawn_awareness_update(
-                                &app,
-                                awareness_core::SnapshotTrigger::WindowSwitch,
-                                task_id,
-                            );
-                        }
+                        host.request_awareness_update(
+                            awareness_core::SnapshotTrigger::WindowSwitch,
+                            task_id,
+                        );
                     }
                 }
 
@@ -394,43 +437,30 @@ fn spawn_calendar_poll(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinH
                 active_task_id = s.store.get_active_task().ok().flatten().map(|t| t.id);
             });
             if let Some(task_id) = active_task_id {
-                if let Some(app) = host.tauri_app() {
-                    awareness_core::spawn_awareness_update(
-                        &app,
-                        awareness_core::SnapshotTrigger::CalendarEvent,
-                        task_id,
-                    );
-                    if let Some(event) = next_event.as_ref() {
-                        crisis::maybe_fire_meeting_imminent(
-                            &app,
-                            task_id,
-                            event,
-                            movement_toward_event,
-                        );
-                        let mut far_from_done = false;
-                        host.with_jeff_state(&mut |s| {
-                            far_from_done = s
-                                .awareness_core
-                                .snapshot_immediate()
-                                .work_understanding
-                                .as_ref()
-                                .map(|understanding| {
-                                    !understanding.weak_points.is_empty()
-                                        || understanding
-                                            .stuck_signal
-                                            .as_deref()
-                                            .map(|value| !value.trim().is_empty())
-                                            .unwrap_or(false)
-                                })
-                                .unwrap_or(false);
-                        });
-                        crisis::maybe_fire_deadline_collision(
-                            &app,
-                            task_id,
-                            event.minutes_until,
-                            far_from_done,
-                        );
-                    }
+                host.request_awareness_update(
+                    awareness_core::SnapshotTrigger::CalendarEvent,
+                    task_id,
+                );
+                if let Some(event) = next_event.as_ref() {
+                    host.fire_meeting_imminent(task_id, event, movement_toward_event);
+                    let mut far_from_done = false;
+                    host.with_jeff_state(&mut |s| {
+                        far_from_done = s
+                            .awareness_core
+                            .snapshot_immediate()
+                            .work_understanding
+                            .as_ref()
+                            .map(|understanding| {
+                                !understanding.weak_points.is_empty()
+                                    || understanding
+                                        .stuck_signal
+                                        .as_deref()
+                                        .map(|value| !value.trim().is_empty())
+                                        .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+                    });
+                    host.fire_deadline_collision(task_id, event.minutes_until, far_from_done);
                 }
             }
 
@@ -447,64 +477,7 @@ fn spawn_stale_task_check(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> Jo
         if shutdown.is_stopped() {
             return;
         }
-        let quiet = host.is_quiet_mode();
-        if let Some(app) = host.tauri_app() {
-            host.with_jeff_state(&mut |s| {
-                let _ = workload::check_stale_task_notifications(&s.store, &app, quiet);
-            });
-        }
-    })
-}
-
-// phase 31: content observation poll -- every 10 seconds. reads the active
-// document text via AXUIElement when the per-task privacy toggle is enabled.
-fn spawn_content_observation(host: Arc<dyn CoreHost>) -> JoinHandle<()> {
-    tauri::async_runtime::spawn(async move {
-        if let Some(app) = host.tauri_app() {
-            crate::spawn_content_observation_poll(app).await;
-        }
-    })
-}
-
-// apex b2: goal extraction loop on conversation lulls or task switches.
-fn spawn_goal_extraction(host: Arc<dyn CoreHost>) -> JoinHandle<()> {
-    tauri::async_runtime::spawn(async move {
-        if let Some(app) = host.tauri_app() {
-            crate::spawn_goal_extraction_poll(app).await;
-        }
-    })
-}
-
-// apex b3: session-summary episodes on long idle lulls.
-fn spawn_memory_session_summary(host: Arc<dyn CoreHost>) -> JoinHandle<()> {
-    tauri::async_runtime::spawn(async move {
-        if let Some(app) = host.tauri_app() {
-            crate::spawn_memory_session_summary_poll(app).await;
-        }
-    })
-}
-
-// apex b4: consolidate typed episodes into durable facts on idle windows or the
-// once-daily 02:00 maintenance window.
-fn spawn_memory_consolidation(host: Arc<dyn CoreHost>) -> JoinHandle<()> {
-    tauri::async_runtime::spawn(async move {
-        if let Some(app) = host.tauri_app() {
-            crate::spawn_memory_consolidation_poll(app).await;
-        }
-    })
-}
-
-// phase 24: background update check -- delayed 2 seconds so it does not compete
-// with tray-ready or session-restore on startup.
-fn spawn_update_check(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        if shutdown.is_stopped() {
-            return;
-        }
-        if let Some(app) = host.tauri_app() {
-            crate::perform_update_check(app).await;
-        }
+        host.check_stale_tasks(host.is_quiet_mode());
     })
 }
 
@@ -609,6 +582,7 @@ mod tests {
     struct FakeHost {
         quiet: AtomicBool,
         events: Mutex<Vec<(String, serde_json::Value)>>,
+        intents: Mutex<Vec<String>>,
     }
 
     impl FakeHost {
@@ -616,6 +590,7 @@ mod tests {
             Self {
                 quiet: AtomicBool::new(false),
                 events: Mutex::new(Vec::new()),
+                intents: Mutex::new(Vec::new()),
             }
         }
         fn set_quiet(&self, quiet: bool) {
@@ -623,6 +598,9 @@ mod tests {
         }
         fn emitted(&self) -> Vec<(String, serde_json::Value)> {
             self.events.lock().unwrap().clone()
+        }
+        fn intents(&self) -> Vec<String> {
+            self.intents.lock().unwrap().clone()
         }
     }
 
@@ -637,8 +615,25 @@ mod tests {
         fn with_context_state(&self, _f: &mut dyn FnMut(&ContextState)) {}
         fn with_calendar_state(&self, _f: &mut dyn FnMut(&CalendarState)) {}
         fn with_typing_state(&self, _f: &mut dyn FnMut(&TypingActivityState)) {}
-        fn tauri_app(&self) -> Option<AppHandle> {
-            None
+        fn request_awareness_update(&self, _trigger: awareness_core::SnapshotTrigger, task_id: i64) {
+            self.intents.lock().unwrap().push(format!("awareness:{task_id}"));
+        }
+        fn fire_meeting_imminent(
+            &self,
+            task_id: i64,
+            _event: &CalendarEventDto,
+            _movement_toward_event: bool,
+        ) {
+            self.intents.lock().unwrap().push(format!("meeting:{task_id}"));
+        }
+        fn fire_deadline_collision(&self, task_id: i64, _minutes_until: i64, _far_from_done: bool) {
+            self.intents.lock().unwrap().push(format!("deadline:{task_id}"));
+        }
+        fn check_stale_tasks(&self, _quiet: bool) {
+            self.intents.lock().unwrap().push("stale".to_string());
+        }
+        fn spawn_side_tasks(&self) {
+            self.intents.lock().unwrap().push("side_tasks".to_string());
         }
     }
 
@@ -659,15 +654,23 @@ mod tests {
     }
 
     #[test]
-    fn f1b1_fake_host_gates_and_has_no_tauri_bridge() {
-        // quiet gating is answerable headless; the tauri bridge is absent for a
-        // non-tauri host, which is what forces the remaining helpers to be
-        // decoupled before f1b-3.
+    fn f1b1_fake_host_gates_and_runs_intents_headless() {
+        // quiet gating and the world-model side effects (awareness update,
+        // crisis fires, stale check, side tasks) are all expressed as
+        // tauri-agnostic CoreHost intents a non-tauri host answers with no
+        // AppHandle -- the shape the f1b daemon host takes.
         let host = FakeHost::new();
         assert!(!host.is_quiet_mode());
         host.set_quiet(true);
         assert!(host.is_quiet_mode());
-        assert!(host.tauri_app().is_none());
+
+        host.request_awareness_update(awareness_core::SnapshotTrigger::WindowSwitch, 7);
+        host.check_stale_tasks(true);
+        host.spawn_side_tasks();
+        let intents = host.intents();
+        assert!(intents.contains(&"awareness:7".to_string()));
+        assert!(intents.contains(&"stale".to_string()));
+        assert!(intents.contains(&"side_tasks".to_string()));
     }
 
     #[test]

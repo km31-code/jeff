@@ -34,9 +34,14 @@ grep -q "fn is_quiet_mode(&self) -> bool" "$CORE" || fail "CoreHost::is_quiet_mo
 for accessor in with_jeff_state with_context_state with_calendar_state with_typing_state; do
   grep -q "fn $accessor(&self, f: &mut dyn FnMut" "$CORE" || fail "CoreHost::$accessor state accessor missing"
 done
-grep -q "fn tauri_app(&self) -> Option<AppHandle>" "$CORE" || fail "transitional tauri_app bridge missing"
+# f1b-1b: the world-model side effects are tauri-agnostic intents; the raw
+# AppHandle bridge is gone.
+for intent in request_awareness_update fire_meeting_imminent fire_deadline_collision check_stale_tasks spawn_side_tasks; do
+  grep -q "fn $intent" "$CORE" || fail "CoreHost::$intent intent missing"
+done
+grep -q "fn tauri_app" "$CORE" && fail "transitional tauri_app bridge should be removed by f1b-1b"
 grep -qE "pub fn start\(host: Arc<dyn CoreHost>\) -> CoreHandle" "$CORE" || fail "start() does not take the CoreHost seam"
-pass "start() takes Arc<dyn CoreHost>; emit/quiet/state-access/bridge on the trait"
+pass "start() takes Arc<dyn CoreHost>; emit/quiet/state-access/intents on the trait"
 
 # 3. the loops route their OWN i/o through the host, not the raw handle.
 # the schedulers no longer capture an AppHandle; state reads and emits go through
@@ -44,10 +49,10 @@ pass "start() takes Arc<dyn CoreHost>; emit/quiet/state-access/bridge on the tra
 grep -q "host.emit(" "$CORE" || fail "loops do not emit through the host"
 grep -q "host.with_jeff_state(" "$CORE" || fail "loops do not read state through the host"
 grep -q "host.is_quiet_mode()" "$CORE" || fail "loops do not gate through the host"
-# every direct tauri managed-state read must live inside the TauriHost impl (one
-# per accessor: quiet + 4 with_* = 5), never in a scheduler loop body.
+# every direct tauri managed-state read must live inside the TauriHost impl
+# (quiet + 4 with_* accessors + check_stale_tasks = 6), never in a loop body.
 DIRECT_STATE_READS=$(grep -c "try_state::<" "$CORE")
-[ "$DIRECT_STATE_READS" -le 5 ] || fail "direct try_state reads leaked into loop bodies ($DIRECT_STATE_READS > 5)"
+[ "$DIRECT_STATE_READS" -le 6 ] || fail "direct try_state reads leaked into loop bodies ($DIRECT_STATE_READS > 6)"
 pass "scheduler loops emit, gate, and read state through the CoreHost seam"
 
 # 4. main.rs constructs the in-process host and starts the core with it.
@@ -63,7 +68,7 @@ pass "cargo check passes without warnings"
 # 6. the seam is proven headless (no tauri runtime) + full suite green.
 for t in \
   f1b1_fake_host_routes_events_without_a_webview \
-  f1b1_fake_host_gates_and_has_no_tauri_bridge; do
+  f1b1_fake_host_gates_and_runs_intents_headless; do
   grep -q "fn $t" "$CORE" || fail "expected f1b-1 test $t is missing"
 done
 F1B1_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test --bin jeff-desktop f1b1_ --quiet 2>&1)
