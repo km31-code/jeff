@@ -218,6 +218,12 @@ impl IpcClient {
         Ok(Self { stream, next_id: 1 })
     }
 
+    // bound how long a read blocks, so a peer that never answers surfaces as a
+    // timeout error instead of hanging the caller forever.
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        self.stream.set_read_timeout(timeout)
+    }
+
     pub fn call(&mut self, method: &str, params: serde_json::Value) -> io::Result<IpcResponse> {
         let id = self.next_id;
         self.next_id += 1;
@@ -266,15 +272,14 @@ mod tests {
         }
     }
 
+    // a process-unique socket path. a monotonic counter (not a clock reading)
+    // guarantees uniqueness even when the socket tests run in parallel, so they
+    // never collide on the same path.
+    static SOCKET_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     fn temp_socket_path(tag: &str) -> PathBuf {
+        let seq = SOCKET_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut path = std::env::temp_dir();
-        let unique = format!(
-            "jeff-ipc-{tag}-{}-{}.sock",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-                ^ (Instant::now().elapsed().as_nanos().rotate_left(17))
-        );
-        path.push(unique);
+        path.push(format!("jeff-ipc-{tag}-{}-{seq}.sock", std::process::id()));
         path
     }
 
@@ -326,6 +331,10 @@ mod tests {
         let path = temp_socket_path("events");
         let sink = spawn_server(&path);
         let mut listener = IpcClient::connect(&path).expect("connect listener");
+        // fail fast if no event ever arrives instead of hanging the suite.
+        listener
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
 
         // wait until the server has registered our connection for broadcast.
         let deadline = Instant::now() + Duration::from_secs(2);
