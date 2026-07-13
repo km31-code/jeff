@@ -72,7 +72,7 @@ grep_check "get_frontmost_pid function in context_observer.rs" \
     "pub fn get_frontmost_pid" "$SRC/context_observer.rs"
 
 grep_check "JEFF_DISABLE_CONTENT_OBSERVATION env var guard in main.rs" \
-    "JEFF_DISABLE_CONTENT_OBSERVATION" "$SRC/main.rs"
+    "JEFF_DISABLE_CONTENT_OBSERVATION" "$SRC/app_polls.rs"
 
 # --- state.rs: content_observation field in JeffState ---
 grep_check "content_observation field in JeffState" \

@@ -53,7 +53,7 @@ grep -q "should_use_realtime" "$COMMANDS" || fail "start does not gate on enable
 grep -q "pub fn persist_voice_transcript" "$COMMANDS" || fail "persist_voice_transcript command missing"
 grep -q "pub fn handle_voice_tool_call" "$COMMANDS" || fail "handle_voice_tool_call command missing"
 grep -q "pub fn set_voice_config" "$COMMANDS" || fail "voice config command missing"
-grep -q "mod voice_session;" "$MAIN" || fail "voice_session module not registered"
+grep -q "mod voice_session;" "${MAIN%/*}/lib.rs" || fail "voice_session module not registered"
 grep -q "commands::start_voice_session" "$MAIN" || fail "voice commands not registered"
 pass "voice commands assemble context, mint, persist transcripts, and route tool-calls"
 

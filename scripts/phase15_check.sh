@@ -138,7 +138,7 @@ grep -q "recordTaskFocus" "$TAURI_CLIENT_TS" || fail "recordTaskFocus wrapper mi
 pass "all phase 15 TypeScript types and wrappers in tauriClient.ts (m15.4)"
 
 # 18. proactive.rs mod declared in main.rs
-grep -q "mod proactive" "$MAIN_RS" || fail "mod proactive not declared in main.rs"
+grep -q "mod proactive" "${MAIN_RS%/*}/lib.rs" || fail "mod proactive not declared in main.rs"
 pass "mod proactive declared in main.rs"
 
 # 19. regression gates: prior phase checks still pass

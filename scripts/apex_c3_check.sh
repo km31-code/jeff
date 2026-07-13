@@ -52,7 +52,7 @@ grep -q "deliver_proactive_as_chat_message" "$BRIEFING" || fail "rituals do not 
 pass "briefing/debrief delivered as reply-able chat bubbles"
 
 # 4. ambient-tick wiring + wrapping-up capture.
-grep -q "mod briefing;" "$MAIN" || fail "briefing module not registered"
+grep -q "mod briefing;" "${MAIN%/*}/lib.rs" || fail "briefing module not registered"
 grep -q "maybe_fire_rituals" "$PROACTIVE" || fail "rituals not wired into the ambient tick"
 grep -q "is_wrapping_up" "$SRC/chat.rs" || fail "chat does not detect wrapping-up"
 grep -q "is_wrapping_up" "$SRC/chat_streaming.rs" || fail "streaming chat does not detect wrapping-up"

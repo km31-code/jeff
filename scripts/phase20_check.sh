@@ -51,7 +51,7 @@ fi
 
 # module declared in main.rs
 grep_check "context_observer mod in main.rs" \
-    "mod context_observer" "$SRC/main.rs"
+    "mod context_observer" "$SRC/lib.rs"
 
 # module exported in lib.rs for tests
 grep_check "context_observer pub mod in lib.rs" \
@@ -240,35 +240,35 @@ echo ""
 echo "--- behavioral: cargo test ---"
 
 echo "  running context_state_should_nudge..."
-if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --bin jeff-desktop context_state_should_nudge >/dev/null); then
+if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --lib context_state_should_nudge >/dev/null); then
     check "context_state_should_nudge passes" "ok"
 else
     check "context_state_should_nudge passes" "fail"
 fi
 
 echo "  running context_state_nudges_only_on_real_unseen_switches..."
-if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --bin jeff-desktop context_state_nudges_only_on_real_unseen_switches >/dev/null); then
+if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --lib context_state_nudges_only_on_real_unseen_switches >/dev/null); then
     check "context_state_nudges_only_on_real_unseen_switches passes" "ok"
 else
     check "context_state_nudges_only_on_real_unseen_switches passes" "fail"
 fi
 
 echo "  running context_state_update_and_current..."
-if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --bin jeff-desktop context_state_update_and_current >/dev/null); then
+if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --lib context_state_update_and_current >/dev/null); then
     check "context_state_update_and_current passes" "ok"
 else
     check "context_state_update_and_current passes" "fail"
 fi
 
 echo "  running is_accessibility_trusted_does_not_panic..."
-if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --bin jeff-desktop is_accessibility_trusted_does_not_panic >/dev/null); then
+if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --lib is_accessibility_trusted_does_not_panic >/dev/null); then
     check "is_accessibility_trusted_does_not_panic passes" "ok"
 else
     check "is_accessibility_trusted_does_not_panic passes" "fail"
 fi
 
 echo "  running all bin tests (regression check)..."
-if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --bin jeff-desktop >/dev/null); then
+if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --lib >/dev/null); then
     check "all bin tests pass (no regressions)" "ok"
 else
     check "all bin tests pass (no regressions)" "fail"

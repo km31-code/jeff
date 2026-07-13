@@ -50,7 +50,7 @@ pass "speculation is gated by its sub-budget and a hard daily cap"
 # just manual commands; commands.rs uses crate::speculation::).
 # apex f1a moved the speculation scheduler out of main.rs into core_runtime.
 grep -q "speculation::maybe_run_for_active_task" "$SRC/core_runtime.rs" || fail "speculation scheduler not wired into core_runtime"
-grep -q "speculation::invalidate_for_task" "$MAIN" || fail "document-delta invalidation not wired into main.rs"
+grep -q "speculation::invalidate_for_task" "${MAIN%/*}/app_polls.rs" || fail "document-delta invalidation not wired into main.rs"
 pass "speculation scheduler and document-delta invalidation run automatically in main.rs"
 
 # 5. Commands + Privacy Center surface (toggle, spend, hit-rate, cached list, discard).

@@ -203,21 +203,21 @@ echo ""
 echo "--- behavioral: cargo test ---"
 
 echo "  running session_settings_round_trip..."
-if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --bin jeff-desktop session_settings_round_trip >/dev/null); then
+if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --lib session_settings_round_trip >/dev/null); then
     check "session_settings_round_trip passes" "ok"
 else
     check "session_settings_round_trip passes" "fail"
 fi
 
 echo "  running login_item status tests..."
-if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --bin jeff-desktop login_item >/dev/null); then
+if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --lib login_item >/dev/null); then
     check "login_item tests pass" "ok"
 else
     check "login_item tests pass" "fail"
 fi
 
 echo "  running all bin tests (regression check)..."
-if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --bin jeff-desktop >/dev/null); then
+if (cd "$REPO_ROOT/desktop/src-tauri" && cargo test --lib >/dev/null); then
     check "all bin tests pass (no regressions)" "ok"
 else
     check "all bin tests pass (no regressions)" "fail"

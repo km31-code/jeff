@@ -71,7 +71,7 @@ for t in \
   f1b1_fake_host_gates_and_runs_intents_headless; do
   grep -q "fn $t" "$CORE" || fail "expected f1b-1 test $t is missing"
 done
-F1B1_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test --bin jeff-desktop f1b1_ --quiet 2>&1)
+F1B1_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test --lib f1b1_ --quiet 2>&1)
 echo "$F1B1_TEST_OUT" | grep -q "test result: ok" || { echo "$F1B1_TEST_OUT"; fail "f1b-1 headless-host tests failed"; }
 echo "$F1B1_TEST_OUT" | grep -q "FAILED" && { echo "$F1B1_TEST_OUT"; fail "f1b-1 headless-host tests failed"; }
 pass "CoreHost seam drives events/gating headless (FakeHost, no tauri runtime)"

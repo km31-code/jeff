@@ -35,17 +35,17 @@ grep -q "evidence_quote" "$GOAL_RS" || fail "structured output lacks evidence_qu
 pass "reflex-tier structured extractor + heuristic present"
 
 # 2. lull-triggered loop wired; never on a response path.
-grep -q "mod goal_extraction;" "$MAIN_RS" || fail "goal_extraction module not registered"
-grep -q "spawn_goal_extraction_poll" "$MAIN_RS" || fail "goal extraction loop missing"
-grep -q "GOAL_LULL_SETTLE_SECONDS" "$MAIN_RS" || fail "lull settle threshold missing"
-grep -q "spawn_blocking" "$MAIN_RS" || fail "blocking extractor not moved off the async worker"
+grep -q "mod goal_extraction;" "${MAIN_RS%/*}/lib.rs" || fail "goal_extraction module not registered"
+grep -q "spawn_goal_extraction_poll" "${MAIN_RS%/*}/app_polls.rs" || fail "goal extraction loop missing"
+grep -q "GOAL_LULL_SETTLE_SECONDS" "${MAIN_RS%/*}/app_polls.rs" || fail "lull settle threshold missing"
+grep -q "spawn_blocking" "${MAIN_RS%/*}/app_polls.rs" || fail "blocking extractor not moved off the async worker"
 grep -q "should_extract" "$STATE_RS" || fail "per-turn extraction dedup guard missing"
-grep -q "get_privacy_user_profile_memory_enabled" "$MAIN_RS" \
+grep -q "get_privacy_user_profile_memory_enabled" "${MAIN_RS%/*}/app_polls.rs" \
   || fail "background goal extraction does not respect profile-memory privacy"
-if grep -q "recent.reverse()" "$MAIN_RS"; then
+if grep -q "recent.reverse()" "${MAIN_RS%/*}/app_polls.rs"; then
   fail "goal extraction loop reverses list_recent_chat_messages output"
 fi
-grep -q "last_user_message.id" "$MAIN_RS" || fail "dedup must key on message id, not rounded timestamp"
+grep -q "last_user_message.id" "${MAIN_RS%/*}/app_polls.rs" || fail "dedup must key on message id, not rounded timestamp"
 pass "lull-triggered extraction loop wired off the response path"
 
 # 3. snapshot + relational model read the extractor, prefix retired from live path.

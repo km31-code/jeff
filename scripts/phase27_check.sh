@@ -71,7 +71,7 @@ grep_check "get_last_synthesis_at store method present" "pub fn get_last_synthes
 grep_check "list_synthesis_log store method present" "pub fn list_synthesis_log" "$SRC/store.rs"
 grep_check "synthesis log DTO present" "pub struct SynthesisLogEntryDto" "$SRC/models.rs"
 
-grep_check "main registers synthesis module" "mod synthesis" "$SRC/main.rs"
+grep_check "main registers synthesis module" "mod synthesis" "$SRC/lib.rs"
 grep_check "run_synthesis_check present" "pub async fn run_synthesis_check" "$SRC/synthesis.rs"
 grep_check "run_synthesis_check reads snapshot through TimeTick update" "SnapshotTrigger::TimeTick" "$SRC/synthesis.rs"
 # apex c1 replaced the single-stage should_speak_proactively call with two-stage

@@ -51,17 +51,17 @@ grep -q "pub struct EpisodeSearchResultDto" "$MODELS_RS" || fail "EpisodeSearchR
 pass "episodes schema, DTOs, and clear paths present"
 
 # 3. background capture is privacy-gated and off the response path.
-grep -q "mod memory;" "$MAIN_RS" || fail "memory module not registered in binary"
+grep -q "mod memory;" "${MAIN_RS%/*}/lib.rs" || fail "memory module not registered in binary"
 grep -q "pub mod memory;" "$LIB_RS" || fail "memory module not exported for tests"
 grep -q "record_episode_async" "$MEMORY_RS" || fail "async episode writer missing"
 grep -q "thread::spawn" "$MEMORY_RS" || fail "episode writer is not backgrounded"
-grep -q "spawn_goal_extraction_poll" "$MAIN_RS" || fail "lull poll missing"
-grep -q "extract_memory_tags_with_fallback" "$MAIN_RS" || fail "memory tag capture not wired to lull poll"
-grep -q "record_memory_tags_for_turn" "$MAIN_RS" || fail "memory tag writer not wired"
-grep -q "spawn_memory_session_summary_poll" "$MAIN_RS" || fail "idle session summary poll missing"
-grep -q "record_idle_session_summary_if_due" "$MAIN_RS" || fail "idle session summary writer not wired"
-grep -q "get_privacy_user_profile_memory_enabled" "$MAIN_RS" || fail "memory background work missing privacy gate"
-grep -q "spawn_blocking" "$MAIN_RS" || fail "blocking memory work is not offloaded"
+grep -q "spawn_goal_extraction_poll" "${MAIN_RS%/*}/app_polls.rs" || fail "lull poll missing"
+grep -q "extract_memory_tags_with_fallback" "${MAIN_RS%/*}/app_polls.rs" || fail "memory tag capture not wired to lull poll"
+grep -q "record_memory_tags_for_turn" "${MAIN_RS%/*}/app_polls.rs" || fail "memory tag writer not wired"
+grep -q "spawn_memory_session_summary_poll" "${MAIN_RS%/*}/app_polls.rs" || fail "idle session summary poll missing"
+grep -q "record_idle_session_summary_if_due" "${MAIN_RS%/*}/app_polls.rs" || fail "idle session summary writer not wired"
+grep -q "get_privacy_user_profile_memory_enabled" "${MAIN_RS%/*}/app_polls.rs" || fail "memory background work missing privacy gate"
+grep -q "spawn_blocking" "${MAIN_RS%/*}/app_polls.rs" || fail "blocking memory work is not offloaded"
 pass "decision/deadline/fact and idle summary capture are privacy-gated and off-path"
 
 # 4. proposal outcome writers across user decision surfaces.

@@ -19,7 +19,7 @@ echo "--- apex f1a core lifecycle check ---"
 
 # 1. the core module exists with a start/stop lifecycle.
 test -f "$CORE" || fail "core_runtime.rs missing"
-grep -q "mod core_runtime;" "$MAIN" || fail "core_runtime not declared in main.rs"
+grep -q "mod core_runtime;" "${MAIN%/*}/lib.rs" || fail "core_runtime not declared in main.rs"
 # f1b-1 evolved the signature from &AppHandle to the CoreHost seam.
 grep -qE "pub fn start\(host: Arc<dyn CoreHost>\) -> CoreHandle" "$CORE" || fail "core start() entry point missing"
 grep -q "pub struct CoreHandle" "$CORE" || fail "CoreHandle lifecycle type missing"
@@ -47,17 +47,17 @@ for sym in \
 done
 pass "context, calendar, standing-job, speculation, job-resume, stale, and proactive loops moved to core_runtime"
 
-# 4. the helper poll bodies still live in main.rs and the core calls them across
-# the module boundary (verifies the child-module -> crate-root call path holds).
+# 4. the helper poll bodies live in the app_polls lib module (f1b-2b moved them
+# out of main.rs so the daemon can link the core) and the core drives them.
 for helper in \
   spawn_content_observation_poll \
   spawn_goal_extraction_poll \
   spawn_memory_session_summary_poll \
   spawn_memory_consolidation_poll \
   perform_update_check; do
-  grep -q "crate::$helper" "$CORE" || fail "core does not invoke crate::$helper"
+  grep -q "crate::app_polls::$helper" "$CORE" || fail "core does not invoke crate::app_polls::$helper"
 done
-pass "core drives the main.rs poll helpers through the module boundary"
+pass "core drives the app_polls helpers through the module boundary"
 
 # 5. cargo check is warning-free.
 CHECK_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo check --quiet 2>&1)
@@ -70,7 +70,7 @@ for t in \
   f1a_core_shutdown_is_shared_across_clones; do
   grep -q "fn $t" "$CORE" || fail "expected f1a test $t is missing"
 done
-F1A_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test --bin jeff-desktop f1a_ --quiet 2>&1)
+F1A_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test --lib f1a_ --quiet 2>&1)
 echo "$F1A_TEST_OUT" | grep -q "test result: ok" || { echo "$F1A_TEST_OUT"; fail "f1a lifecycle tests failed"; }
 echo "$F1A_TEST_OUT" | grep -q "FAILED" && { echo "$F1A_TEST_OUT"; fail "f1a lifecycle tests failed"; }
 pass "f1a core shutdown lifecycle tests pass"

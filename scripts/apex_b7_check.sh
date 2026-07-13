@@ -39,8 +39,8 @@ grep -q "WORK_UNDERSTANDING_INTERVAL_SECONDS: i64 = 5 \\* 60" "$WORK_RS" \
 pass "WorkUnderstanding JSON contract, judgment call, raw-text boundary, and interval present"
 
 # 2. Trigger, privacy, budget, and memory wiring.
-grep -q "mod work_understanding;" "$MAIN_RS" || fail "work_understanding module not registered"
-grep -q "maybe_spawn_work_understanding" "$MAIN_RS" || fail "AX content poll does not trigger pass"
+grep -q "mod work_understanding;" "${MAIN_RS%/*}/lib.rs" || fail "work_understanding module not registered"
+grep -q "maybe_spawn_work_understanding" "${MAIN_RS%/*}/app_polls.rs" || fail "AX content poll does not trigger pass"
 grep -q "maybe_spawn_work_understanding" "$SELECTION_RS" || fail "browser observation does not trigger pass"
 grep -q "AmbientState" "$WORK_RS" || fail "quiet-mode skip missing"
 grep -q "get_content_observation_enabled(task_id)" "$WORK_RS" \

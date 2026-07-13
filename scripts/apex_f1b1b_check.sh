@@ -53,7 +53,7 @@ pass "cargo check passes without warnings"
 
 # 5. the seam runs the intents headless + full suite green.
 grep -q "fn f1b1_fake_host_gates_and_runs_intents_headless" "$CORE" || fail "headless intent test missing"
-F_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test --bin jeff-desktop f1b1_ --quiet 2>&1)
+F_TEST_OUT=$(cd "$ROOT_DIR/desktop/src-tauri" && cargo test --lib f1b1_ --quiet 2>&1)
 echo "$F_TEST_OUT" | grep -q "test result: ok" || { echo "$F_TEST_OUT"; fail "f1b-1b headless-host tests failed"; }
 echo "$F_TEST_OUT" | grep -q "FAILED" && { echo "$F_TEST_OUT"; fail "f1b-1b headless-host tests failed"; }
 pass "CoreHost intents run headless (FakeHost, no tauri runtime)"

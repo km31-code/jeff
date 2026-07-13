@@ -49,7 +49,7 @@ pass "all 5 IntentLabel variants present (m14.1)"
 # 4. classify_message_intent command registered (m14.1)
 grep -q "fn classify_message_intent" "$COMMANDS_RS" || fail "classify_message_intent command missing from commands.rs"
 grep -q "classify_message_intent" "$MAIN_RS" || fail "classify_message_intent not registered in main.rs"
-grep -q "mod classifier" "$MAIN_RS" || fail "mod classifier not declared in main.rs"
+grep -q "mod classifier" "${MAIN_RS%/*}/lib.rs" || fail "mod classifier not declared in main.rs"
 pass "classify_message_intent command registered (m14.1)"
 
 # 5. eval set present and has 40 entries (m14.2)

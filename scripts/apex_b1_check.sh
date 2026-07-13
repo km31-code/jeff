@@ -78,8 +78,8 @@ pass "retrieval tolerates a transient re-embed failure"
 # 6. perception + snapshot wiring; 80-char comparison retired.
 grep -q "document_model: Arc<Mutex<crate::document_model::DocumentModel>>" "$STATE_RS" \
   || fail "document model not held in JeffState"
-grep -q "mod document_model;" "$MAIN_RS" || fail "document_model module not registered"
-grep -q "dm.observe(task_id" "$MAIN_RS" || fail "poll loop does not drive the document model"
+grep -q "mod document_model;" "${MAIN_RS%/*}/lib.rs" || fail "document_model module not registered"
+grep -q "dm.observe(task_id" "${MAIN_RS%/*}/app_polls.rs" || fail "poll loop does not drive the document model"
 grep -q "document_structure_changed" "$CONTEXT_OBSERVER_RS" || fail "structural signal field missing"
 grep -q "structure changed" "$AWARENESS_RS" || fail "snapshot excerpt not enriched with structure signal"
 if grep -q "chars().take(80)" "$CONTEXT_OBSERVER_RS"; then

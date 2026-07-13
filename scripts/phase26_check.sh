@@ -62,7 +62,7 @@ else
 fi
 
 grep_check "JeffState contains awareness_core field" "awareness_core: Arc<AwarenessCore>" "$SRC/state.rs"
-grep_check "main registers awareness_core module" "mod awareness_core" "$SRC/main.rs"
+grep_check "main registers awareness_core module" "mod awareness_core" "$SRC/lib.rs"
 grep_check "new-turn awareness update wired for non-streaming chat" "SnapshotTrigger::NewTurn" "$SRC/commands.rs"
 grep_check "new-turn awareness update wired for streaming chat" "SnapshotTrigger::NewTurn" "$SRC/chat_streaming.rs"
 grep_check "focus-event update wired" "SnapshotTrigger::FocusEvent" "$SRC/commands.rs"

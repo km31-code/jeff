@@ -130,23 +130,23 @@ impl CoreHost for TauriHost {
         proactive::spawn_ambient_monitor(self.app.clone());
         let app = self.app.clone();
         tauri::async_runtime::spawn(async move {
-            crate::spawn_content_observation_poll(app).await;
+            crate::app_polls::spawn_content_observation_poll(app).await;
         });
         let app = self.app.clone();
         tauri::async_runtime::spawn(async move {
-            crate::spawn_goal_extraction_poll(app).await;
+            crate::app_polls::spawn_goal_extraction_poll(app).await;
         });
         let app = self.app.clone();
         tauri::async_runtime::spawn(async move {
-            crate::spawn_memory_session_summary_poll(app).await;
+            crate::app_polls::spawn_memory_session_summary_poll(app).await;
         });
         let app = self.app.clone();
         tauri::async_runtime::spawn(async move {
-            crate::spawn_memory_consolidation_poll(app).await;
+            crate::app_polls::spawn_memory_consolidation_poll(app).await;
         });
         let app = self.app.clone();
         tauri::async_runtime::spawn(async move {
-            crate::perform_update_check(app).await;
+            crate::app_polls::perform_update_check(app).await;
         });
     }
 }
@@ -276,7 +276,7 @@ fn spawn_active_window_context_poll(host: Arc<dyn CoreHost>, shutdown: CoreShutd
                             });
                             let off_task = task_title
                                 .as_deref()
-                                .map_or(true, |t| crate::document_is_off_task(title, t));
+                                .map_or(true, |t| crate::app_polls::document_is_off_task(title, t));
                             if off_task {
                                 host.emit(
                                     "context://document-switch",
@@ -423,7 +423,7 @@ fn spawn_calendar_poll(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinH
                 .and_then(|event| {
                     ctx_title
                         .as_deref()
-                        .map(|dt| crate::crisis_event_matches_context(&event.title, dt))
+                        .map(|dt| crate::app_polls::crisis_event_matches_context(&event.title, dt))
                 })
                 .unwrap_or(false);
 

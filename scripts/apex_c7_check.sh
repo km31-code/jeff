@@ -59,7 +59,7 @@ pass "delivery logs firing, emits persistent card, notifies when not quiet, and 
 # 3. main monitor and watcher signal integration.
 grep -q "maybe_fire_meeting_imminent" "$CORE_RUNTIME" || fail "meeting crisis not wired into calendar poll"
 grep -q "maybe_fire_deadline_collision" "$CORE_RUNTIME" || fail "deadline crisis not wired into calendar poll"
-grep -q "crisis_event_matches_context" "$MAIN" || fail "movement-toward-event check missing"
+grep -q "crisis_event_matches_context" "${MAIN%/*}/app_polls.rs" || fail "movement-toward-event check missing"
 grep -q "set_mass_deletion_notify" "$WATCHER" || fail "watcher mass-deletion callback missing"
 grep -q "is_mass_deletion_signal" "$WATCHER" || fail "watcher does not test mass-deletion signal"
 grep -q "fire_data_loss_risk" "$MAIN" || fail "data-loss crisis not wired from watcher"

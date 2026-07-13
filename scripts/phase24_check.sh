@@ -113,25 +113,25 @@ grep_check "tauri_plugin_updater initialized in main.rs" \
     "tauri_plugin_updater::Builder" "$SRC/main.rs"
 
 grep_check "background update check spawned in main.rs" \
-    "perform_update_check" "$SRC/main.rs"
+    "perform_update_check" "$SRC/app_polls.rs"
 
 grep_check "UpdaterExt imported in main.rs" \
-    "UpdaterExt" "$SRC/main.rs"
+    "UpdaterExt" "$SRC/app_polls.rs"
 
 grep_check "updater check called in main.rs" \
-    "updater.*check\|check.*await" "$SRC/main.rs"
+    "updater.*check\|check.*await" "$SRC/app_polls.rs"
 
 grep_check "Install button label in main.rs" \
-    "Install" "$SRC/main.rs"
+    "Install" "$SRC/app_polls.rs"
 
 grep_check "Later button label in main.rs" \
-    "Later" "$SRC/main.rs"
+    "Later" "$SRC/app_polls.rs"
 
 grep_check "download_and_install called in main.rs" \
-    "download_and_install" "$SRC/main.rs"
+    "download_and_install" "$SRC/app_polls.rs"
 
 grep_check "app.restart called on install in main.rs" \
-    "app.restart\|\.restart()" "$SRC/main.rs"
+    "app.restart\|\.restart()" "$SRC/app_polls.rs"
 
 echo ""
 echo "--- m24.3: ci pipeline structure ---"
