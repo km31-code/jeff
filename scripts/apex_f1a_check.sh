@@ -20,14 +20,16 @@ echo "--- apex f1a core lifecycle check ---"
 # 1. the core module exists with a start/stop lifecycle.
 test -f "$CORE" || fail "core_runtime.rs missing"
 grep -q "mod core_runtime;" "$MAIN" || fail "core_runtime not declared in main.rs"
-grep -q "pub fn start(app: &AppHandle) -> CoreHandle" "$CORE" || fail "core start() entry point missing"
+# f1b-1 evolved the signature from &AppHandle to the CoreHost seam.
+grep -qE "pub fn start\(host: Arc<dyn CoreHost>\) -> CoreHandle" "$CORE" || fail "core start() entry point missing"
 grep -q "pub struct CoreHandle" "$CORE" || fail "CoreHandle lifecycle type missing"
 grep -q "pub struct CoreShutdown" "$CORE" || fail "CoreShutdown signal missing"
 grep -q "pub fn stop(self)" "$CORE" || fail "CoreHandle::stop lifecycle teardown missing"
 pass "core_runtime module with start/stop lifecycle present and wired into main.rs"
 
 # 2. the setup closure delegates to the core instead of inlining the schedulers.
-grep -q "core_runtime::start(&handle)" "$MAIN" || fail "main.rs does not start the core"
+# f1b-1 wraps the handle in a TauriHost; the setup closure still starts the core.
+grep -q "core_runtime::start(" "$MAIN" || fail "main.rs does not start the core"
 
 # 3. every core scheduler/startup task now lives in core_runtime, not main.rs.
 # each symbol is unique to one loop body, so its presence in core_runtime and

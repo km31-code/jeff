@@ -342,7 +342,11 @@ fn main() {
             // apex f1a: every recurring background scheduler and startup task a
             // headless daemon must run lives in core_runtime; the tauri setup
             // closure only wires the shell and then starts the core.
-            let _core = core_runtime::start(&handle);
+            // apex f1b-1: the core runs against a CoreHost seam, not the raw
+            // AppHandle. in-process that seam is TauriHost.
+            let _core = core_runtime::start(Arc::new(core_runtime::TauriHost::new(
+                handle.clone(),
+            )));
 
             // phase 19: fire a one-time native notification on the very first
             // session so users who enabled launch-at-login know jeff is running

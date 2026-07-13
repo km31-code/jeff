@@ -1,14 +1,19 @@
-// apex f1a: the headless-capable core.
+// apex f1a/f1b-1: the headless-capable core.
 //
-// every recurring background scheduler and startup task that a future headless
-// daemon (f1b) must run lid-closed lives here behind a single start/stop
-// lifecycle, instead of being inlined in the tauri setup closure. this is the
-// "re-homing, not a rewrite" seam: f1a consolidates the loops in-process with
-// no behavior change; f1b re-homes this module into a separate process. shell
-// concerns (tray, overlay, hotkey, wake word, login item, the subtask companion
-// relay wired before state is managed) stay in main.rs -- a daemon does not run
-// them. the loop bodies below are moved verbatim from main.rs; the only
-// additions are the cooperative shutdown check at the top of each loop.
+// f1a moved every recurring background scheduler and startup task a future
+// headless daemon must run lid-closed into this module, behind one start/stop
+// lifecycle. f1b-1 decouples those loops from the Tauri AppHandle: their event
+// emission and world-model state reads now go through a CoreHost seam instead of
+// touching tauri directly, so a daemon (f1b-3) can host them with a non-tauri
+// CoreHost. in-process the seam is TauriHost, which delegates to the AppHandle,
+// so behavior is byte-identical.
+//
+// still transitional (f1b-1b): a handful of helper modules (awareness_core,
+// crisis, workload, proactive, and the main.rs poll helpers) still take an
+// AppHandle. the loops reach them through CoreHost::tauri_app(), the bridge that
+// returns the in-process handle. removing that bridge -- decoupling those
+// modules -- is the next milestone. shell concerns (tray, overlay, hotkey, wake
+// word, login item, pre-manage companion relay) stay in main.rs.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -23,6 +28,74 @@ use crate::{
     agent_runtime, awareness_core, calendar, context_observer, coworking, crisis, proactive,
     speculation, workload,
 };
+
+// the core's I/O seam. everything a scheduler loop needs from its host --
+// emitting events to subscribers and reading the world-model/transient state --
+// goes through this trait instead of a tauri AppHandle. state access is
+// closure-based (rather than returning a tauri::State) so a headless daemon host
+// that owns the state directly can implement it just as well as TauriHost.
+pub trait CoreHost: Send + Sync {
+    // deliver an event to subscribers (the webview, in-process).
+    fn emit(&self, event: &str, payload: serde_json::Value);
+    // quiet mode is the universal gate every loop checks; kept as a direct
+    // method so a host can answer it without exposing AmbientState.
+    fn is_quiet_mode(&self) -> bool;
+    fn with_jeff_state(&self, f: &mut dyn FnMut(&JeffState));
+    fn with_context_state(&self, f: &mut dyn FnMut(&ContextState));
+    fn with_calendar_state(&self, f: &mut dyn FnMut(&CalendarState));
+    fn with_typing_state(&self, f: &mut dyn FnMut(&TypingActivityState));
+    // transitional bridge (f1b-1b): returns the in-process AppHandle so loops can
+    // call helper modules not yet ported to CoreHost. a headless daemon host
+    // returns None; those helpers must be decoupled before f1b-3.
+    fn tauri_app(&self) -> Option<AppHandle>;
+}
+
+// the in-process host: delegates every capability to the Tauri AppHandle, so the
+// loops behave exactly as they did when they held the handle directly.
+pub struct TauriHost {
+    app: AppHandle,
+}
+
+impl TauriHost {
+    pub fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl CoreHost for TauriHost {
+    fn emit(&self, event: &str, payload: serde_json::Value) {
+        let _ = self.app.emit(event, payload);
+    }
+    fn is_quiet_mode(&self) -> bool {
+        self.app
+            .try_state::<AmbientState>()
+            .map(|s| s.is_quiet_mode())
+            .unwrap_or(false)
+    }
+    fn with_jeff_state(&self, f: &mut dyn FnMut(&JeffState)) {
+        if let Some(state) = self.app.try_state::<JeffState>() {
+            f(&state);
+        }
+    }
+    fn with_context_state(&self, f: &mut dyn FnMut(&ContextState)) {
+        if let Some(state) = self.app.try_state::<ContextState>() {
+            f(&state);
+        }
+    }
+    fn with_calendar_state(&self, f: &mut dyn FnMut(&CalendarState)) {
+        if let Some(state) = self.app.try_state::<CalendarState>() {
+            f(&state);
+        }
+    }
+    fn with_typing_state(&self, f: &mut dyn FnMut(&TypingActivityState)) {
+        if let Some(state) = self.app.try_state::<TypingActivityState>() {
+            f(&state);
+        }
+    }
+    fn tauri_app(&self) -> Option<AppHandle> {
+        Some(self.app.clone())
+    }
+}
 
 // a cooperative shutdown signal shared with every core loop. loops check it at
 // the top of each iteration and exit; CoreHandle::stop also aborts the spawned
@@ -60,31 +133,34 @@ impl CoreHandle {
 }
 
 // start every recurring background scheduler and startup task. called once from
-// the tauri setup closure after state is managed. behavior is identical to the
-// pre-f1a inlined loops.
-pub fn start(app: &AppHandle) -> CoreHandle {
+// the tauri setup closure after state is managed, with a TauriHost. behavior is
+// identical to the pre-f1a inlined loops.
+pub fn start(host: Arc<dyn CoreHost>) -> CoreHandle {
     let shutdown = CoreShutdown::default();
     let mut joins: Vec<JoinHandle<()>> = Vec::new();
 
     joins.push(spawn_active_window_context_poll(
-        app.clone(),
+        host.clone(),
         shutdown.clone(),
     ));
-    joins.push(spawn_typing_activity_sync(app.clone(), shutdown.clone()));
-    joins.push(spawn_calendar_poll(app.clone(), shutdown.clone()));
-    joins.push(spawn_stale_task_check(app.clone(), shutdown.clone()));
+    joins.push(spawn_typing_activity_sync(host.clone(), shutdown.clone()));
+    joins.push(spawn_calendar_poll(host.clone(), shutdown.clone()));
+    joins.push(spawn_stale_task_check(host.clone(), shutdown.clone()));
 
-    // phase 27: the proactive ambient monitor self-spawns its own task.
-    proactive::spawn_ambient_monitor(app.clone());
+    // phase 27: the proactive ambient monitor self-spawns its own task. still
+    // AppHandle-coupled (f1b-1b), so it is started through the bridge.
+    if let Some(app) = host.tauri_app() {
+        proactive::spawn_ambient_monitor(app);
+    }
 
-    joins.push(spawn_content_observation(app.clone()));
-    joins.push(spawn_goal_extraction(app.clone()));
-    joins.push(spawn_memory_session_summary(app.clone()));
-    joins.push(spawn_memory_consolidation(app.clone()));
-    joins.push(spawn_update_check(app.clone(), shutdown.clone()));
-    joins.push(spawn_job_resume(app.clone(), shutdown.clone()));
-    joins.push(spawn_standing_job_scheduler(app.clone(), shutdown.clone()));
-    joins.push(spawn_speculation_scheduler(app.clone(), shutdown.clone()));
+    joins.push(spawn_content_observation(host.clone()));
+    joins.push(spawn_goal_extraction(host.clone()));
+    joins.push(spawn_memory_session_summary(host.clone()));
+    joins.push(spawn_memory_consolidation(host.clone()));
+    joins.push(spawn_update_check(host.clone(), shutdown.clone()));
+    joins.push(spawn_job_resume(host.clone(), shutdown.clone()));
+    joins.push(spawn_standing_job_scheduler(host.clone(), shutdown.clone()));
+    joins.push(spawn_speculation_scheduler(host, shutdown.clone()));
 
     CoreHandle { shutdown, joins }
 }
@@ -93,117 +169,113 @@ pub fn start(app: &AppHandle) -> CoreHandle {
 // immediate). emits context://context-updated after every poll and
 // context://document-switch when the frontmost document title changes to one
 // not yet nudged this session and the document is off-task.
-fn spawn_active_window_context_poll(app: AppHandle, shutdown: CoreShutdown) -> JoinHandle<()> {
-    let poll_handle = app;
+fn spawn_active_window_context_poll(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         loop {
             if shutdown.is_stopped() {
                 break;
             }
             // skip polling when quiet mode is active.
-            let quiet = poll_handle
-                .try_state::<AmbientState>()
-                .map(|s| s.is_quiet_mode())
-                .unwrap_or(false);
-
-            if quiet {
+            if host.is_quiet_mode() {
                 // still emit a null context so the frontend clears stale display.
-                let _ = poll_handle.emit("context://context-updated", serde_json::Value::Null);
+                host.emit("context://context-updated", serde_json::Value::Null);
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 continue;
             }
 
-            let active_context_allowed = poll_handle
-                .try_state::<JeffState>()
-                .map(|s| {
-                    let onboarding_complete = s.store.get_onboarding_complete().unwrap_or(false);
-                    let privacy_enabled = s
-                        .store
-                        .get_privacy_active_window_context_enabled()
-                        .unwrap_or(true);
-                    onboarding_complete && privacy_enabled
-                })
-                .unwrap_or(false);
+            let mut active_context_allowed = false;
+            host.with_jeff_state(&mut |s| {
+                let onboarding_complete = s.store.get_onboarding_complete().unwrap_or(false);
+                let privacy_enabled = s
+                    .store
+                    .get_privacy_active_window_context_enabled()
+                    .unwrap_or(true);
+                active_context_allowed = onboarding_complete && privacy_enabled;
+            });
 
             if !active_context_allowed {
-                if let Some(ctx_state) = poll_handle.try_state::<ContextState>() {
-                    ctx_state.update(None);
-                }
-                let _ = poll_handle.emit("context://context-updated", serde_json::Value::Null);
+                host.with_context_state(&mut |ctx_state| ctx_state.update(None));
+                host.emit("context://context-updated", serde_json::Value::Null);
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 continue;
             }
 
             let new_ctx = context_observer::poll_active_window();
+            let accessibility_trusted = context_observer::is_accessibility_trusted();
 
-            let Some(ctx_state) = poll_handle.try_state::<ContextState>() else {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                continue;
-            };
+            host.with_context_state(&mut |ctx_state| {
+                let prior_title = ctx_state.current().map(|ctx| ctx.document_title);
+                let new_title = new_ctx.as_ref().map(|ctx| ctx.document_title.clone());
+                let document_title_changed = matches!(
+                    (prior_title.as_deref(), new_title.as_deref()),
+                    (Some(previous), Some(next)) if !next.is_empty() && previous != next
+                );
 
-            let prior_title = ctx_state.current().map(|ctx| ctx.document_title);
-            let new_title = new_ctx.as_ref().map(|ctx| ctx.document_title.clone());
-            let document_title_changed = matches!(
-                (prior_title.as_deref(), new_title.as_deref()),
-                (Some(previous), Some(next)) if !next.is_empty() && previous != next
-            );
-
-            // fire the document-switch nudge before updating state so we compare
-            // the incoming title against the last-known one.
-            if context_observer::is_accessibility_trusted() {
-                if let Some(ref ctx) = new_ctx {
-                    let title = &ctx.document_title;
-                    if !title.is_empty() && ctx_state.should_nudge_for_switch(title) {
-                        // suppress nudge when the document title matches the
-                        // active task title (user is on-task).
-                        let task_title = poll_handle
-                            .try_state::<JeffState>()
-                            .and_then(|s| s.store.get_active_task().ok().flatten())
-                            .map(|t| t.title);
-                        let off_task = task_title
-                            .as_deref()
-                            .map_or(true, |t| crate::document_is_off_task(title, t));
-                        if off_task {
-                            let _ = poll_handle.emit(
-                                "context://document-switch",
-                                serde_json::json!({
-                                    "app_name": ctx.app_name,
-                                    "document_title": ctx.document_title,
-                                }),
-                            );
-                            ctx_state.mark_nudged(title.clone());
+                // fire the document-switch nudge before updating state so we
+                // compare the incoming title against the last-known one.
+                if accessibility_trusted {
+                    if let Some(ref ctx) = new_ctx {
+                        let title = &ctx.document_title;
+                        if !title.is_empty() && ctx_state.should_nudge_for_switch(title) {
+                            // suppress nudge when the document title matches the
+                            // active task title (user is on-task).
+                            let mut task_title = None;
+                            host.with_jeff_state(&mut |s| {
+                                task_title = s
+                                    .store
+                                    .get_active_task()
+                                    .ok()
+                                    .flatten()
+                                    .map(|t| t.title);
+                            });
+                            let off_task = task_title
+                                .as_deref()
+                                .map_or(true, |t| crate::document_is_off_task(title, t));
+                            if off_task {
+                                host.emit(
+                                    "context://document-switch",
+                                    serde_json::json!({
+                                        "app_name": ctx.app_name,
+                                        "document_title": ctx.document_title,
+                                    }),
+                                );
+                                ctx_state.mark_nudged(title.clone());
+                            }
                         }
                     }
                 }
-            }
 
-            ctx_state.update(new_ctx);
-            if document_title_changed {
-                if let Some(task) = poll_handle
-                    .try_state::<JeffState>()
-                    .and_then(|s| s.store.get_active_task().ok().flatten())
-                {
-                    awareness_core::spawn_awareness_update(
-                        &poll_handle,
-                        awareness_core::SnapshotTrigger::WindowSwitch,
-                        task.id,
-                    );
+                ctx_state.update(new_ctx.clone());
+                if document_title_changed {
+                    let mut task_id = None;
+                    host.with_jeff_state(&mut |s| {
+                        task_id = s.store.get_active_task().ok().flatten().map(|t| t.id);
+                    });
+                    if let Some(task_id) = task_id {
+                        if let Some(app) = host.tauri_app() {
+                            awareness_core::spawn_awareness_update(
+                                &app,
+                                awareness_core::SnapshotTrigger::WindowSwitch,
+                                task_id,
+                            );
+                        }
+                    }
                 }
-            }
 
-            // emit context-updated so the frontend tracks current state without
-            // needing its own polling interval.
-            let context_payload = ctx_state.current().map(|ctx| {
-                serde_json::json!({
-                    "app_name": ctx.app_name,
-                    "document_title": ctx.document_title,
-                    "captured_at": ctx.captured_at,
-                })
+                // emit context-updated so the frontend tracks current state
+                // without needing its own polling interval.
+                let context_payload = ctx_state.current().map(|ctx| {
+                    serde_json::json!({
+                        "app_name": ctx.app_name,
+                        "document_title": ctx.document_title,
+                        "captured_at": ctx.captured_at,
+                    })
+                });
+                host.emit(
+                    "context://context-updated",
+                    context_payload.unwrap_or(serde_json::Value::Null),
+                );
             });
-            let _ = poll_handle.emit(
-                "context://context-updated",
-                context_payload.unwrap_or(serde_json::Value::Null),
-            );
 
             // sleep at end so the first poll runs immediately on startup.
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -213,44 +285,53 @@ fn spawn_active_window_context_poll(app: AppHandle, shutdown: CoreShutdown) -> J
 
 // phase 22: keep rate-only typing state in sync with privacy and expose only a
 // boolean event for the frontend tts queue.
-fn spawn_typing_activity_sync(app: AppHandle, shutdown: CoreShutdown) -> JoinHandle<()> {
-    let typing_handle = app;
+fn spawn_typing_activity_sync(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         let mut last_typing: Option<bool> = None;
         loop {
             if shutdown.is_stopped() {
                 break;
             }
-            let Some(typing_state) = typing_handle.try_state::<TypingActivityState>() else {
+            let mut enabled = true;
+            host.with_jeff_state(&mut |s| {
+                enabled = s.store.get_privacy_typing_activity_enabled().unwrap_or(true);
+            });
+
+            let mut have_typing = false;
+            let mut is_typing = false;
+            let mut monitor_available = false;
+            let mut last_error: Option<String> = None;
+            host.with_typing_state(&mut |typing_state| {
+                have_typing = true;
+                typing_state.set_enabled(enabled);
+                is_typing = enabled && typing_state.is_typing();
+                monitor_available = typing_state.monitor_available();
+                last_error = typing_state.last_error();
+            });
+
+            if !have_typing {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 continue;
-            };
-
-            let enabled = typing_handle
-                .try_state::<JeffState>()
-                .and_then(|state| state.store.get_privacy_typing_activity_enabled().ok())
-                .unwrap_or(true);
-            typing_state.set_enabled(enabled);
-            let is_typing = enabled && typing_state.is_typing();
+            }
 
             if last_typing != Some(is_typing) {
                 last_typing = Some(is_typing);
-                let _ = typing_handle.emit(
+                host.emit(
                     "typing://activity-changed",
                     serde_json::json!({
                         "is_typing": is_typing,
                         "rate_only": true,
-                        "monitor_available": typing_state.monitor_available(),
-                        "last_error": typing_state.last_error(),
+                        "monitor_available": monitor_available,
+                        "last_error": last_error,
                     }),
                 );
-                if let Some(state) = typing_handle.try_state::<JeffState>() {
+                host.with_jeff_state(&mut |s| {
                     if let Ok(now) = coworking::unix_now_seconds() {
-                        if let Ok(mut runtime) = state.coworking.lock() {
+                        if let Ok(mut runtime) = s.coworking.lock() {
                             let _ = runtime.set_user_typing(is_typing, now);
                         }
                     }
-                }
+                });
             }
 
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -261,83 +342,74 @@ fn spawn_typing_activity_sync(app: AppHandle, shutdown: CoreShutdown) -> JoinHan
 // phase 23: calendar poll task (60-second interval). polls EventKit for the next
 // upcoming event when the privacy gate is enabled and the OS permission has been
 // granted, and drives the meeting-imminent / deadline-collision crisis classes.
-fn spawn_calendar_poll(app: AppHandle, shutdown: CoreShutdown) -> JoinHandle<()> {
-    let cal_poll_handle = app;
+fn spawn_calendar_poll(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         loop {
             if shutdown.is_stopped() {
                 break;
             }
-            let quiet = cal_poll_handle
-                .try_state::<AmbientState>()
-                .map(|s| s.is_quiet_mode())
-                .unwrap_or(false);
-            if quiet {
-                if let Some(cs) = cal_poll_handle.try_state::<CalendarState>() {
-                    cs.update(None);
-                }
-                let _ = cal_poll_handle.emit("calendar://event-updated", serde_json::Value::Null);
+            if host.is_quiet_mode() {
+                host.with_calendar_state(&mut |cs| cs.update(None));
+                host.emit("calendar://event-updated", serde_json::Value::Null);
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 continue;
             }
 
-            let cal_enabled = cal_poll_handle
-                .try_state::<JeffState>()
-                .and_then(|s| s.store.get_privacy_calendar_context_enabled().ok())
-                .unwrap_or(false);
+            let mut cal_enabled = false;
+            host.with_jeff_state(&mut |s| {
+                cal_enabled = s.store.get_privacy_calendar_context_enabled().unwrap_or(false);
+            });
 
             if !cal_enabled {
                 // clear stale event if feature is turned off mid-session
-                if let Some(cs) = cal_poll_handle.try_state::<CalendarState>() {
-                    cs.update(None);
-                }
-                let _ = cal_poll_handle.emit("calendar://event-updated", serde_json::Value::Null);
+                host.with_calendar_state(&mut |cs| cs.update(None));
+                host.emit("calendar://event-updated", serde_json::Value::Null);
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 continue;
             }
 
             let next_event = calendar::fetch_next_event(8);
+            host.with_calendar_state(&mut |cs| cs.update(next_event.clone()));
 
-            if let Some(cs) = cal_poll_handle.try_state::<CalendarState>() {
-                cs.update(next_event.clone());
-            }
-
+            let mut ctx_title: Option<String> = None;
+            host.with_context_state(&mut |ctx| {
+                ctx_title = ctx.current().map(|c| c.document_title);
+            });
             let movement_toward_event = next_event
                 .as_ref()
                 .and_then(|event| {
-                    cal_poll_handle
-                        .try_state::<ContextState>()
-                        .and_then(|ctx| ctx.current())
-                        .map(|ctx| {
-                            crate::crisis_event_matches_context(&event.title, &ctx.document_title)
-                        })
+                    ctx_title
+                        .as_deref()
+                        .map(|dt| crate::crisis_event_matches_context(&event.title, dt))
                 })
                 .unwrap_or(false);
 
-            let _ = cal_poll_handle.emit(
+            host.emit(
                 "calendar://event-updated",
                 serde_json::to_value(&next_event).unwrap_or(serde_json::Value::Null),
             );
-            if let Some(task) = cal_poll_handle
-                .try_state::<JeffState>()
-                .and_then(|s| s.store.get_active_task().ok().flatten())
-            {
-                awareness_core::spawn_awareness_update(
-                    &cal_poll_handle,
-                    awareness_core::SnapshotTrigger::CalendarEvent,
-                    task.id,
-                );
-                if let Some(event) = next_event.as_ref() {
-                    crisis::maybe_fire_meeting_imminent(
-                        &cal_poll_handle,
-                        task.id,
-                        event,
-                        movement_toward_event,
+
+            let mut active_task_id: Option<i64> = None;
+            host.with_jeff_state(&mut |s| {
+                active_task_id = s.store.get_active_task().ok().flatten().map(|t| t.id);
+            });
+            if let Some(task_id) = active_task_id {
+                if let Some(app) = host.tauri_app() {
+                    awareness_core::spawn_awareness_update(
+                        &app,
+                        awareness_core::SnapshotTrigger::CalendarEvent,
+                        task_id,
                     );
-                    let far_from_done = cal_poll_handle
-                        .try_state::<JeffState>()
-                        .map(|state| {
-                            state
+                    if let Some(event) = next_event.as_ref() {
+                        crisis::maybe_fire_meeting_imminent(
+                            &app,
+                            task_id,
+                            event,
+                            movement_toward_event,
+                        );
+                        let mut far_from_done = false;
+                        host.with_jeff_state(&mut |s| {
+                            far_from_done = s
                                 .awareness_core
                                 .snapshot_immediate()
                                 .work_understanding
@@ -350,15 +422,15 @@ fn spawn_calendar_poll(app: AppHandle, shutdown: CoreShutdown) -> JoinHandle<()>
                                             .map(|value| !value.trim().is_empty())
                                             .unwrap_or(false)
                                 })
-                                .unwrap_or(false)
-                        })
-                        .unwrap_or(false);
-                    crisis::maybe_fire_deadline_collision(
-                        &cal_poll_handle,
-                        task.id,
-                        event.minutes_until,
-                        far_from_done,
-                    );
+                                .unwrap_or(false);
+                        });
+                        crisis::maybe_fire_deadline_collision(
+                            &app,
+                            task_id,
+                            event.minutes_until,
+                            far_from_done,
+                        );
+                    }
                 }
             }
 
@@ -368,80 +440,83 @@ fn spawn_calendar_poll(app: AppHandle, shutdown: CoreShutdown) -> JoinHandle<()>
 }
 
 // phase 23: stale-task notification check at startup.
-fn spawn_stale_task_check(app: AppHandle, shutdown: CoreShutdown) -> JoinHandle<()> {
-    let stale_check_handle = app;
+fn spawn_stale_task_check(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         // give the app a few seconds to finish startup before checking
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         if shutdown.is_stopped() {
             return;
         }
-        if let Some(jeff_state) = stale_check_handle.try_state::<JeffState>() {
-            let quiet = stale_check_handle
-                .try_state::<AmbientState>()
-                .map(|s| s.is_quiet_mode())
-                .unwrap_or(false);
-            let _ = workload::check_stale_task_notifications(
-                &jeff_state.store,
-                &stale_check_handle,
-                quiet,
-            );
+        let quiet = host.is_quiet_mode();
+        if let Some(app) = host.tauri_app() {
+            host.with_jeff_state(&mut |s| {
+                let _ = workload::check_stale_task_notifications(&s.store, &app, quiet);
+            });
         }
     })
 }
 
 // phase 31: content observation poll -- every 10 seconds. reads the active
 // document text via AXUIElement when the per-task privacy toggle is enabled.
-fn spawn_content_observation(app: AppHandle) -> JoinHandle<()> {
+fn spawn_content_observation(host: Arc<dyn CoreHost>) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        crate::spawn_content_observation_poll(app).await;
+        if let Some(app) = host.tauri_app() {
+            crate::spawn_content_observation_poll(app).await;
+        }
     })
 }
 
 // apex b2: goal extraction loop on conversation lulls or task switches.
-fn spawn_goal_extraction(app: AppHandle) -> JoinHandle<()> {
+fn spawn_goal_extraction(host: Arc<dyn CoreHost>) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        crate::spawn_goal_extraction_poll(app).await;
+        if let Some(app) = host.tauri_app() {
+            crate::spawn_goal_extraction_poll(app).await;
+        }
     })
 }
 
 // apex b3: session-summary episodes on long idle lulls.
-fn spawn_memory_session_summary(app: AppHandle) -> JoinHandle<()> {
+fn spawn_memory_session_summary(host: Arc<dyn CoreHost>) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        crate::spawn_memory_session_summary_poll(app).await;
+        if let Some(app) = host.tauri_app() {
+            crate::spawn_memory_session_summary_poll(app).await;
+        }
     })
 }
 
 // apex b4: consolidate typed episodes into durable facts on idle windows or the
 // once-daily 02:00 maintenance window.
-fn spawn_memory_consolidation(app: AppHandle) -> JoinHandle<()> {
+fn spawn_memory_consolidation(host: Arc<dyn CoreHost>) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        crate::spawn_memory_consolidation_poll(app).await;
+        if let Some(app) = host.tauri_app() {
+            crate::spawn_memory_consolidation_poll(app).await;
+        }
     })
 }
 
 // phase 24: background update check -- delayed 2 seconds so it does not compete
 // with tray-ready or session-restore on startup.
-fn spawn_update_check(app: AppHandle, shutdown: CoreShutdown) -> JoinHandle<()> {
+fn spawn_update_check(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         if shutdown.is_stopped() {
             return;
         }
-        crate::perform_update_check(app).await;
+        if let Some(app) = host.tauri_app() {
+            crate::perform_update_check(app).await;
+        }
     })
 }
 
 // apex d6: resume any job left pending/running by a previous session once at
 // startup so checkpointed jobs continue from their last completed step.
-fn spawn_job_resume(app: AppHandle, shutdown: CoreShutdown) -> JoinHandle<()> {
-    let resume_handle = app;
+fn spawn_job_resume(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         if shutdown.is_stopped() {
             return;
         }
-        if let Some(state) = resume_handle.try_state::<JeffState>() {
+        host.with_jeff_state(&mut |state| {
             match agent_runtime::resume_incomplete_jobs_with_router(
                 &state.store,
                 &state.model_router,
@@ -457,21 +532,20 @@ fn spawn_job_resume(app: AppHandle, shutdown: CoreShutdown) -> JoinHandle<()> {
                     eprintln!("[jeff] startup job resume failed: {err:#}");
                 }
             }
-        }
+        });
     })
 }
 
 // apex d6: standing-job scheduler (60-second interval). fires daily-due standing
 // jobs automatically; each run posts a receipt to the unified audit log.
-fn spawn_standing_job_scheduler(app: AppHandle, shutdown: CoreShutdown) -> JoinHandle<()> {
-    let standing_handle = app;
+fn spawn_standing_job_scheduler(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         loop {
             if shutdown.is_stopped() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            if let Some(state) = standing_handle.try_state::<JeffState>() {
+            host.with_jeff_state(&mut |state| {
                 match agent_runtime::run_due_standing_jobs_with_router(
                     &state.store,
                     &state.model_router,
@@ -485,7 +559,7 @@ fn spawn_standing_job_scheduler(app: AppHandle, shutdown: CoreShutdown) -> JoinH
                         eprintln!("[jeff] standing-job scheduler tick failed: {err:#}");
                     }
                 }
-            }
+            });
         }
     })
 }
@@ -493,22 +567,17 @@ fn spawn_standing_job_scheduler(app: AppHandle, shutdown: CoreShutdown) -> JoinH
 // apex d8: speculation scheduler (~10-minute cadence). when the user is
 // unengaged with Jeff but working, precomputes the likely next request as a
 // read-only speculative job. speculative jobs cannot mutate (agent_runtime).
-fn spawn_speculation_scheduler(app: AppHandle, shutdown: CoreShutdown) -> JoinHandle<()> {
-    let speculation_handle = app;
+fn spawn_speculation_scheduler(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         loop {
             if shutdown.is_stopped() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(10 * 60)).await;
-            let quiet = speculation_handle
-                .try_state::<AmbientState>()
-                .map(|s| s.is_quiet_mode())
-                .unwrap_or(false);
-            if quiet {
+            if host.is_quiet_mode() {
                 continue;
             }
-            if let Some(state) = speculation_handle.try_state::<JeffState>() {
+            host.with_jeff_state(&mut |state| {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
@@ -523,7 +592,7 @@ fn spawn_speculation_scheduler(app: AppHandle, shutdown: CoreShutdown) -> JoinHa
                         eprintln!("[jeff] speculation tick failed: {err:#}");
                     }
                 }
-            }
+            });
         }
     })
 }
@@ -532,7 +601,74 @@ fn spawn_speculation_scheduler(app: AppHandle, shutdown: CoreShutdown) -> JoinHa
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
+    use std::sync::Mutex;
     use std::time::Duration;
+
+    // a non-tauri CoreHost. proves the core's I/O seam works with no AppHandle,
+    // no webview, and no tauri runtime -- the shape a headless daemon host takes.
+    struct FakeHost {
+        quiet: AtomicBool,
+        events: Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    impl FakeHost {
+        fn new() -> Self {
+            Self {
+                quiet: AtomicBool::new(false),
+                events: Mutex::new(Vec::new()),
+            }
+        }
+        fn set_quiet(&self, quiet: bool) {
+            self.quiet.store(quiet, Ordering::Relaxed);
+        }
+        fn emitted(&self) -> Vec<(String, serde_json::Value)> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl CoreHost for FakeHost {
+        fn emit(&self, event: &str, payload: serde_json::Value) {
+            self.events.lock().unwrap().push((event.to_string(), payload));
+        }
+        fn is_quiet_mode(&self) -> bool {
+            self.quiet.load(Ordering::Relaxed)
+        }
+        fn with_jeff_state(&self, _f: &mut dyn FnMut(&JeffState)) {}
+        fn with_context_state(&self, _f: &mut dyn FnMut(&ContextState)) {}
+        fn with_calendar_state(&self, _f: &mut dyn FnMut(&CalendarState)) {}
+        fn with_typing_state(&self, _f: &mut dyn FnMut(&TypingActivityState)) {}
+        fn tauri_app(&self) -> Option<AppHandle> {
+            None
+        }
+    }
+
+    #[test]
+    fn f1b1_fake_host_routes_events_without_a_webview() {
+        // the core can emit through the seam with no tauri runtime present.
+        let host = FakeHost::new();
+        host.emit("context://context-updated", serde_json::Value::Null);
+        host.emit(
+            "typing://activity-changed",
+            serde_json::json!({ "is_typing": true }),
+        );
+        let events = host.emitted();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "context://context-updated");
+        assert_eq!(events[1].0, "typing://activity-changed");
+        assert_eq!(events[1].1["is_typing"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn f1b1_fake_host_gates_and_has_no_tauri_bridge() {
+        // quiet gating is answerable headless; the tauri bridge is absent for a
+        // non-tauri host, which is what forces the remaining helpers to be
+        // decoupled before f1b-3.
+        let host = FakeHost::new();
+        assert!(!host.is_quiet_mode());
+        host.set_quiet(true);
+        assert!(host.is_quiet_mode());
+        assert!(host.tauri_app().is_none());
+    }
 
     #[test]
     fn f1a_core_shutdown_signals_a_loop_to_stop() {
