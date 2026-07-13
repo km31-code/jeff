@@ -186,27 +186,60 @@ impl CoreHandle {
     }
 }
 
-// start every recurring background scheduler and startup task. called once from
-// the tauri setup closure after state is managed, with a TauriHost. behavior is
-// identical to the pre-f1a inlined loops.
-pub fn start(host: Arc<dyn CoreHost>) -> CoreHandle {
+// apex f1b-3: which loops a process runs. exactly one process may run the
+// mutating background schedulers (standing jobs, job resume, speculation) --
+// they write to the shared store, so double-running them is the split-brain
+// failure. perception stays wherever the Accessibility grant is (the app).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoreProfile {
+    // standalone app with no daemon running: run everything. this is the
+    // pre-f1b-3 behavior and the fallback when the daemon is unreachable.
+    Full,
+    // the app while a daemon owns the background schedulers: perception, the
+    // world model, and the UI-facing loops only. must NOT run the mutating
+    // schedulers -- the daemon has them.
+    AppClient,
+    // the headless daemon: the store-backed background schedulers only. these
+    // depend on store + model_router alone (never the live snapshot), so they
+    // run correctly with no perception, which the daemon deliberately lacks.
+    DaemonBackground,
+}
+
+impl CoreProfile {
+    // perception + UI-facing loops (need the Accessibility grant / a webview).
+    fn runs_perception(self) -> bool {
+        matches!(self, CoreProfile::Full | CoreProfile::AppClient)
+    }
+    // the mutating, store-backed background schedulers. exactly one process.
+    fn runs_background_schedulers(self) -> bool {
+        matches!(self, CoreProfile::Full | CoreProfile::DaemonBackground)
+    }
+}
+
+// start the recurring loops this process is responsible for.
+pub fn start(host: Arc<dyn CoreHost>, profile: CoreProfile) -> CoreHandle {
     let shutdown = CoreShutdown::default();
     let mut joins: Vec<JoinHandle<()>> = Vec::new();
 
-    joins.push(spawn_active_window_context_poll(
-        host.clone(),
-        shutdown.clone(),
-    ));
-    joins.push(spawn_typing_activity_sync(host.clone(), shutdown.clone()));
-    joins.push(spawn_calendar_poll(host.clone(), shutdown.clone()));
-    joins.push(spawn_stale_task_check(host.clone(), shutdown.clone()));
-    joins.push(spawn_job_resume(host.clone(), shutdown.clone()));
-    joins.push(spawn_standing_job_scheduler(host.clone(), shutdown.clone()));
-    joins.push(spawn_speculation_scheduler(host.clone(), shutdown.clone()));
+    if profile.runs_perception() {
+        joins.push(spawn_active_window_context_poll(
+            host.clone(),
+            shutdown.clone(),
+        ));
+        joins.push(spawn_typing_activity_sync(host.clone(), shutdown.clone()));
+        joins.push(spawn_calendar_poll(host.clone(), shutdown.clone()));
+        joins.push(spawn_stale_task_check(host.clone(), shutdown.clone()));
 
-    // proactive ambient monitor + content/goal/memory/consolidation/update polls
-    // are detached side tasks whose lifetime the host owns.
-    host.spawn_side_tasks();
+        // proactive ambient monitor + content/goal/memory/consolidation/update
+        // polls are detached side tasks whose lifetime the host owns.
+        host.spawn_side_tasks();
+    }
+
+    if profile.runs_background_schedulers() {
+        joins.push(spawn_job_resume(host.clone(), shutdown.clone()));
+        joins.push(spawn_standing_job_scheduler(host.clone(), shutdown.clone()));
+        joins.push(spawn_speculation_scheduler(host.clone(), shutdown.clone()));
+    }
 
     CoreHandle { shutdown, joins }
 }

@@ -12,6 +12,7 @@ use jeff_desktop::store::TaskStore;
 use jeff_desktop::typing_activity::{self, TypingActivityState};
 use jeff_desktop::voice::OpenAiVoiceProvider;
 use jeff_desktop::{
+    daemon_client, daemon_ipc,
     awareness_core, commands, core_runtime, crisis, local_runtime, login_item, model_router,
     subtask, wake_word,
 };
@@ -281,9 +282,25 @@ fn main() {
             // closure only wires the shell and then starts the core.
             // apex f1b-1: the core runs against a CoreHost seam, not the raw
             // AppHandle. in-process that seam is TauriHost.
-            let _core = core_runtime::start(Arc::new(core_runtime::TauriHost::new(
-                handle.clone(),
-            )));
+            //
+            // apex f1b-3: if a daemon is up and hosting the core, it owns the
+            // mutating background schedulers (standing jobs, job resume,
+            // speculation) and this app runs as a client -- perception, world
+            // model, and UI loops only -- so the schedulers never double-run
+            // against the shared store. if the daemon is absent, unreachable, or
+            // speaks a different protocol, the app runs the full core exactly as
+            // it did before, and nothing is lost.
+            let daemon = daemon_client::probe(&daemon_ipc::default_socket_path(&app_local_data_dir));
+            let profile = if daemon.owns_background_schedulers() {
+                eprintln!("[jeff] daemon is hosting the core; running as client");
+                core_runtime::CoreProfile::AppClient
+            } else {
+                core_runtime::CoreProfile::Full
+            };
+            let _core = core_runtime::start(
+                Arc::new(core_runtime::TauriHost::new(handle.clone())),
+                profile,
+            );
 
             // phase 19: fire a one-time native notification on the very first
             // session so users who enabled launch-at-login know jeff is running

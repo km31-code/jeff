@@ -21,7 +21,7 @@ echo "--- apex f1a core lifecycle check ---"
 test -f "$CORE" || fail "core_runtime.rs missing"
 grep -q "mod core_runtime;" "${MAIN%/*}/lib.rs" || fail "core_runtime not declared in main.rs"
 # f1b-1 evolved the signature from &AppHandle to the CoreHost seam.
-grep -qE "pub fn start\(host: Arc<dyn CoreHost>\) -> CoreHandle" "$CORE" || fail "core start() entry point missing"
+grep -qE "pub fn start\(host: Arc<dyn CoreHost>, profile: CoreProfile\)" "$CORE" || fail "core start() entry point missing"
 grep -q "pub struct CoreHandle" "$CORE" || fail "CoreHandle lifecycle type missing"
 grep -q "pub struct CoreShutdown" "$CORE" || fail "CoreShutdown signal missing"
 grep -q "pub fn stop(self)" "$CORE" || fail "CoreHandle::stop lifecycle teardown missing"

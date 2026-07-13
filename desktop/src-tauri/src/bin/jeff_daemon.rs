@@ -125,7 +125,7 @@ fn main() {
         match build_state(&dir) {
             Ok(state) => {
                 let host = Arc::new(DaemonHost::new(state, sink.clone()));
-                let handle = core_runtime::start(host);
+                let handle = core_runtime::start(host, core_runtime::CoreProfile::DaemonBackground);
                 eprintln!(
                     "[jeff-daemon] core running headless (store {})",
                     dir.display()

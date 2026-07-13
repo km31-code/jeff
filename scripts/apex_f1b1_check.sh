@@ -40,7 +40,7 @@ for intent in request_awareness_update fire_meeting_imminent fire_deadline_colli
   grep -q "fn $intent" "$CORE" || fail "CoreHost::$intent intent missing"
 done
 grep -q "fn tauri_app" "$CORE" && fail "transitional tauri_app bridge should be removed by f1b-1b"
-grep -qE "pub fn start\(host: Arc<dyn CoreHost>\) -> CoreHandle" "$CORE" || fail "start() does not take the CoreHost seam"
+grep -qE "pub fn start\(host: Arc<dyn CoreHost>, profile: CoreProfile\)" "$CORE" || fail "start() does not take the CoreHost seam"
 pass "start() takes Arc<dyn CoreHost>; emit/quiet/state-access/intents on the trait"
 
 # 3. the loops route their OWN i/o through the host, not the raw handle.
@@ -56,7 +56,7 @@ DIRECT_STATE_READS=$(grep -c "try_state::<" "$CORE")
 pass "scheduler loops emit, gate, and read state through the CoreHost seam"
 
 # 4. main.rs constructs the in-process host and starts the core with it.
-grep -q "core_runtime::start(Arc::new(core_runtime::TauriHost::new(" "$MAIN" \
+grep -q "core_runtime::TauriHost::new(" "$MAIN" \
   || fail "main.rs does not start the core with a TauriHost"
 pass "main.rs wires the in-process TauriHost into the core"
 
