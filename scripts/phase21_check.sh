@@ -67,8 +67,9 @@ grep_check "clipboard poll respects global privacy setting" \
     "get_privacy_clipboard_capture_enabled" "$SRC/commands.rs"
 grep_check "active-window context command respects privacy setting" \
     "get_privacy_active_window_context_enabled" "$SRC/commands.rs"
+# apex f1a moved the active-window poll loop into core_runtime.
 grep_check "active-window poll loop checks privacy setting" \
-    "active_context_allowed" "$SRC/main.rs"
+    "active_context_allowed" "$SRC/core_runtime.rs"
 grep_check "proactive commands respect privacy setting" \
     "privacy_proactive_triggers_disabled" "$SRC/commands.rs"
 

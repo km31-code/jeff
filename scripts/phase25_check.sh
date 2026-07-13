@@ -59,14 +59,18 @@ else
     check "chat.rs no longer owns hardcoded grounding prompt" "ok"
 fi
 
-grep_check "chat.rs calls character chat builder through build_system_prompt" \
-    "build_chat_system_prompt" "$SRC/chat.rs"
+# the character builder API evolved from _system_prompt (String) to
+# _system_blocks (prompt-caching blocks) in the Apex brain work; the
+# invariant -- consumers get their prompt from character.rs, never hardcoded --
+# is unchanged.
+grep_check "chat.rs calls character chat builder" \
+    "character::build_chat_system_blocks" "$SRC/chat.rs"
 grep_check "revision.rs calls character revision builder" \
-    "build_revision_system_prompt" "$SRC/revision.rs"
+    "character::build_revision_system_blocks" "$SRC/revision.rs"
 grep_check "proactive.rs calls character reorientation builder" \
-    "build_reorientation_system_prompt" "$SRC/proactive.rs"
+    "character::build_reorientation_system_blocks" "$SRC/proactive.rs"
 grep_check "subtask.rs calls character subtask builder" \
-    "build_subtask_system_prompt" "$SRC/subtask.rs"
+    "character::build_subtask_system_blocks" "$SRC/subtask.rs"
 grep_check "chat_streaming strips filler before finalizing output" \
     "strip_filler_phrases" "$SRC/chat_streaming.rs"
 grep_check "subtask result storage strips filler" \
