@@ -56,12 +56,14 @@ required_commands=(
 )
 
 for command in "${required_commands[@]}"; do
-  if ! rg -q "\"$command\"" "$FRONTEND_FILE"; then
+  # grep -F (fixed strings), not rg: rg is not always a real binary in a bash
+  # subshell (it can be a shell function), and these patterns are literal.
+  if ! grep -qF "\"$command\"" "$FRONTEND_FILE"; then
     echo "ERROR: frontend invoke contract missing command '$command'" >&2
     exit 1
   fi
 
-  if ! rg -q "pub fn $command" "$BACKEND_FILE"; then
+  if ! grep -qF "pub fn $command" "$BACKEND_FILE"; then
     echo "ERROR: backend command handler missing '$command'" >&2
     exit 1
   fi
