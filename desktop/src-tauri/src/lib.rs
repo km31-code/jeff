@@ -24,6 +24,7 @@ pub mod cost_governor;
 pub mod coworking;
 pub mod crisis;
 pub mod crisis_core;
+pub mod daemon_host;
 pub mod daemon_ipc;
 pub mod document_model;
 pub mod drive_core;
