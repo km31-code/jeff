@@ -9,6 +9,7 @@ pub mod consolidation;
 pub mod context_observer;
 pub mod cost_governor;
 pub mod crisis_core;
+pub mod daemon_ipc;
 pub mod embedding;
 pub mod errors;
 pub mod gmail_core;
