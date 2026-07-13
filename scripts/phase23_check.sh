@@ -241,10 +241,13 @@ grep_check "apply edit in place in content.js" \
     "applyEditInPlace" "$EXT/content.js"
 grep_check "apply edit message handler in content.js" \
     "JEFF_APPLY_EDIT" "$EXT/content.js"
-grep_check "apply-fallback fetch on anchor mismatch in content.js" \
-    "apply-fallback" "$EXT/content.js"
+# the D2 google-docs rework replaced the apply-fallback / apply-result message
+# tokens with structured return objects; the guided-fallback and applied/failed
+# reporting are unchanged in substance.
+grep_check "guided fallback on anchor mismatch in content.js" \
+    "anchorMismatch: true" "$EXT/content.js"
 grep_check "extension reports applied or failed result" \
-    "apply-result" "$EXT/content.js"
+    "ok: true\|mutationAttempted" "$EXT/content.js"
 grep_check "approval poll loop in background.js" \
     "pollForLiveEditApproval" "$EXT/background.js"
 grep_check "apply edit dispatch from background.js" \
