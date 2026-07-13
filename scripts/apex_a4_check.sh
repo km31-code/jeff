@@ -84,7 +84,10 @@ echo "$FRONTEND_LINT_OUT" | grep -q "tsc --noEmit" || { echo "$FRONTEND_LINT_OUT
 pass "frontend TypeScript check passes"
 
 FRONTEND_TEST_OUT=$(cd "$DESKTOP" && npm test -- --run 2>&1)
-echo "$FRONTEND_TEST_OUT" | grep -q "34 passed" || { echo "$FRONTEND_TEST_OUT"; fail "frontend tests failed"; }
+# the frontend test count grows as suites are added; assert green, not a fixed
+# count (matches the e7 ship gate's flexible pattern).
+echo "$FRONTEND_TEST_OUT" | grep -qE "Test Files.*passed" || { echo "$FRONTEND_TEST_OUT"; fail "frontend tests failed"; }
+echo "$FRONTEND_TEST_OUT" | grep -qE "[0-9]+ failed" && { echo "$FRONTEND_TEST_OUT"; fail "frontend tests failed"; }
 pass "frontend tests pass"
 
 echo "--- apex a4 check passed ---"

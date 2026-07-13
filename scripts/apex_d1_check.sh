@@ -87,7 +87,9 @@ pass "Google Docs, native docs, Gmail, calendar, and custom tools share the type
 # management (store), the revision version store (revision), the transient
 # clipboard snippet (watcher), the native scripting adapter (native_docs), and
 # the self-built tool staging/installed store (self_extend).
-MUTATION_ALLOWLIST="action_bus.rs local_runtime.rs store.rs revision.rs watcher.rs native_docs.rs self_extend.rs"
+# daemon_ipc: the f1b-2 headless-daemon IPC transport removes its own stale unix
+# socket file on bind/drop -- socket lifecycle infra, not a Jeff action.
+MUTATION_ALLOWLIST="action_bus.rs local_runtime.rs store.rs revision.rs watcher.rs native_docs.rs self_extend.rs daemon_ipc.rs"
 MUTATION_RE='fs::write\(|fs::remove_(file|dir)|fs::rename\(|File::create\('
 for src_file in "$SRC"/*.rs; do
   base=$(basename "$src_file")

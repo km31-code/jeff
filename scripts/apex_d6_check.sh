@@ -41,10 +41,13 @@ pass "steering, checkpoint/resume, fifo, and standing-job runtime seams are pres
 # 2. main.rs runs the scheduler and startup-resume automatically, not just as
 # manually-invokable commands (commands.rs references crate::agent_runtime::;
 # these bare agent_runtime:: calls prove the background wiring in main.rs).
-grep -q "agent_runtime::resume_incomplete_jobs" "$MAIN" || fail "startup job resume not wired into main.rs"
-grep -q "agent_runtime::run_due_standing_jobs" "$MAIN" || fail "standing-job scheduler not wired into main.rs"
-grep -q "apex d6: standing-job scheduler" "$MAIN" || fail "standing-job scheduler task marker missing"
-grep -q "apex d6: resume" "$MAIN" || fail "startup resume task marker missing"
+# apex f1a moved the startup-resume and standing-job scheduler out of the
+# main.rs setup closure into core_runtime; main.rs starts the core.
+CORE_RUNTIME="$SRC/core_runtime.rs"
+grep -q "agent_runtime::resume_incomplete_jobs" "$CORE_RUNTIME" || fail "startup job resume not wired into core_runtime"
+grep -q "agent_runtime::run_due_standing_jobs" "$CORE_RUNTIME" || fail "standing-job scheduler not wired into core_runtime"
+grep -q "apex d6: standing-job scheduler" "$CORE_RUNTIME" || fail "standing-job scheduler task marker missing"
+grep -q "apex d6: resume" "$CORE_RUNTIME" || fail "startup resume task marker missing"
 pass "standing-job scheduler and startup resume run automatically in main.rs"
 
 # 3. Commands and disable control wired end to end.

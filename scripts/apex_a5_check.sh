@@ -35,8 +35,11 @@ pass "character eval script has A5 sample size, pass bar, and key behavior"
 test -f "$WORKFLOW" || fail "release workflow missing"
 grep -q "character-eval:" "$WORKFLOW" || fail "release workflow missing character-eval job"
 grep -q "run: bash scripts/character_eval.sh" "$WORKFLOW" || fail "release workflow does not run character eval"
-grep -q "needs: \\[build, character-eval\\]" "$WORKFLOW" || fail "sign job is not gated on character-eval"
-pass "release workflow gates signing on character eval"
+# the workflow was restructured so build gates on character-eval
+# (needs: [test, character-eval]); sign -> build, so signing/release is
+# transitively gated on character eval passing. this matches the e7 ship gate.
+grep -q "needs: \\[test, character-eval\\]" "$WORKFLOW" || fail "build job is not gated on character-eval (release not gated on character eval)"
+pass "release workflow gates the build (and thus signing) on character eval"
 
 grep -q "Run \`scripts/character_eval.sh\`" "$PLAN" || fail "Phase 25 checklist not updated"
 grep -q "At least 13 of 15 sampled cases pass" "$PLAN" || fail "Phase 25 exit criteria not updated with A5 bar"
