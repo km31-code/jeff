@@ -80,6 +80,13 @@ impl DaemonHost {
 
 impl CoreHost for DaemonHost {
     fn emit(&self, event: &str, payload: serde_json::Value) {
+        // apex f1b-3c: with no app connected there is nothing to deliver to, so
+        // queue the signal instead of dropping it. the app drains the queue when
+        // it next launches -- overnight work is never delivered into the void.
+        if self.sink.client_count() == 0 {
+            let _ = self.state.store.enqueue_daemon_event(event, &payload);
+            return;
+        }
         self.sink.broadcast(&IpcEvent {
             event: event.to_string(),
             payload,
@@ -190,6 +197,38 @@ mod tests {
         let mut saw_ctx = false;
         host.with_context_state(&mut |_c| saw_ctx = true);
         assert!(saw_ctx, "daemon host owns ContextState directly");
+    }
+
+    #[test]
+    fn f1b3c_signals_produced_with_no_app_connected_are_queued_then_delivered_once() {
+        // the daemon does the overnight work with the app closed. anything it
+        // has to say must survive until the app comes back -- and be delivered
+        // exactly once.
+        let host = host();
+        assert_eq!(host.sink.client_count(), 0, "no app is connected");
+
+        host.emit("crisis://fired", serde_json::json!({ "task_id": 7 }));
+        host.emit(
+            "jobs://standing-complete",
+            serde_json::json!({ "job_id": 12 }),
+        );
+
+        // the app drains the queue on launch.
+        let mut drained = Vec::new();
+        host.with_jeff_state(&mut |state| {
+            drained = state.store.drain_daemon_events().unwrap();
+        });
+        assert_eq!(drained.len(), 2, "both signals survived the app being closed");
+        assert_eq!(drained[0].0, "crisis://fired");
+        assert_eq!(drained[0].1["task_id"], 7);
+        assert_eq!(drained[1].0, "jobs://standing-complete");
+
+        // draining is destructive: nothing is delivered twice.
+        let mut again = Vec::new();
+        host.with_jeff_state(&mut |state| {
+            again = state.store.drain_daemon_events().unwrap();
+        });
+        assert!(again.is_empty(), "signals must be delivered exactly once");
     }
 
     #[test]

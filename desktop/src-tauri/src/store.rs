@@ -859,6 +859,16 @@ impl TaskStore {
 
             CREATE INDEX IF NOT EXISTS idx_remote_ingested_docs_task
                 ON remote_ingested_docs(task_id, id DESC);
+
+            -- apex f1b-3c: signals the daemon produced while no app was
+            -- connected. the app drains this on launch so overnight work is
+            -- never delivered into the void.
+            CREATE TABLE IF NOT EXISTS daemon_event_queue (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                event      TEXT NOT NULL,
+                payload    TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
             "#,
             now = SQLITE_NOW_EXPR,
             embedding_model = crate::providers::OPENAI_EMBEDDING_MODEL_ID,
@@ -3427,6 +3437,39 @@ impl TaskStore {
         Ok(())
     }
 
+    // apex f1b-3c: the daemon queues signals it produced with no app connected;
+    // the app drains them on launch and delivers them to the UI.
+    pub fn enqueue_daemon_event(&self, event: &str, payload: &serde_json::Value) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO daemon_event_queue (event, payload) VALUES (?1, ?2)",
+            params![event, payload.to_string()],
+        )?;
+        Ok(())
+    }
+
+    // returns the queued signals and clears them, so each is delivered once.
+    pub fn drain_daemon_events(&self) -> Result<Vec<(String, serde_json::Value)>> {
+        let conn = self.connect()?;
+        let mut stmt =
+            conn.prepare("SELECT id, event, payload FROM daemon_event_queue ORDER BY id ASC")?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let event: String = row.get(1)?;
+                let payload: String = row.get(2)?;
+                Ok((id, event, payload))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut out = Vec::new();
+        for (id, event, payload) in rows {
+            let value = serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+            out.push((event, value));
+            conn.execute("DELETE FROM daemon_event_queue WHERE id = ?1", params![id])?;
+        }
+        Ok(out)
+    }
+
     pub fn get_app_setting_bool(&self, key: &str) -> Result<Option<bool>> {
         let raw = self.get_app_setting(key)?;
         Ok(raw.map(|value| {
@@ -5787,8 +5830,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 55,
-            "expected 55 application tables after the connected action approval ledger"
+            count, 56,
+            "expected 56 application tables after the daemon event queue"
         );
     }
 

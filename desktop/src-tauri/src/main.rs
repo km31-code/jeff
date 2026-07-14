@@ -309,6 +309,30 @@ fn main() {
                 profile,
             );
 
+            // apex f1b-3c: deliver anything the daemon produced while no app was
+            // running (standing-job results, crises). the queue is drained once,
+            // so each signal is delivered exactly once.
+            {
+                let drain_app = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    // let the webview finish mounting before delivering.
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let Some(state) = drain_app.try_state::<JeffState>() else {
+                        return;
+                    };
+                    match state.store.drain_daemon_events() {
+                        Ok(events) if !events.is_empty() => {
+                            eprintln!("[jeff] delivering {} queued daemon signal(s)", events.len());
+                            for (event, payload) in events {
+                                let _ = drain_app.emit(&event, payload);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(err) => eprintln!("[jeff] failed to drain daemon signals: {err:#}"),
+                    }
+                });
+            }
+
             // phase 19: fire a one-time native notification on the very first
             // session so users who enabled launch-at-login know jeff is running
             // in the tray without needing to look for it.
