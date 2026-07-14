@@ -870,10 +870,14 @@ directional and may be re-scoped when their epoch begins.
 | E5 | Drive and Docs remote read | E1 | complete; `scripts/apex_e5_check.sh` own-sections passed (`drive_core.rs` on-demand `ingest_remote_doc` chunking remote Doc/Drive text into retrieval as an artifact tagged with provenance + url, `list_remote_docs`, `remove_remote_doc` purging the ingested chunks via artifact-delete CASCADE; `remote_ingested_docs` table; commands + Privacy Center remote-docs surface with per-item removal). Plus warning-free `cargo check`, 2 e5 tests (ingest-grounds-with-provenance, removal-purges-chunks), backend 594 tests, frontend lint + 37 tests, table count 53. Live Drive/Docs MCP/OAuth export is env-gated; ingestion, provenance, retrieval grounding, and purge-on-removal are deterministic and tested |
 | E6 | Onboarding v2 and bundled inference | A4 | complete; `scripts/apex_e6_check.sh` own-sections passed (inference choice bundled vs byok in `onboarding.rs` with `get`/`set_inference_mode` + `onboarding_ready` gate so bundled completes with no key entry; `complete_onboarding` guarded by readiness; OnboardingStatusDto carries `inference_mode` + `bundled_inference_configured`; `BUNDLED_PROVIDER_LABEL` router seam treating the metered relay as an OpenAI-compatible provider; onboarding wizard bundled-inference control). Plus warning-free `cargo check`, 1 e6 test (bundled-no-key onboarding), backend 596 tests, frontend lint + 37 tests. Live bundled relay + scoped-token issuance are env-gated; the inference-choice, no-key completion, and provider seam are deterministic and tested. Non-technical <5-min tester (Pillar 10 crit 2) is a manual/video gate |
 | E7 | Ship gate | all A-E | complete; `scripts/apex_e7_check.sh` passed end to end (flat, non-recursive): all A1-E6 milestone gates present; `scripts/apex_eval.sh` aggregate quality spine runs judgment/crisis/agent/inbox/latency suites 5/5; release workflow order eval -> build -> sign -> notarize (inbox eval added); `e7_migrations_are_idempotent_and_preserve_data` DB reliability test; warning-free `cargo check`; full backend 596 tests; frontend lint + 37 tests. Env-gated/manual acceptance gates documented: live day-in-the-life on a signed build, <5-min non-technical tester on video, character/goal live-LLM evals (JEFF_RUN_EXTERNAL_EVAL=1 + key), crash telemetry, cross-version DB migration with shipped DBs |
-| F1 | Headless daemon separation | E7 | post-Apex |
-| F2 | Overnight work and morning readiness | F1 | post-Apex |
-| F3 | Voice companion (phone/earbuds) | F1, C4 | post-Apex |
-| F4 | Cloud continuation (opt-in) | F1 | post-Apex |
+| F1a | In-process core boundary | E7 | complete; `scripts/apex_f1a_check.sh` passed (`core_runtime.rs` owns every recurring background scheduler and startup task a daemon must run headless -- context poll, typing sync, calendar poll with crisis wiring, stale check, proactive monitor, content/goal/memory/consolidation polls, update check, job resume, standing-job scheduler, speculation scheduler -- behind a `start()`/`CoreShutdown` lifecycle; main.rs setup closure dropped ~460 lines of inlined loops). Behavior byte-identical (verbatim move + per-loop shutdown check) |
+| F1b-1 | Core decoupled from the AppHandle | F1a | complete; `scripts/apex_f1b1_check.sh` + `scripts/apex_f1b1b_check.sh` passed (object-safe `CoreHost` trait: `emit`, `is_quiet_mode`, closure-based state accessors -- deliberately NOT returning `tauri::State`, so a non-tauri host can implement it -- plus semantic intents `request_awareness_update`/`fire_meeting_imminent`/`fire_deadline_collision`/`check_stale_tasks`/`spawn_side_tasks`. `TauriHost` is the in-process impl; every AppHandle-based helper call is confined to it. The core now contains zero tauri types. `FakeHost` test double proves the whole seam runs with no tauri runtime) |
+| F1b-2 | Shared lib + IPC transport | F1b-1 | complete; `scripts/apex_f1b2_check.sh` + `scripts/apex_f1b2c_check.sh` passed (`daemon_ipc.rs`: unix-domain-socket transport, framed JSON with a 4-byte BE length prefix, versioned `IpcRequest`/`IpcResponse`/`IpcHandler`, server->client `IpcEvent` stream with per-connection writes mutex-serialized, 16MiB frame guard, stale-socket cleanup. lib.rs now owns all 70 modules -- the 33 that main.rs and lib.rs were each compiling as distinct types collapsed into one -- so the daemon can link the core; main.rs is a thin bin. `DaemonHost` implements `CoreHost` with no AppHandle, owning its own world model and emitting over IPC. Proven: the daemon boots the core headless, builds its own store, serves status, and survives a SIGKILL of the app) |
+| F1b-3 | Daemon owns the schedulers; app supervises | F1b-2 | complete; `scripts/apex_f1b3a_check.sh`, `scripts/apex_f1b3b_check.sh`, `scripts/apex_f1b3c_check.sh` passed (`CoreProfile{Full,AppClient,DaemonBackground}` prevents split-brain: the app hands over the mutating store-backed schedulers only to a daemon that is reachable AND protocol-matching AND core-running, and falls back to the full in-process core otherwise, so nothing is ever lost. `daemon_supervisor.rs`: off by default, started and supervised by the app, Privacy Center toggle, kill switch that actually terminates the process. Durable `daemon_event_queue`: signals produced while the app is closed are persisted and drained exactly once on next launch, so overnight work is never delivered into the void). Perception stays in the app, which holds the Accessibility grant |
+| F1c | Daemon robustness: survive OS restart and crash | F1b-3 | not started; the remaining F1 exit criterion. Today the app spawns the daemon, so the daemon comes back only when the app does. Needs: relaunch-on-crash supervision, a login-item or launchd path so the daemon is up after an OS restart without the app being opened, and real-machine crash/restart validation |
+| F2 | Overnight work and morning readiness | F1c | post-Apex |
+| F3 | Voice companion (phone/earbuds) | F1c, C4 | post-Apex |
+| F4 | Cloud continuation (opt-in) | F1c | post-Apex |
 | G1 | Code-execution sandbox | E7 | post-Apex |
 | G2 | Multimodal artifacts (charts, decks, transforms) | G1 | post-Apex |
 | G3 | Entity model (people) | B4 | post-Apex |
@@ -1870,13 +1874,32 @@ work lives, and the whole system ships.
 
 #### Epoch F — Everywhere (Pillar 14)
 
-- **F1 Headless daemon separation**: split the core (world model, judgment,
-  runtime, scheduler) into a launchd-managed headless process; the Tauri app
-  becomes a UI client over local IPC. Standing jobs, consolidation, and
-  speculation run lid-closed-permitting without the UI.
+- **F1 Headless daemon separation** (F1a, F1b-1, F1b-2, F1b-3 complete; F1c
+  remaining): the core moves into a headless process so standing jobs,
+  consolidation, and speculation run without the UI. Built as: an in-process
+  core boundary (F1a), a `CoreHost` seam that leaves the core free of tauri
+  types (F1b-1), a shared lib plus a unix-socket IPC transport and a
+  `DaemonHost` with no AppHandle (F1b-2), and profile-based ownership plus
+  app supervision plus a durable event queue (F1b-3). **F1c** is what is
+  left: relaunch-on-crash and survive-OS-restart.
+
+  **Two scope decisions taken at F1b-3, which the rest of Epoch F depends on:**
+  1. *The daemon does no perception.* The Accessibility grant, the screen
+     observation, and therefore the **live** world model stay in the app. The
+     daemon owns the **store-backed** half: memory, jobs, consolidation,
+     speculation, standing work. This is the honest split, because a process
+     that cannot see the screen cannot own a live world model.
+  2. *Consequently the app is not a pure IPC client.* The original sketch had
+     all ~215 commands routed over IPC. That is unnecessary and is dropped:
+     with perception in the app, there is no daemon-side live state for those
+     commands to be a client of. What F3 will need is a small IPC surface for
+     the store-backed operations (recall, chat/voice turn, job status), not
+     the whole command table. Scope that surface in F3, driven by the
+     earbud scenes, rather than porting commands speculatively.
 - **F2 Overnight work and morning readiness**: standing/queued jobs and
   consolidation complete before first engagement; the briefing is computed,
-  not composed on demand.
+  not composed on demand. Depends on F1c: overnight work is only real once
+  the daemon reliably survives the night.
 - **F3 Voice companion**: a minimal phone/earbud client (audio-only) that
   connects to the home daemon over an end-to-end encrypted relay — the same
   Jeff, same memory, walking to class. Not a mobile app with a chat screen;
@@ -2130,13 +2153,16 @@ overnight, and follows you to your earbuds — the same entity with the same
 memory, not a companion app.
 
 **Design:**
-- **Daemon separation (F1)** is the architectural key. The core — world
-  model, judgment, agent runtime, schedulers — moves into a headless
-  launchd-managed process. The desktop app becomes a UI client over local
-  IPC. This is a large refactor and the reason ubiquity is post-Apex: it
-  should happen once the core is proven, not while it is being built. Every
-  Apex module boundary (Part IV) is drawn so this split is a re-homing, not
-  a rewrite.
+- **Daemon separation (F1)** is the architectural key, and the Part IV module
+  boundaries held: this was a re-homing, not a rewrite. As built, the split
+  falls where the Accessibility grant falls. The **app** keeps perception,
+  the live world model, and the UI. The **daemon** owns the store-backed
+  core — memory, agent runtime, consolidation, standing jobs, speculation —
+  and runs it headless over a local unix-socket IPC, surviving a kill of the
+  app. It is off until the user enables it in the Privacy Center, and signals
+  it produces while the app is closed are queued and delivered exactly once
+  when the app returns. **F1c** closes the last gap: relaunch-on-crash and
+  coming back after an OS restart without the app being opened.
 - **Overnight readiness (F2)**: consolidation, standing jobs, and queued
   work complete on the daemon's schedule. The morning briefing is a
   retrieval, not a composition — it was finished before the lid opened.
@@ -2152,9 +2178,12 @@ memory, not a companion app.
   documented in the Privacy Center before the toggle exists, per the
   standing invariant that controls precede capability.
 
-**Exit criteria:** product gate 14; daemon survives UI crash and OS restart;
-relay compromise test shows ciphertext only; F4 off by default with explicit
-boundary disclosure.
+**Exit criteria:** product gate 14; daemon survives UI crash (met at F1b-2c:
+proven against a SIGKILL of the app) and OS restart (**open — F1c**); relay
+compromise test shows ciphertext only; F4 off by default with explicit
+boundary disclosure (the daemon itself already ships off-by-default with a
+Privacy Center control and a working kill switch, per "controls precede
+capability").
 
 ---
 
