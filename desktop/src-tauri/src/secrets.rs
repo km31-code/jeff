@@ -7,6 +7,11 @@ pub const OPENAI_KEYCHAIN_SERVICE: &str = "com.jeff.desktop";
 pub const OPENAI_KEYCHAIN_ACCOUNT: &str = "openai_api_key";
 pub const ANTHROPIC_KEYCHAIN_ACCOUNT: &str = "anthropic_api_key";
 pub const BUNDLED_TOKEN_KEYCHAIN_ACCOUNT: &str = "bundled_inference_token";
+// apex f3-hardening: the companion channel's Noise static PRIVATE key. a private
+// key belongs in the Keychain, next to the api keys, not in the app_settings DB.
+// the public key, pairing psk, and rendezvous token stay in the DB -- they are
+// routing material, not secrets. the stored value is the base64 of the raw key.
+pub const COMPANION_KEY_KEYCHAIN_ACCOUNT: &str = "companion_static_private_key";
 pub const BUNDLED_TOKEN_ENV_VAR: &str = "JEFF_BUNDLED_INFERENCE_TOKEN";
 pub const PREFER_ENV_OPENAI_KEY_VAR: &str = "JEFF_PREFER_ENV_OPENAI_API_KEY";
 
@@ -251,6 +256,66 @@ pub fn delete_bundled_inference_token() -> Result<()> {
         Err(err) => Err(anyhow!(
             "failed to delete bundled inference token from keychain: {err}"
         )),
+    }
+}
+
+// ---- apex f3-hardening: companion static private key -------------------------
+// the same shape as OpenAiKeyStore: a trait so the identity migration logic can be
+// unit-tested against an in-memory double, with the live Keychain implementation
+// (SystemCompanionKeyStore) never touched by a test. values are base64 strings.
+
+pub trait CompanionKeyStore {
+    fn get_companion_private_key(&self) -> Result<Option<String>>;
+    fn set_companion_private_key(&self, private_b64: &str) -> Result<()>;
+    fn delete_companion_private_key(&self) -> Result<()>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemCompanionKeyStore;
+
+impl SystemCompanionKeyStore {
+    fn entry() -> Result<Entry> {
+        Entry::new(OPENAI_KEYCHAIN_SERVICE, COMPANION_KEY_KEYCHAIN_ACCOUNT)
+            .context("failed to initialize companion key keychain entry")
+    }
+}
+
+impl CompanionKeyStore for SystemCompanionKeyStore {
+    fn get_companion_private_key(&self) -> Result<Option<String>> {
+        let entry = Self::entry()?;
+        match entry.get_password() {
+            Ok(value) => {
+                let trimmed = value.trim().to_string();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed))
+                }
+            }
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(err) => Err(anyhow!(
+                "failed to read companion private key from keychain: {err}"
+            )),
+        }
+    }
+
+    fn set_companion_private_key(&self, private_b64: &str) -> Result<()> {
+        let trimmed = private_b64.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!("companion private key cannot be empty"));
+        }
+        Self::entry()?
+            .set_password(trimmed)
+            .context("failed to store companion private key in keychain")
+    }
+
+    fn delete_companion_private_key(&self) -> Result<()> {
+        match Self::entry()?.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(err) => Err(anyhow!(
+                "failed to delete companion private key from keychain: {err}"
+            )),
+        }
     }
 }
 

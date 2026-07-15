@@ -432,19 +432,83 @@ pub fn set_enabled(store: &TaskStore, enabled: bool) -> Result<()> {
 // the daemon/app's own static identity, generated on first use and persisted so
 // pairings survive restarts. the private half lives in the local store, the same
 // local-first trust boundary as the rest of the world model.
-pub fn identity(store: &TaskStore) -> Result<StaticKeypair> {
-    if let (Some(priv_b64), Some(pub_b64)) = (
-        store.get_app_setting(IDENTITY_PRIV_KEY)?,
-        store.get_app_setting(IDENTITY_PUB_KEY)?,
-    ) {
-        let private = b64().decode(priv_b64.trim()).context("decode companion private key")?;
-        let public = b64().decode(pub_b64.trim()).context("decode companion public key")?;
-        return Ok(StaticKeypair { private, public });
+// apex f3-hardening: what identity() should do, given the current state of the
+// keychain (private key) and the DB (public key + any legacy private key). a pure
+// decision so the migration is unit-testable without touching the live Keychain.
+#[derive(Debug, PartialEq, Eq)]
+enum IdentityAction {
+    // the private key is already in the keychain and the public key is in the DB.
+    UseKeychain,
+    // legacy state: the private key is still in app_settings. move it to the
+    // keychain and clear the DB copy, keeping the public key.
+    Migrate,
+    // no usable identity anywhere -- generate one.
+    Generate,
+}
+
+fn decide_identity(
+    keychain_private: &Option<String>,
+    db_private: &Option<String>,
+    db_public: &Option<String>,
+) -> IdentityAction {
+    let has = |v: &Option<String>| v.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+    if has(keychain_private) && has(db_public) {
+        IdentityAction::UseKeychain
+    } else if has(db_private) && has(db_public) {
+        // the private key lives in the DB from a pre-hardening build. migrate it.
+        IdentityAction::Migrate
+    } else {
+        // includes the corner where the keychain has a private key but the DB lost
+        // the public one: without the public half we cannot reconstruct the pair,
+        // so regenerate rather than serve a half-identity.
+        IdentityAction::Generate
     }
-    let keypair = generate_static_keypair()?;
-    store.set_app_setting(IDENTITY_PRIV_KEY, &b64().encode(&keypair.private))?;
-    store.set_app_setting(IDENTITY_PUB_KEY, &b64().encode(&keypair.public))?;
-    Ok(keypair)
+}
+
+// the daemon's Noise static keypair. the private key is resolved from the Keychain;
+// the public key from app_settings. on a pre-hardening store the private key is
+// migrated out of app_settings into the Keychain on first read.
+pub fn identity(store: &TaskStore) -> Result<StaticKeypair> {
+    identity_with_key_store(store, &crate::secrets::SystemCompanionKeyStore)
+}
+
+fn identity_with_key_store(
+    store: &TaskStore,
+    keys: &dyn crate::secrets::CompanionKeyStore,
+) -> Result<StaticKeypair> {
+    let keychain_private = keys.get_companion_private_key()?;
+    let db_private = store.get_app_setting(IDENTITY_PRIV_KEY)?;
+    let db_public = store.get_app_setting(IDENTITY_PUB_KEY)?;
+
+    match decide_identity(&keychain_private, &db_private, &db_public) {
+        IdentityAction::UseKeychain => {
+            let private = b64()
+                .decode(keychain_private.unwrap().trim())
+                .context("decode companion private key")?;
+            let public = b64()
+                .decode(db_public.unwrap().trim())
+                .context("decode companion public key")?;
+            Ok(StaticKeypair { private, public })
+        }
+        IdentityAction::Migrate => {
+            let priv_b64 = db_private.unwrap();
+            let pub_b64 = db_public.unwrap();
+            let private = b64().decode(priv_b64.trim()).context("decode companion private key")?;
+            let public = b64().decode(pub_b64.trim()).context("decode companion public key")?;
+            // move the secret to the keychain, then clear the DB copy. keep public.
+            keys.set_companion_private_key(priv_b64.trim())?;
+            store.delete_app_setting(IDENTITY_PRIV_KEY)?;
+            Ok(StaticKeypair { private, public })
+        }
+        IdentityAction::Generate => {
+            let keypair = generate_static_keypair()?;
+            keys.set_companion_private_key(&b64().encode(&keypair.private))?;
+            store.set_app_setting(IDENTITY_PUB_KEY, &b64().encode(&keypair.public))?;
+            // best-effort: never leave a stale private key behind in the DB.
+            let _ = store.delete_app_setting(IDENTITY_PRIV_KEY);
+            Ok(keypair)
+        }
+    }
 }
 
 // the shared pairing secret (the Noise psk), generated once and reused as the
@@ -462,6 +526,13 @@ pub fn pairing_psk(store: &TaskStore) -> Result<[u8; 32]> {
     let psk = generate_pairing_secret()?;
     store.set_app_setting(PAIRING_PSK_KEY, &b64().encode(psk))?;
     Ok(psk)
+}
+
+// open a pairing window from `now`. the only mutation begin_pairing makes to the
+// pairing state, extracted so callers (and tests) can open a window without
+// generating a keychain-backed identity.
+pub fn open_pairing_window(store: &TaskStore, now: i64) -> Result<()> {
+    store.set_app_setting(PAIRING_OPEN_UNTIL_KEY, &(now + PAIRING_WINDOW_SECONDS).to_string())
 }
 
 fn pairing_open(store: &TaskStore, now: i64) -> bool {
@@ -483,7 +554,7 @@ pub fn begin_pairing(store: &TaskStore, now: i64) -> Result<crate::models::Compa
     // apex f3b: the code also carries the rendezvous token so the device knows the
     // relay meeting point. still public routing material only -- never the private key.
     let token = rendezvous_token(store)?;
-    store.set_app_setting(PAIRING_OPEN_UNTIL_KEY, &(now + PAIRING_WINDOW_SECONDS).to_string())?;
+    open_pairing_window(store, now)?;
     let code = format!("{}.{}.{}", b64().encode(&keys.public), b64().encode(psk), token);
     Ok(crate::models::CompanionPairingDto {
         code,
@@ -739,8 +810,10 @@ mod tests {
         set_enabled(&store, true).unwrap();
         // enabled but no open pairing window -> an unknown device is rejected.
         assert_eq!(store_authorize(&store, &device.public, now), AuthDecision::Reject);
-        // open a pairing window -> the unknown device enrolls.
-        begin_pairing(&store, now).unwrap();
+        // open a pairing window -> the unknown device enrolls. (open the window
+        // directly rather than via begin_pairing, which mints a keychain-backed
+        // identity; this test is about the authorization policy, not pairing codes.)
+        open_pairing_window(&store, now).unwrap();
         assert_eq!(store_authorize(&store, &device.public, now), AuthDecision::Enroll);
         // now known -> allowed even after the window closes.
         let later = now + PAIRING_WINDOW_SECONDS + 1;
@@ -946,5 +1019,127 @@ mod tests {
             !contains_subslice(&wire, secret_marker.as_bytes()),
             "the relay must only ever see ciphertext"
         );
+    }
+
+    // ---- apex f3-hardening: private key lives in the Keychain, not the DB -----
+
+    // an in-memory CompanionKeyStore double so identity migration is testable with
+    // no real Keychain (the SystemCompanionKeyStore path is never touched here,
+    // exactly like the OpenAiKeyStore tests never touch the live keychain).
+    #[derive(Default)]
+    struct MockKeyStore {
+        private: std::sync::Mutex<Option<String>>,
+        read_fails: bool,
+    }
+
+    impl crate::secrets::CompanionKeyStore for MockKeyStore {
+        fn get_companion_private_key(&self) -> anyhow::Result<Option<String>> {
+            if self.read_fails {
+                return Err(anyhow!("keychain unavailable"));
+            }
+            Ok(self.private.lock().unwrap().clone())
+        }
+        fn set_companion_private_key(&self, private_b64: &str) -> anyhow::Result<()> {
+            *self.private.lock().unwrap() = Some(private_b64.to_string());
+            Ok(())
+        }
+        fn delete_companion_private_key(&self) -> anyhow::Result<()> {
+            *self.private.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn f3hardening_decides_use_migrate_or_generate() {
+        let some = || Some("x".to_string());
+        let none = || None::<String>;
+        // private in keychain + public in DB -> use it as-is.
+        assert_eq!(decide_identity(&some(), &none(), &some()), IdentityAction::UseKeychain);
+        // legacy: private still in the DB alongside the public key -> migrate.
+        assert_eq!(decide_identity(&none(), &some(), &some()), IdentityAction::Migrate);
+        // nothing usable -> generate.
+        assert_eq!(decide_identity(&none(), &none(), &none()), IdentityAction::Generate);
+        // keychain private but no public half to pair it with -> regenerate.
+        assert_eq!(decide_identity(&some(), &none(), &none()), IdentityAction::Generate);
+        // blank strings count as absent.
+        let blank = || Some("   ".to_string());
+        assert_eq!(decide_identity(&blank(), &blank(), &blank()), IdentityAction::Generate);
+    }
+
+    #[test]
+    fn f3hardening_migrates_db_private_key_into_the_keychain_and_clears_the_db_copy() {
+        let dir = TempDir::new().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        // seed a pre-hardening store: both halves in app_settings.
+        let seeded = generate_static_keypair().unwrap();
+        let priv_b64 = b64().encode(&seeded.private);
+        let pub_b64 = b64().encode(&seeded.public);
+        store.set_app_setting(IDENTITY_PRIV_KEY, &priv_b64).unwrap();
+        store.set_app_setting(IDENTITY_PUB_KEY, &pub_b64).unwrap();
+
+        let keys = MockKeyStore::default();
+        let resolved = identity_with_key_store(&store, &keys).unwrap();
+
+        // same identity, no rotation.
+        assert_eq!(resolved.private, seeded.private);
+        assert_eq!(resolved.public, seeded.public);
+        // the private key moved into the keychain...
+        assert_eq!(keys.private.lock().unwrap().as_deref(), Some(priv_b64.as_str()));
+        // ...and the DB copy is gone, while the public key stays put.
+        assert_eq!(store.get_app_setting(IDENTITY_PRIV_KEY).unwrap(), None);
+        assert_eq!(store.get_app_setting(IDENTITY_PUB_KEY).unwrap().as_deref(), Some(pub_b64.as_str()));
+
+        // idempotent: a second read now takes the UseKeychain path unchanged.
+        let again = identity_with_key_store(&store, &keys).unwrap();
+        assert_eq!(again.private, seeded.private);
+        assert_eq!(again.public, seeded.public);
+        assert_eq!(store.get_app_setting(IDENTITY_PRIV_KEY).unwrap(), None);
+    }
+
+    #[test]
+    fn f3hardening_generates_into_the_keychain_never_the_db() {
+        let dir = TempDir::new().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        let keys = MockKeyStore::default();
+
+        let generated = identity_with_key_store(&store, &keys).unwrap();
+
+        // the private key is in the keychain and never written to app_settings.
+        let kc = keys.private.lock().unwrap().clone().expect("private key in keychain");
+        assert_eq!(b64().decode(kc.trim()).unwrap(), generated.private);
+        assert_eq!(store.get_app_setting(IDENTITY_PRIV_KEY).unwrap(), None);
+        // the public key is in the DB, as routing material.
+        let db_pub = store.get_app_setting(IDENTITY_PUB_KEY).unwrap().expect("public key in DB");
+        assert_eq!(b64().decode(db_pub.trim()).unwrap(), generated.public);
+    }
+
+    #[test]
+    fn f3hardening_uses_keychain_without_rewriting_the_db_private() {
+        let dir = TempDir::new().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        let kp = generate_static_keypair().unwrap();
+        // post-migration steady state: private in keychain, public in DB.
+        store.set_app_setting(IDENTITY_PUB_KEY, &b64().encode(&kp.public)).unwrap();
+        let keys = MockKeyStore::default();
+        *keys.private.lock().unwrap() = Some(b64().encode(&kp.private));
+
+        let resolved = identity_with_key_store(&store, &keys).unwrap();
+        assert_eq!(resolved.private, kp.private);
+        assert_eq!(resolved.public, kp.public);
+        // no legacy private key was ever introduced into the DB.
+        assert_eq!(store.get_app_setting(IDENTITY_PRIV_KEY).unwrap(), None);
+    }
+
+    #[test]
+    fn f3hardening_keychain_read_failure_surfaces_rather_than_forging_an_identity() {
+        // a failed keychain read must not silently mint a new identity (which would
+        // orphan paired devices); it surfaces as an error the caller can handle.
+        let dir = TempDir::new().unwrap();
+        let store = TaskStore::initialize(dir.path()).unwrap();
+        let keys = MockKeyStore {
+            private: std::sync::Mutex::new(None),
+            read_fails: true,
+        };
+        assert!(identity_with_key_store(&store, &keys).is_err());
     }
 }
