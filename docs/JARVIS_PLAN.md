@@ -844,15 +844,21 @@ directional and may be re-scoped when their epoch begins.
 > **F3c-client** (a real loadable phone client + live audio — resume when the
 > user commits to a phone target; native app w/ shared Rust core recommended)
 > and **F4** (cloud continuation — resume when the user commits to a cloud target
-> and to relaxing local-first). **Recommended next action for a fresh session:**
-> start **Epoch G — the Workshop**, beginning with **G1 (code-execution
-> sandbox)**: a sandboxed interpreter (no network by default, resource-capped) as
-> an agent-runtime tool, fully verifiable in-repo, which unblocks "check my
-> stats" and downstream G2 (charts/artifacts). Read Pillar 15 and the G1 row
-> before scoping. Locked F3 decisions (do not re-litigate): Noise via `snow`;
-> native client shares the Rust core. Standing rule: after each milestone, run
-> its `scripts/apex_<id>_check.sh`, launch the built binary against the real
-> `~/Library/Application Support/com.jeff.desktop` DB, commit, and push.
+> and to relaxing local-first).
+>
+> **THE NEXT MILESTONE IS G1 (code-execution sandbox) — start here.** Skip F3c-client
+> and F4 (both decision-gated above) and open **Epoch G — the Workshop**. G1: a
+> sandboxed interpreter (no network by default, resource-capped) exposed as an
+> agent-runtime tool, fully verifiable in-repo, which unblocks "check my stats"
+> and is the dependency for G2 (charts/artifacts). Before scoping G1, read
+> Pillar 15 and the G1 row, and note it inherits the D5 agent-runtime tool
+> registry and the D9 confinement precedent (`text_script` subprocess: workspace
+> cwd + `env_clear` + static pre-exec guard) — G1 is that sandbox generalized and
+> hardened into a first-class tool, not a new mechanism. Then propose the plan and
+> get approval before coding (CLAUDE.md). Locked F3 decisions (do not re-litigate):
+> Noise via `snow`; native client shares the Rust core. Standing rule: after each
+> milestone, run its `scripts/apex_<id>_check.sh`, launch the built binary against
+> the real `~/Library/Application Support/com.jeff.desktop` DB, commit, and push.
 
 | ID | Milestone | Depends on | Status |
 |----|-----------|------------|--------|
