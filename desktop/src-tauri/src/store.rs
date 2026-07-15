@@ -870,6 +870,16 @@ impl TaskStore {
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
 
+            -- apex f3a: devices paired to the end-to-end encrypted companion
+            -- channel. the public key is the device's stable identity; removing a
+            -- row revokes it (its next handshake is rejected at the allowlist check).
+            CREATE TABLE IF NOT EXISTS companion_devices (
+                public_key TEXT PRIMARY KEY,
+                label      TEXT NOT NULL DEFAULT '',
+                paired_at  INTEGER NOT NULL,
+                last_seen  INTEGER NOT NULL
+            );
+
             -- apex f2b: the morning briefing composed ahead of first engagement.
             -- one row per local day; delivery retrieves it instead of composing.
             CREATE TABLE IF NOT EXISTS prepared_briefings (
@@ -3538,6 +3548,67 @@ impl TaskStore {
         Ok(())
     }
 
+    // apex f3a: companion device allowlist. enrolling records the device's static
+    // public key (trust-on-first-use, gated by the pairing secret); removing it
+    // revokes access. touch keeps last_seen fresh for the Privacy Center.
+    pub fn record_companion_device(&self, public_key: &str, label: &str, now: i64) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO companion_devices (public_key, label, paired_at, last_seen)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(public_key) DO UPDATE SET last_seen = ?3",
+            params![public_key, label, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn touch_companion_device(&self, public_key: &str, now: i64) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE companion_devices SET last_seen = ?2 WHERE public_key = ?1",
+            params![public_key, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn companion_device_exists(&self, public_key: &str) -> Result<bool> {
+        let conn = self.connect()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM companion_devices WHERE public_key = ?1",
+            params![public_key],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn list_companion_devices(&self) -> Result<Vec<crate::models::CompanionDeviceDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT public_key, label, paired_at, last_seen
+             FROM companion_devices ORDER BY paired_at ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(crate::models::CompanionDeviceDto {
+                    public_key: row.get(0)?,
+                    label: row.get(1)?,
+                    paired_at: row.get(2)?,
+                    last_seen: row.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn remove_companion_device(&self, public_key: &str) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "DELETE FROM companion_devices WHERE public_key = ?1",
+            params![public_key],
+        )?;
+        Ok(())
+    }
+
     pub fn get_app_setting_bool(&self, key: &str) -> Result<Option<bool>> {
         let raw = self.get_app_setting(key)?;
         Ok(raw.map(|value| {
@@ -5898,8 +5969,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 57,
-            "expected 57 application tables after the f2b prepared_briefings table"
+            count, 58,
+            "expected 58 application tables after the f3a companion_devices table"
         );
     }
 

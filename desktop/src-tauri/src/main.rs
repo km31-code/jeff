@@ -597,6 +597,11 @@ fn main() {
             // apex f1b-3b: background daemon control
             commands::get_background_daemon,
             commands::get_morning_readiness,
+            commands::get_companion_status,
+            commands::set_companion_enabled,
+            commands::begin_companion_pairing,
+            commands::list_companion_devices,
+            commands::remove_companion_device,
             commands::set_background_daemon_enabled,
         ])
         .run(tauri::generate_context!())

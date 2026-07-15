@@ -2110,3 +2110,42 @@ export interface MorningReadinessDto {
 export async function getMorningReadiness(): Promise<MorningReadinessDto> {
   return invoke<MorningReadinessDto>("get_morning_readiness");
 }
+
+// apex f3a: the end-to-end encrypted companion channel (phone/earbuds).
+export interface CompanionStatusDto {
+  enabled: boolean;
+  paired_device_count: number;
+  pairing_open: boolean;
+}
+
+export interface CompanionDeviceDto {
+  public_key: string;
+  label: string;
+  paired_at: number;
+  last_seen: number;
+}
+
+export interface CompanionPairingDto {
+  code: string;
+  expires_in_seconds: number;
+}
+
+export async function getCompanionStatus(): Promise<CompanionStatusDto> {
+  return invoke<CompanionStatusDto>("get_companion_status");
+}
+
+export async function setCompanionEnabled(enabled: boolean): Promise<CompanionStatusDto> {
+  return invoke<CompanionStatusDto>("set_companion_enabled", { enabled });
+}
+
+export async function beginCompanionPairing(): Promise<CompanionPairingDto> {
+  return invoke<CompanionPairingDto>("begin_companion_pairing");
+}
+
+export async function listCompanionDevices(): Promise<CompanionDeviceDto[]> {
+  return invoke<CompanionDeviceDto[]>("list_companion_devices");
+}
+
+export async function removeCompanionDevice(publicKey: string): Promise<CompanionStatusDto> {
+  return invoke<CompanionStatusDto>("remove_companion_device", { publicKey });
+}

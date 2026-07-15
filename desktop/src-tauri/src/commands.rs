@@ -4012,6 +4012,61 @@ fn daemon_socket(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(crate::daemon_ipc::default_socket_path(&dir))
 }
 
+// apex f3a: the end-to-end encrypted companion channel controls. off by default;
+// pairing is an explicit, windowed action; devices are revocable.
+#[tauri::command]
+pub fn get_companion_status(
+    state: State<'_, JeffState>,
+) -> Result<crate::models::CompanionStatusDto, String> {
+    crate::companion::status(&state.store).map_err(|err| format!("companion status: {err:#}"))
+}
+
+#[tauri::command]
+pub fn set_companion_enabled(
+    state: State<'_, JeffState>,
+    enabled: bool,
+) -> Result<crate::models::CompanionStatusDto, String> {
+    crate::companion::set_enabled(&state.store, enabled)
+        .map_err(|err| format!("failed to update companion channel: {err:#}"))?;
+    crate::companion::status(&state.store).map_err(|err| format!("companion status: {err:#}"))
+}
+
+// open a pairing window and return the code a new device scans. requires the
+// channel to be enabled first (controls precede capability).
+#[tauri::command]
+pub fn begin_companion_pairing(
+    state: State<'_, JeffState>,
+) -> Result<crate::models::CompanionPairingDto, String> {
+    if !crate::companion::is_enabled(&state.store) {
+        return Err("enable the companion channel before pairing a device".to_string());
+    }
+    let now = chrono::Utc::now().timestamp();
+    crate::companion::begin_pairing(&state.store, now)
+        .map_err(|err| format!("failed to begin pairing: {err:#}"))
+}
+
+#[tauri::command]
+pub fn list_companion_devices(
+    state: State<'_, JeffState>,
+) -> Result<Vec<crate::models::CompanionDeviceDto>, String> {
+    state
+        .store
+        .list_companion_devices()
+        .map_err(|err| format!("failed to list companion devices: {err:#}"))
+}
+
+#[tauri::command]
+pub fn remove_companion_device(
+    state: State<'_, JeffState>,
+    public_key: String,
+) -> Result<crate::models::CompanionStatusDto, String> {
+    state
+        .store
+        .remove_companion_device(&public_key)
+        .map_err(|err| format!("failed to remove device: {err:#}"))?;
+    crate::companion::status(&state.store).map_err(|err| format!("companion status: {err:#}"))
+}
+
 // apex f2b: the Privacy Center's view of overnight morning-readiness -- whether
 // today's briefing was prepared ahead of engagement, and when.
 #[tauri::command]

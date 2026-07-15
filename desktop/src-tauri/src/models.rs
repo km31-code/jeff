@@ -1075,6 +1075,37 @@ pub struct BackgroundDaemonDto {
     pub pending_restart: bool,
 }
 
+// apex f3a: a device paired to the end-to-end encrypted companion channel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompanionDeviceDto {
+    // base64 of the device's curve25519 static public key (its stable identity).
+    pub public_key: String,
+    pub label: String,
+    pub paired_at: i64,
+    pub last_seen: i64,
+}
+
+// apex f3a: the Privacy Center's view of the companion channel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompanionStatusDto {
+    // off by default; the channel refuses sessions until enabled.
+    pub enabled: bool,
+    pub paired_device_count: usize,
+    // whether a pairing window is currently open (a new device may enroll).
+    pub pairing_open: bool,
+}
+
+// apex f3a: the pairing material a new device needs -- the "QR shown on the Mac".
+// carries the daemon's public identity and the pairing secret; NEVER the private
+// key. delivered once, out of band, while a pairing window is open.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompanionPairingDto {
+    // base64(daemon static public key) . base64(pairing secret)
+    pub code: String,
+    // seconds until the pairing window closes.
+    pub expires_in_seconds: i64,
+}
+
 // apex f2b: a briefing composed ahead of first engagement.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreparedBriefingDto {

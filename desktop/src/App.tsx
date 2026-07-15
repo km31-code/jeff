@@ -144,6 +144,13 @@ import {
   type BackgroundDaemonDto,
   getMorningReadiness,
   type MorningReadinessDto,
+  getCompanionStatus,
+  setCompanionEnabled,
+  beginCompanionPairing,
+  listCompanionDevices,
+  removeCompanionDevice,
+  type CompanionStatusDto,
+  type CompanionDeviceDto,
   listSpeculationCache,
   discardSpeculationCacheEntry,
   CapabilityGapDto,
@@ -456,6 +463,9 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [privacyDashboard, setPrivacyDashboard] = useState<PrivacyCenterDashboardDto | null>(null);
   const [backgroundDaemon, setBackgroundDaemon] = useState<BackgroundDaemonDto | null>(null);
   const [morningReadiness, setMorningReadiness] = useState<MorningReadinessDto | null>(null);
+  const [companionStatus, setCompanionStatus] = useState<CompanionStatusDto | null>(null);
+  const [companionDevices, setCompanionDevices] = useState<CompanionDeviceDto[]>([]);
+  const [companionPairingCode, setCompanionPairingCode] = useState<string | null>(null);
   const [speculationCache, setSpeculationCache] = useState<SpeculationCacheDto[]>([]);
   const [capabilityGaps, setCapabilityGaps] = useState<CapabilityGapDto[]>([]);
   const [customTools, setCustomTools] = useState<CustomToolDto[]>([]);
@@ -1230,6 +1240,8 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setPrivacyDashboard(dashboard);
       setBackgroundDaemon(await getBackgroundDaemon().catch(() => null));
       setMorningReadiness(await getMorningReadiness().catch(() => null));
+      setCompanionStatus(await getCompanionStatus().catch(() => null));
+      setCompanionDevices(await listCompanionDevices().catch(() => []));
       setSpeculationCache(speculation);
       setCapabilityGaps(gaps);
       setCustomTools(tools);
@@ -2823,6 +2835,36 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       setBackgroundDaemon(await setBackgroundDaemonEnabled(enabled));
     } catch (error) {
       setOperationError("Failed to update the background daemon", error);
+    }
+  }
+
+  async function handleToggleCompanion(enabled: boolean) {
+    try {
+      setCompanionStatus(await setCompanionEnabled(enabled));
+      if (!enabled) {
+        setCompanionPairingCode(null);
+      }
+    } catch (error) {
+      setOperationError("Failed to update the companion channel", error);
+    }
+  }
+
+  async function handlePairCompanion() {
+    try {
+      const pairing = await beginCompanionPairing();
+      setCompanionPairingCode(pairing.code);
+      setCompanionStatus(await getCompanionStatus());
+    } catch (error) {
+      setOperationError("Failed to start pairing", error);
+    }
+  }
+
+  async function handleRemoveCompanionDevice(publicKey: string) {
+    try {
+      setCompanionStatus(await removeCompanionDevice(publicKey));
+      setCompanionDevices(await listCompanionDevices());
+    } catch (error) {
+      setOperationError("Failed to remove the device", error);
     }
   }
 
@@ -4681,6 +4723,61 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                                 }, ready for when you sit down.`
                             : "not prepared yet today; it is composed ahead of your first engagement."}
                         </p>
+                      </li>
+                      <li data-testid="privacy-surface-companion">
+                        <label className="toggle-row">
+                          <span>Companion channel (phone/earbuds)</span>
+                          <input
+                            type="checkbox"
+                            checked={companionStatus?.enabled ?? false}
+                            onChange={(event) =>
+                              void handleToggleCompanion(event.target.checked)
+                            }
+                            data-testid="privacy-toggle-companion"
+                          />
+                        </label>
+                        <p className="task-meta">
+                          Lets a paired phone reach the same Jeff, with the same memory, over an
+                          end-to-end encrypted channel. The relay only ever carries ciphertext; the
+                          world model never leaves this Mac. Off by default. Only a device you pair
+                          during an open pairing window can connect, and you can revoke any device.
+                        </p>
+                        {companionStatus?.enabled ? (
+                          <div className="companion-controls">
+                            <button
+                              type="button"
+                              onClick={() => void handlePairCompanion()}
+                              data-testid="companion-pair-button"
+                            >
+                              Pair a device
+                            </button>
+                            {companionPairingCode ? (
+                              <p className="task-meta" data-testid="companion-pairing-code">
+                                Pairing code (expires in a few minutes): <code>{companionPairingCode}</code>
+                              </p>
+                            ) : null}
+                            {companionDevices.length > 0 ? (
+                              <ul data-testid="companion-device-list">
+                                {companionDevices.map((device) => (
+                                  <li key={device.public_key}>
+                                    <span>{device.label || "device"}</span>{" "}
+                                    <code>{device.public_key.slice(0, 12)}…</code>{" "}
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        void handleRemoveCompanionDevice(device.public_key)
+                                      }
+                                    >
+                                      Revoke
+                                    </button>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <p className="task-meta">No devices paired yet.</p>
+                            )}
+                          </div>
+                        ) : null}
                       </li>
                       <li data-testid="privacy-surface-speculation">
                         <label className="toggle-row">

@@ -23,6 +23,7 @@ pub mod core_runtime;
 pub mod cost_governor;
 pub mod coworking;
 pub mod crisis;
+pub mod companion;
 pub mod crisis_core;
 pub mod daemon_client;
 pub mod daemon_host;
