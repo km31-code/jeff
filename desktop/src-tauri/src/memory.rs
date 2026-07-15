@@ -25,6 +25,12 @@ pub const KIND_WORK_UNDERSTANDING: &str = "work_understanding";
 pub const KIND_DEADLINE_MENTION: &str = "deadline_mention";
 pub const KIND_USER_FACT: &str = "user_fact";
 
+// apex f2a: session-summary scheduler cadence. how often the background scheduler
+// checks, and how long a task must be idle before its session is summarized. moved
+// here from the app-only poll so the daemon can run summaries headless overnight.
+pub const SESSION_SUMMARY_TICK_SECONDS: u64 = 60;
+pub const SESSION_IDLE_SECONDS: i64 = 30 * 60;
+
 const MAX_EPISODE_TEXT_CHARS: usize = 900;
 const MAX_SESSION_SUMMARY_WORDS: usize = 120;
 const MEMORY_TAG_TIMEOUT_MS: u64 = 4000;

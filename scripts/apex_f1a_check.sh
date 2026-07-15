@@ -49,11 +49,12 @@ pass "context, calendar, standing-job, speculation, job-resume, stale, and proac
 
 # 4. the helper poll bodies live in the app_polls lib module (f1b-2b moved them
 # out of main.rs so the daemon can link the core) and the core drives them.
+# apex f2a: the memory session-summary and consolidation helpers moved off the
+# app-only side tasks into core_runtime's own background schedulers, so they are
+# no longer invoked through app_polls. the perception/app helpers still are.
 for helper in \
   spawn_content_observation_poll \
   spawn_goal_extraction_poll \
-  spawn_memory_session_summary_poll \
-  spawn_memory_consolidation_poll \
   perform_update_check; do
   grep -q "crate::app_polls::$helper" "$CORE" || fail "core does not invoke crate::app_polls::$helper"
 done

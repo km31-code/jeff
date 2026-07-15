@@ -166,6 +166,73 @@ pub fn unconsolidated_episode_count(store: &TaskStore) -> Result<usize> {
     Ok(count.max(0) as usize)
 }
 
+// apex f2a: how often the consolidation scheduler ticks, how long the user must
+// be idle before an idle-triggered run, and the daily 2am catch-up key. these
+// lived inline in the app-only poll before f2a moved consolidation onto the
+// background schedulers so the daemon runs it headless overnight.
+pub const CONSOLIDATION_TICK_SECONDS: u64 = 60;
+pub const CONSOLIDATION_IDLE_SECONDS: i64 = 10 * 60;
+const CONSOLIDATION_LAST_2AM_KEY: &str = "memory_consolidation:last_2am_run";
+
+// apex f2a: host-agnostic "consolidate if it is due" -- the whole gate (privacy,
+// pending work, idle-or-2am timing) plus the run, in one place callable from any
+// CoreHost (the app in Full profile, the daemon in DaemonBackground). returns the
+// report when a run happened, None when nothing was due. this is the single code
+// path that replaced the app-only consolidation poll.
+pub fn consolidate_if_due(
+    store: &TaskStore,
+    embeddings: &dyn EmbeddingProvider,
+    router: &ModelRouter,
+) -> Result<Option<ConsolidationReportDto>> {
+    // memory is opt-in; no consolidation without the user's profile-memory toggle.
+    if !store
+        .get_privacy_user_profile_memory_enabled()
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    // nothing to distill.
+    if unconsolidated_episode_count(store).unwrap_or(0) == 0 {
+        return Ok(None);
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    // idle-triggered: a task has been quiet for the idle window (or never spoke),
+    // so there is a lull to distill in. preserves the pre-f2a poll's `.any()` gate.
+    let idle_due = store.list_tasks().unwrap_or_default().into_iter().any(|task| {
+        let recent = store.list_recent_chat_messages(task.id, 1).unwrap_or_default();
+        let Some(message) = recent.last() else {
+            return true;
+        };
+        match crate::awareness_core::parse_sqlite_datetime_to_unix(&message.created_at) {
+            Some(last_at) => now.saturating_sub(last_at) >= CONSOLIDATION_IDLE_SECONDS,
+            None => false,
+        }
+    });
+
+    // daily 2am catch-up: guarantees a consolidation once per day even if the
+    // machine was never idle, so the morning briefing (f2b) has fresh facts.
+    let local_now = chrono::Local::now();
+    let today = local_now.format("%Y-%m-%d").to_string();
+    let two_am_due = local_now.format("%H").to_string() == "02"
+        && store
+            .get_app_setting(CONSOLIDATION_LAST_2AM_KEY)
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some(today.as_str());
+
+    if !idle_due && !two_am_due {
+        return Ok(None);
+    }
+
+    let report = run_consolidation(store, embeddings, router)?;
+    if two_am_due {
+        let _ = store.set_app_setting(CONSOLIDATION_LAST_2AM_KEY, &today);
+    }
+    Ok(Some(report))
+}
+
 pub fn list_facts(store: &TaskStore, limit: usize) -> Result<Vec<FactDto>> {
     let conn = store.connect()?;
     let mut stmt = conn
@@ -874,6 +941,75 @@ mod tests {
 
     fn router() -> ModelRouter {
         ModelRouter::new(RouterConfig::default())
+    }
+
+    #[test]
+    fn f2a_consolidate_if_due_is_gated_by_privacy_and_pending_work() {
+        // memory is opt-in: with the profile-memory toggle off, no run happens
+        // even when unconsolidated episodes exist.
+        let (_dir, store, task_id) = test_store();
+        let embeddings = TestEmbeddingProvider;
+        for index in 0..3 {
+            memory::record_episode(
+                &store,
+                &embeddings,
+                &NewEpisode::new(
+                    task_id,
+                    memory::KIND_USER_FACT,
+                    "User fact: I prefer concise revisions.",
+                    &format!("seed:{index}"),
+                ),
+            )
+            .unwrap();
+        }
+        assert!(store.get_privacy_user_profile_memory_enabled().unwrap() == false);
+        assert!(
+            consolidate_if_due(&store, &embeddings, &router())
+                .unwrap()
+                .is_none(),
+            "privacy-off must never consolidate"
+        );
+
+        // enabled but nothing unconsolidated -> still nothing to do.
+        let (_dir2, empty, _t) = test_store();
+        empty.set_privacy_user_profile_memory_enabled(true).unwrap();
+        assert!(
+            consolidate_if_due(&empty, &embeddings, &router())
+                .unwrap()
+                .is_none(),
+            "no unconsolidated episodes must be a no-op"
+        );
+    }
+
+    #[test]
+    fn f2a_consolidate_if_due_runs_during_a_lull() {
+        // enabled + unconsolidated episodes + an idle task (the seed episodes carry
+        // no recent chat message, so the task reads as idle) -> a real run.
+        let (_dir, store, task_id) = test_store();
+        store.set_privacy_user_profile_memory_enabled(true).unwrap();
+        let embeddings = TestEmbeddingProvider;
+        for index in 0..5 {
+            memory::record_episode(
+                &store,
+                &embeddings,
+                &NewEpisode::new(
+                    task_id,
+                    memory::KIND_USER_FACT,
+                    "User fact: I prefer concise revisions.",
+                    &format!("seed:{index}"),
+                ),
+            )
+            .unwrap();
+        }
+        let report = consolidate_if_due(&store, &embeddings, &router())
+            .unwrap()
+            .expect("an idle task with pending episodes must consolidate");
+        assert_eq!(report.processed_episode_count, 5);
+        assert_eq!(list_facts(&store, 10).unwrap().len(), 1);
+        // idempotent: a second call has nothing left unconsolidated.
+        assert!(consolidate_if_due(&store, &embeddings, &router())
+            .unwrap()
+            .is_none());
     }
 
     #[test]

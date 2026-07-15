@@ -55,11 +55,15 @@ pass "facts table, DTOs, and clear path present"
 
 # 3. trigger, budget, and retired drift-count path.
 grep -q "mod consolidation;" "${MAIN_RS%/*}/lib.rs" || fail "consolidation module not registered"
-grep -q "spawn_memory_consolidation_poll" "${MAIN_RS%/*}/app_polls.rs" || fail "consolidation poll missing"
-grep -q "MEMORY_CONSOLIDATION_IDLE_SECONDS: i64 = 10 \\* 60" "${MAIN_RS%/*}/app_polls.rs" \
+# apex f2a: consolidation moved from the app-only poll to the background
+# schedulers (core_runtime) with its gate/consts relocated into consolidation.rs,
+# so the daemon consolidates headless overnight. assert the new locations.
+grep -q "spawn_memory_consolidation" "${MAIN_RS%/*}/core_runtime.rs" || fail "consolidation scheduler missing"
+grep -q "consolidate_if_due" "${MAIN_RS%/*}/consolidation.rs" || fail "host-agnostic consolidation gate missing"
+grep -q "CONSOLIDATION_IDLE_SECONDS: i64 = 10 \\* 60" "${MAIN_RS%/*}/consolidation.rs" \
   || fail "10-minute idle trigger missing"
-grep -q "MEMORY_CONSOLIDATION_LAST_2AM_KEY" "${MAIN_RS%/*}/app_polls.rs" || fail "02:00 maintenance guard missing"
-grep -q "get_privacy_user_profile_memory_enabled" "${MAIN_RS%/*}/app_polls.rs" || fail "consolidation missing privacy gate"
+grep -q "CONSOLIDATION_LAST_2AM_KEY" "${MAIN_RS%/*}/consolidation.rs" || fail "02:00 maintenance guard missing"
+grep -q "get_privacy_user_profile_memory_enabled" "${MAIN_RS%/*}/consolidation.rs" || fail "consolidation missing privacy gate"
 grep -q "CONSOLIDATION_BUDGET_KEY" "$CONSOLIDATION_RS" || fail "consolidation budget key not used"
 grep -q "with_budget_key(CONSOLIDATION_BUDGET_KEY)" "$CONSOLIDATION_RS" \
   || fail "Craft consolidation pass not assigned to named budget"

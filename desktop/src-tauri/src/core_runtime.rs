@@ -26,8 +26,8 @@ use crate::models::CalendarEventDto;
 use crate::state::{CalendarState, ContextState, JeffState};
 use crate::typing_activity::TypingActivityState;
 use crate::{
-    agent_runtime, awareness_core, calendar, context_observer, coworking, crisis, proactive,
-    speculation, workload,
+    agent_runtime, awareness_core, calendar, consolidation, context_observer, coworking, crisis,
+    memory, proactive, speculation, workload,
 };
 
 // the core's I/O seam. everything a scheduler loop needs from its host --
@@ -136,14 +136,10 @@ impl CoreHost for TauriHost {
         tauri::async_runtime::spawn(async move {
             crate::app_polls::spawn_goal_extraction_poll(app).await;
         });
-        let app = self.app.clone();
-        tauri::async_runtime::spawn(async move {
-            crate::app_polls::spawn_memory_session_summary_poll(app).await;
-        });
-        let app = self.app.clone();
-        tauri::async_runtime::spawn(async move {
-            crate::app_polls::spawn_memory_consolidation_poll(app).await;
-        });
+        // apex f2a: memory session-summary and consolidation are no longer spawned
+        // here. they moved to the background schedulers (spawn_memory_session_summary,
+        // spawn_memory_consolidation) so exactly one process owns them and the daemon
+        // runs them headless overnight -- they were app-only before f2a.
         let app = self.app.clone();
         tauri::async_runtime::spawn(async move {
             crate::app_polls::perform_update_check(app).await;
@@ -239,6 +235,12 @@ pub fn start(host: Arc<dyn CoreHost>, profile: CoreProfile) -> CoreHandle {
         joins.push(spawn_job_resume(host.clone(), shutdown.clone()));
         joins.push(spawn_standing_job_scheduler(host.clone(), shutdown.clone()));
         joins.push(spawn_speculation_scheduler(host.clone(), shutdown.clone()));
+        // apex f2a: memory consolidation and session summaries are store-backed
+        // (no perception), so they belong with the background schedulers -- exactly
+        // one process runs them and the headless daemon does them overnight. before
+        // f2a they were app-only side tasks and never ran when the app was closed.
+        joins.push(spawn_memory_consolidation(host.clone(), shutdown.clone()));
+        joins.push(spawn_memory_session_summary(host.clone(), shutdown.clone()));
     }
 
     CoreHandle { shutdown, joins }
@@ -603,6 +605,123 @@ fn spawn_speculation_scheduler(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) 
     })
 }
 
+// apex f2a: memory consolidation scheduler. distills the day's episodes into
+// durable facts during lulls (or a daily 2am catch-up). store-backed and
+// perception-free, so it runs on whichever single process owns the background
+// schedulers -- the daemon overnight, or the app when there is no daemon.
+fn spawn_memory_consolidation(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        if std::env::var("JEFF_DISABLE_MEMORY_CONSOLIDATION").is_ok() {
+            return;
+        }
+        loop {
+            if shutdown.is_stopped() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(
+                consolidation::CONSOLIDATION_TICK_SECONDS,
+            ))
+            .await;
+
+            // grab a clone of the store-backed bundle through the host seam, then
+            // run the (blocking) consolidation off the closure so no await happens
+            // inside with_jeff_state.
+            let mut bundle = None;
+            host.with_jeff_state(&mut |state| {
+                bundle = Some((
+                    state.store.clone(),
+                    state.embeddings.clone(),
+                    state.model_router.clone(),
+                ));
+            });
+            let Some((store, embeddings, router)) = bundle else {
+                continue;
+            };
+            match tokio::task::spawn_blocking(move || {
+                consolidation::consolidate_if_due(&store, embeddings.as_ref(), &router)
+            })
+            .await
+            {
+                Ok(Ok(Some(report))) => {
+                    eprintln!(
+                        "[jeff] memory_consolidation_complete processed={} upserted={} merged={} dropped={}",
+                        report.processed_episode_count,
+                        report.upserted_fact_count,
+                        report.merged_fact_count,
+                        report.dropped_fact_count
+                    );
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(err)) => eprintln!("[jeff] memory_consolidation_failed: {err}"),
+                Err(err) => eprintln!("[jeff] memory_consolidation_join_failed: {err}"),
+            }
+        }
+    })
+}
+
+// apex f2a: memory session-summary scheduler. records an episodic summary of a
+// task's session once it has been idle long enough. store-backed; same
+// single-owner posture as consolidation so the daemon writes them overnight.
+fn spawn_memory_session_summary(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        if std::env::var("JEFF_DISABLE_MEMORY_SUMMARY").is_ok() {
+            return;
+        }
+        loop {
+            if shutdown.is_stopped() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(
+                memory::SESSION_SUMMARY_TICK_SECONDS,
+            ))
+            .await;
+
+            let mut bundle = None;
+            host.with_jeff_state(&mut |state| {
+                if state
+                    .store
+                    .get_privacy_user_profile_memory_enabled()
+                    .unwrap_or(false)
+                {
+                    bundle = Some((
+                        state.store.clone(),
+                        state.embeddings.clone(),
+                        state.model_router.clone(),
+                        state.store.list_tasks().unwrap_or_default(),
+                    ));
+                }
+            });
+            let Some((store, embeddings, router, tasks)) = bundle else {
+                continue;
+            };
+            for task in tasks {
+                let store = store.clone();
+                let embeddings = embeddings.clone();
+                let router = router.clone();
+                let task_id = task.id;
+                match tokio::task::spawn_blocking(move || {
+                    memory::record_idle_session_summary_if_due(
+                        &store,
+                        embeddings.as_ref(),
+                        &router,
+                        task_id,
+                        memory::SESSION_IDLE_SECONDS,
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(Some(_episode))) => {
+                        eprintln!("[jeff] memory_session_summary_recorded task={task_id}");
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(err)) => eprintln!("[jeff] memory_session_summary_failed: {err}"),
+                    Err(err) => eprintln!("[jeff] memory_session_summary_join_failed: {err}"),
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,6 +823,23 @@ mod tests {
         assert!(intents.contains(&"awareness:7".to_string()));
         assert!(intents.contains(&"stale".to_string()));
         assert!(intents.contains(&"side_tasks".to_string()));
+    }
+
+    #[test]
+    fn f2a_memory_jobs_are_owned_by_the_background_scheduler_profiles() {
+        // consolidation and session summary are store-backed, so they run under
+        // exactly one process -- the daemon overnight, or the app when there is no
+        // daemon. the profile predicate that gates them must match standing jobs
+        // and speculation: Full and DaemonBackground yes, AppClient no.
+        assert!(CoreProfile::Full.runs_background_schedulers());
+        assert!(CoreProfile::DaemonBackground.runs_background_schedulers());
+        assert!(
+            !CoreProfile::AppClient.runs_background_schedulers(),
+            "the app-as-client must not double-run store-backed memory jobs the daemon owns"
+        );
+        // and they are not perception, so DaemonBackground (no perception) must
+        // still own them -- the whole point of moving them off the side tasks.
+        assert!(!CoreProfile::DaemonBackground.runs_perception());
     }
 
     #[test]
