@@ -4745,11 +4745,13 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                             data-testid="privacy-toggle-companion"
                           />
                         </label>
-                        <p className="task-meta">
+                        <p className="task-meta" data-testid="companion-surface-disclosure">
                           Lets a paired phone reach the same Jeff, with the same memory, over an
-                          end-to-end encrypted channel. The relay only ever carries ciphertext; the
-                          world model never leaves this Mac. Off by default. Only a device you pair
-                          during an open pairing window can connect, and you can revoke any device.
+                          end-to-end encrypted channel: a spoken or typed turn, a memory recall, and
+                          job status, plus streamed voice audio. The relay only ever carries
+                          ciphertext; the world model and your audio never leave this Mac. Off by
+                          default. Only a device you pair during an open pairing window can connect,
+                          and you can revoke any device.
                         </p>
                         {companionStatus?.enabled ? (
                           <div className="companion-controls">
