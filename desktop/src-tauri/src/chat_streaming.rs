@@ -215,6 +215,10 @@ pub async fn start_streaming_turn(
         registry,
         active_context,
         tts_voice,
+        // only speak the reply aloud when the message itself came from voice.
+        // a typed message must not trigger tts (both a ux surprise and a paid
+        // openai tts call the user never asked for).
+        message_source == "voice",
         is_first_message,
         Some(current_snapshot_summary).filter(|value| !value.is_empty()),
     ));
@@ -234,6 +238,7 @@ async fn run_llm_stream<R: Runtime + 'static>(
     registry: SharedRegistry,
     active_context: Option<String>,
     tts_voice: String,
+    speak_response: bool,
     is_first_message: bool,
     snapshot_summary: Option<String>,
 ) {
@@ -242,7 +247,13 @@ async fn run_llm_stream<R: Runtime + 'static>(
     let _active_turn = ActiveTurnGuard::new(registry, turn_id.clone());
 
     // read api key once via resolver; tts synthesis is skipped silently if absent.
-    let tts_api_key = crate::secrets::resolve_openai_api_key().api_key;
+    // it is also skipped entirely for typed turns: only voice-sourced messages
+    // get a spoken reply, so a typed conversation stays silent and free of tts cost.
+    let tts_api_key = if speak_response {
+        crate::secrets::resolve_openai_api_key().api_key
+    } else {
+        None
+    };
     let first_audio_reported: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let mut phrase_buf = String::new();
     let mut phrase_id: u32 = 0;

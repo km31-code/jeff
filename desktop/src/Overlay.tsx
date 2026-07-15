@@ -854,7 +854,10 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
   // d1: global keydown listener — stop tts on first printable keystroke.
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (ttsActiveTurnIdRef.current === null && streamingTurnIdRef.current === null) return;
+      // barge-in by typing only interrupts a spoken (voice) reply. during a
+      // typed conversation you must be able to start your next message without
+      // cancelling jeff's in-progress text response.
+      if (ttsActiveTurnIdRef.current === null) return;
       if (event.key.length !== 1) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       stopStreamingTtsPlayback();
@@ -1364,7 +1367,9 @@ export default function Overlay({ onOpenWorkspace }: OverlayProps): JSX.Element 
           }
           const turnId = await sendMessageStreaming(task.id, trimmed, "text");
           streamingStarted = true;
-          ttsActiveTurnIdRef.current = turnId;
+          // typed turns are silent: no tts is synthesized, so do not arm tts
+          // playback / barge-in state for them.
+          ttsActiveTurnIdRef.current = null;
           streamingTurnIdRef.current = turnId;
           setStreamingTurnId(turnId);
           setStreamingText("");

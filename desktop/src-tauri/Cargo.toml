@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Jeff desktop app Phase 0 scaffold"
 authors = ["Jeff Team"]
 edition = "2021"
+# the crate ships several helper bins in src/bin/ (eval harnesses, daemon).
+# pin the app binary so `cargo run` and the tauri bundler don't grab the
+# alphabetically-first bin (agent_eval) as the main executable.
+default-run = "jeff-desktop"
 
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }
