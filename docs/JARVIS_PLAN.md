@@ -833,7 +833,7 @@ New invariants introduced by this revision:
 Update this table in every milestone commit. Post-Apex milestones (F/G/H) are
 directional and may be re-scoped when their epoch begins.
 
-> **RESUME HERE (updated 2026-07-15, at commit `<this commit>`).**
+> **RESUME HERE (updated 2026-07-15, at commit `d183b36`).**
 > The entire Apex A–E critical path, the E7 ship gate, and F1 (F1a–F1c), F2
 > (F2a–F2b), F3a+F3b, and **F3-hardening (companion private key → Keychain)** are
 > complete, committed, and pushed. Every apex gate `a1`–`f3b` plus `f3hardening`
