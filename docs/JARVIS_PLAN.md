@@ -833,6 +833,22 @@ New invariants introduced by this revision:
 Update this table in every milestone commit. Post-Apex milestones (F/G/H) are
 directional and may be re-scoped when their epoch begins.
 
+> **RESUME HERE (updated 2026-07-15, at commit `c139236`).**
+> The entire Apex A–E critical path, the E7 ship gate, and F1 (F1a–F1c), F2
+> (F2a–F2b), and F3a+F3b are complete, committed, and pushed. Every apex gate
+> `a1`–`f3b` plus `e7` is green; 465 backend + 37 frontend + 4 Node relay tests
+> pass; the app boots clean against the real DB. **The first unfinished work is
+> F3c**, and it is intentionally not started — read its row below before touching
+> it. **Recommended next action for a fresh session:** do the small, fully
+> in-repo **companion-key → Keychain hardening** (the "F3 hardening" row below)
+> first — it closes a real security gap and needs no product decision — then
+> raise F3c's blocking decision with the user (reference/PWA/native client +
+> audio, which is hardware-gated). Do not start F3c cold; it will hit the same
+> wall. Locked F3 decisions (do not re-litigate): reference Rust client now,
+> Noise via `snow`. Standing rule: after each milestone, run its
+> `scripts/apex_<id>_check.sh`, launch the built binary against the real
+> `~/Library/Application Support/com.jeff.desktop` DB, commit, and push.
+
 | ID | Milestone | Depends on | Status |
 |----|-----------|------------|--------|
 | A1 | Model router and capability tiers | — | implementation + live OpenAI eval passed; OpenAI-only A/B failed 9/20 then 8/20; user accepted model-confounded waiver |
@@ -881,7 +897,8 @@ directional and may be re-scoped when their epoch begins.
 | F3 | Voice companion (phone/earbuds) | F1c, C4 | in progress; F3a (encrypted channel + store-backed surface) + F3b (ciphertext-only relay) done; F3c (audio + real client) open. Decisions taken at F3 kickoff: reference Rust client now (a native mobile app is a separate codebase that speaks this proven protocol), Noise via the `snow` crate. The Pillar 14 relay-compromise exit criterion (relay sees ciphertext only) is met at F3b |
 | F3a | Companion channel: E2E-encrypted session + store-backed surface | F1c | complete; `scripts/apex_f3a_check.sh` passed. New tauri-agnostic `companion.rs`: a Noise_XXpsk3 (mutual static-key auth + forward secrecy, gated by a pairing pre-shared key) session over any byte transport, exposing exactly the earbud surface -- `turn` (utterance answered by Jeff through the same `send_message_for_task` pipeline + memory as the desktop), `recall`, `jobs` -- and NOT the full command table (F1b-3 scope note). Reference `CompanionClient` (stands in for the phone) + `serve` responder prove it end to end. Off by default; `store_authorize` fails closed; windowed trust-on-first-use pairing gated by the psk; revocable `companion_devices` allowlist; identity + psk persisted; pairing code carries only public identity + secret (private key never leaves). Commands + Privacy Center surface (toggle, pair-a-device, device list + revoke). Plus warning-free `cargo check`, 4 f3a tests (same-store E2E over the encrypted session; wrong-psk handshake rejected via a hello confirmation; ciphertext-only on the wire; off-by-default + pairing-window + revoke + kill-switch policy), reconciled `schema_table_count` (57 -> 58), full backend 464 lib tests, frontend lint, both bins build, real-DB boot smoke migrated `companion_devices` into the production DB with no panic. The ciphertext-only exit criterion is proven at the session layer here; F3b proves it end to end through the real relay |
 | F3b | Ciphertext-only relay + remote path | F3a | complete; `scripts/apex_f3b_check.sh` passed. A rendezvous relay (`JEFFRDV1 <role> <token>` header, then raw byte forwarding) matches a daemon (host) and a companion (guest) by an opaque per-daemon token and pipes Noise ciphertext both ways, holding no keys and never parsing the payload. Shipped as `relay/rendezvous.mjs` (Node, `net`-only, no crypto imports) with `relay/rendezvous.test.mjs` (bridges by token, forwards verbatim, refuses mismatched tokens). Rust side: `dial_relay` + `serve_one_via_relay` (reuses the F3a authenticated `serve()`, gated by the enable flag) + a `spawn_companion_relay` background scheduler (single-owner, dials the relay as host, serves one session, re-dials, backs off; idle unless enabled AND a relay is configured). Rendezvous token persisted and added to the pairing code (public routing material only). Relay URL setting + `set_companion_relay_url` command + Privacy Center relay input/disclosure. The Pillar 14 exit criterion is met by `f3b_session_works_through_the_relay_which_sees_only_ciphertext`: a full session completed through an in-process recording relay works, and a secret marker in the request never appears in the bytes the relay forwarded. Plus warning-free `cargo check`, full backend 465 lib tests, 4 Node relay tests, frontend lint, both bins build, boot smoke clean (relay scheduler idles while disabled). Live external relay dial is env-gated; the protocol, forwarding, and ciphertext-only property are deterministic and tested |
-| F3c | Audio remoting + a real phone client | F3b, C4 | not started; remote the VoiceSession (audio in/out) over the companion channel and build an actual loadable client (native or PWA). Largely hardware/env-gated like C4 |
+| F3-hardening | Companion static key -> Keychain | F3a | not started; RECOMMENDED NEXT (small, fully in-repo, no product decision). Today `companion::identity()` persists the daemon's static private key in `app_settings` (keys `companion_static_private_b64`/`_public_b64`) -- the same local-first DB trust boundary as the rest of the world model, but a private key belongs in the Keychain. Move it behind `secrets.rs` (mirror `store_openai_api_key`/`resolve_*`, add `store/resolve/delete_companion_identity`), with a one-time migration that reads the old `app_settings` value, writes it to the Keychain, and clears the DB copy. Keep the public key (and psk/rendezvous token) where they are. Keychain access is env/hardware-gated in tests exactly like the existing key paths, so gate the live read/write and unit-test the migration decision + fallback deterministically. Add `scripts/apex_f3hardening_check.sh` |
+| F3c | Audio remoting + a real phone client | F3b, C4 | not started; BLOCKED on a product decision + hardware, do not start cold. Two open questions for the user: (1) client shape -- the F3 decision was "reference Rust client now", so a genuinely loadable client (native iOS/Android app, or a browser PWA over the relay with WebCrypto+WebRTC) is a NEW decision and, for native, a separate codebase; (2) audio path -- remoting the C4 `VoiceSession` (audio in/out) over the companion channel is realtime-audio + hardware-gated like C4, so most of it cannot be exercised in-repo. The tractable in-repo slice is a `voice`/audio-frame method on the existing companion protocol (streaming Opus/PCM frames through the same Noise session) with a reference client loop; the real client and live audio stay env/hardware-gated. Raise (1) and (2) with the user before scoping |
 | F4 | Cloud continuation (opt-in) | F1c | post-Apex |
 | G1 | Code-execution sandbox | E7 | post-Apex |
 | G2 | Multimodal artifacts (charts, decks, transforms) | G1 | post-Apex |
@@ -1914,10 +1931,15 @@ work lives, and the whole system ships.
   that composes the day's briefing ahead of engagement -- folding in the
   overnight work the daemon finished -- so delivery is a retrieval with no model
   call at the moment you sit down.
-- **F3 Voice companion**: a minimal phone/earbud client (audio-only) that
-  connects to the home daemon over an end-to-end encrypted relay — the same
-  Jeff, same memory, walking to class. Not a mobile app with a chat screen;
-  a presence channel.
+- **F3 Voice companion** (F3a + F3b complete; F3c open): a minimal phone/earbud
+  client that connects to the home daemon over an end-to-end encrypted relay —
+  the same Jeff, same memory, walking to class. Not a mobile app with a chat
+  screen; a presence channel. Built so far: a Noise-encrypted companion session
+  exposing the store-backed surface (turn/recall/jobs) reusing the desktop
+  pipeline (F3a), and a ciphertext-only rendezvous relay that meets the relay-
+  compromise exit criterion (F3b). What remains (F3c) is audio remoting over that
+  session and an actual loadable client — blocked on a product decision and
+  hardware-gated; see the F3c status-table row.
 - **F4 Cloud continuation (opt-in)**: jobs that must outlive the sleeping
   machine can run in an encrypted cloud enclave, off by default, boundary
   changes documented in the Privacy Center before enablement.
