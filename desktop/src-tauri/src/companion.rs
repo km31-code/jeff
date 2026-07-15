@@ -20,6 +20,7 @@
 // and pairs a device; unpairing/disabling refuses new sessions.
 
 use std::io::{Read, Write};
+use std::net::TcpStream;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
@@ -35,6 +36,51 @@ const IDENTITY_PRIV_KEY: &str = "companion_static_private_b64";
 const IDENTITY_PUB_KEY: &str = "companion_static_public_b64";
 const PAIRING_PSK_KEY: &str = "companion_pairing_psk_b64";
 const PAIRING_OPEN_UNTIL_KEY: &str = "companion_pairing_open_until";
+const RENDEZVOUS_TOKEN_KEY: &str = "companion_rendezvous_token";
+const RELAY_URL_KEY: &str = "companion_relay_url";
+
+// apex f3b: the rendezvous relay protocol. the daemon and the client both dial the
+// relay and announce a role and an opaque rendezvous token on a single header
+// line; the relay matches the pair by token and then forwards raw bytes both ways,
+// never parsing the ciphertext that follows. the token is a random per-daemon
+// routing id -- it identifies a meeting point, not the user.
+pub const RENDEZVOUS_MAGIC: &str = "JEFFRDV1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendezvousRole {
+    // the daemon/app that owns the core waits to serve a session.
+    Host,
+    // the companion that connects to it.
+    Guest,
+}
+
+impl RendezvousRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            RendezvousRole::Host => "host",
+            RendezvousRole::Guest => "guest",
+        }
+    }
+}
+
+// the one header line a party sends the relay before any ciphertext.
+pub fn write_rendezvous_header<W: Write>(w: &mut W, role: RendezvousRole, token: &str) -> Result<()> {
+    if token.is_empty() || token.contains(char::is_whitespace) {
+        bail!("invalid rendezvous token");
+    }
+    write!(w, "{RENDEZVOUS_MAGIC} {} {}\n", role.as_str(), token)?;
+    w.flush()?;
+    Ok(())
+}
+
+// dial the relay and announce our role + token; the returned stream is ready for
+// the Noise handshake once the relay pairs us with the peer.
+pub fn dial_relay(addr: &str, role: RendezvousRole, token: &str) -> Result<TcpStream> {
+    let mut stream = TcpStream::connect(addr)
+        .with_context(|| format!("failed to connect to companion relay at {addr}"))?;
+    write_rendezvous_header(&mut stream, role, token)?;
+    Ok(stream)
+}
 // how long a pairing window stays open after the user asks to pair a device.
 pub const PAIRING_WINDOW_SECONDS: i64 = 5 * 60;
 
@@ -434,8 +480,11 @@ fn pairing_open(store: &TaskStore, now: i64) -> bool {
 pub fn begin_pairing(store: &TaskStore, now: i64) -> Result<crate::models::CompanionPairingDto> {
     let keys = identity(store)?;
     let psk = pairing_psk(store)?;
+    // apex f3b: the code also carries the rendezvous token so the device knows the
+    // relay meeting point. still public routing material only -- never the private key.
+    let token = rendezvous_token(store)?;
     store.set_app_setting(PAIRING_OPEN_UNTIL_KEY, &(now + PAIRING_WINDOW_SECONDS).to_string())?;
-    let code = format!("{}.{}", b64().encode(&keys.public), b64().encode(psk));
+    let code = format!("{}.{}.{}", b64().encode(&keys.public), b64().encode(psk), token);
     Ok(crate::models::CompanionPairingDto {
         code,
         expires_in_seconds: PAIRING_WINDOW_SECONDS,
@@ -476,6 +525,58 @@ pub fn status(store: &TaskStore) -> Result<crate::models::CompanionStatusDto> {
         enabled: is_enabled(store),
         paired_device_count: store.list_companion_devices()?.len(),
         pairing_open: pairing_open(store, now),
+        relay_configured: relay_url(store).is_some(),
+    })
+}
+
+// apex f3b: the daemon's opaque rendezvous token, generated once and persisted.
+// the relay uses it only to match a host with a guest; it carries no identity.
+pub fn rendezvous_token(store: &TaskStore) -> Result<String> {
+    if let Some(token) = store.get_app_setting(RENDEZVOUS_TOKEN_KEY)? {
+        if !token.trim().is_empty() {
+            return Ok(token.trim().to_string());
+        }
+    }
+    let mut raw = [0u8; 16];
+    getrandom::getrandom(&mut raw).map_err(|err| anyhow!("failed to sample rendezvous token: {err}"))?;
+    let token = raw.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    store.set_app_setting(RENDEZVOUS_TOKEN_KEY, &token)?;
+    Ok(token)
+}
+
+// the configured relay address, if the user pointed the companion channel at one.
+// none -> remote access is off; the channel only works over a direct/local path.
+pub fn relay_url(store: &TaskStore) -> Option<String> {
+    store
+        .get_app_setting(RELAY_URL_KEY)
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+pub fn set_relay_url(store: &TaskStore, url: Option<&str>) -> Result<()> {
+    store.set_app_setting(RELAY_URL_KEY, url.unwrap_or("").trim())?;
+    Ok(())
+}
+
+// apex f3b: serve companion sessions THROUGH the relay. the host dials the relay,
+// is matched with a guest, serves exactly one Noise session, and re-dials for the
+// next -- so the daemon keeps a presence at the relay without holding the core
+// open to it. every gate from F3a still applies: disabled -> no dialing; only a
+// paired device that completes the psk handshake is served. the relay only ever
+// sees ciphertext.
+pub fn serve_one_via_relay(state: &JeffState, relay_addr: &str) -> Result<()> {
+    if !is_enabled(&state.store) {
+        return Ok(());
+    }
+    let token = rendezvous_token(&state.store)?;
+    let identity = identity(&state.store)?;
+    let psk = pairing_psk(&state.store)?;
+    let stream = dial_relay(relay_addr, RendezvousRole::Host, &token)?;
+    let now = chrono::Utc::now().timestamp();
+    serve(stream, state, &identity.private, &psk, |peer| {
+        store_authorize(&state.store, peer, now)
     })
 }
 
@@ -723,5 +824,127 @@ mod tests {
 
     fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    // ---- f3b: through the relay -------------------------------------------------
+
+    use std::net::{Shutdown, TcpListener, TcpStream};
+
+    // a rendezvous relay that matches a host and a guest by token, forwards raw
+    // bytes both ways, and RECORDS everything it forwards -- so a test can prove the
+    // relay only ever carried ciphertext. this is the in-process stand-in for the
+    // deployed Node relay; both speak the same JEFFRDV1 header.
+    fn recording_relay() -> (String, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = recorded.clone();
+        std::thread::spawn(move || {
+            let mut parties = Vec::new();
+            for _ in 0..2 {
+                let (mut s, _) = listener.accept().unwrap();
+                let token = read_header(&mut s);
+                parties.push((s, token));
+            }
+            // the test uses a single token, so the two parties are the pair.
+            assert_eq!(parties[0].1, parties[1].1, "relay matched mismatched tokens");
+            let a = parties.remove(0).0;
+            let b = parties.remove(0).0;
+            let a2 = a.try_clone().unwrap();
+            let b2 = b.try_clone().unwrap();
+            let rec1 = rec.clone();
+            let rec2 = rec.clone();
+            let t1 = std::thread::spawn(move || copy_record(a, b2, rec1));
+            let t2 = std::thread::spawn(move || copy_record(b, a2, rec2));
+            let _ = t1.join();
+            let _ = t2.join();
+        });
+        (addr, recorded)
+    }
+
+    // read exactly the one JEFFRDV1 header line (one byte at a time so the peer's
+    // first ciphertext bytes are left in the socket for forwarding). returns token.
+    fn read_header(s: &mut TcpStream) -> String {
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            if s.read_exact(&mut byte).is_err() {
+                break;
+            }
+            if byte[0] == b'\n' {
+                break;
+            }
+            line.push(byte[0]);
+        }
+        let header = String::from_utf8_lossy(&line);
+        let parts: Vec<&str> = header.split(' ').collect();
+        assert_eq!(parts.first().copied(), Some(RENDEZVOUS_MAGIC), "bad rendezvous magic");
+        parts.get(2).copied().unwrap_or_default().to_string()
+    }
+
+    fn copy_record(
+        mut from: TcpStream,
+        mut to: TcpStream,
+        recorded: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    ) {
+        let mut buf = [0u8; 4096];
+        loop {
+            match from.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    recorded.lock().unwrap().extend_from_slice(&buf[..n]);
+                    if to.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                    let _ = to.flush();
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = to.shutdown(Shutdown::Write);
+    }
+
+    #[test]
+    fn f3b_session_works_through_the_relay_which_sees_only_ciphertext() {
+        // the Pillar 14 exit criterion, end to end: a companion session completed
+        // through the relay works, and everything the relay forwarded is ciphertext
+        // -- a secret marker in the request never appears on the relay's wire.
+        let (relay_addr, recorded) = recording_relay();
+        let psk = generate_pairing_secret().unwrap();
+        let server_keys = generate_static_keypair().unwrap();
+        let client_keys = generate_static_keypair().unwrap();
+        let token = "rdv-test-token".to_string();
+
+        let server_priv = server_keys.private.clone();
+        let server_psk = psk;
+        let host_addr = relay_addr.clone();
+        let host_token = token.clone();
+        let server = std::thread::spawn(move || {
+            let (_dir, state) = test_state();
+            let stream = dial_relay(&host_addr, RendezvousRole::Host, &host_token).unwrap();
+            let _ = serve(stream, &state, &server_priv, &server_psk, |_p| AuthDecision::Enroll);
+        });
+
+        let client_stream = dial_relay(&relay_addr, RendezvousRole::Guest, &token).unwrap();
+        let mut client = CompanionClient::connect(client_stream, &client_keys.private, &psk).unwrap();
+        assert_eq!(client.remote_static(), server_keys.public.as_slice());
+
+        let secret_marker = "WHAT-DID-SARAH-SAY-ABOUT-THE-TIMELINE";
+        // recall over memory-disabled store returns no items, but the marker rides
+        // through the relay inside the encrypted request.
+        let result = client
+            .call("recall", serde_json::json!({ "query": secret_marker }))
+            .unwrap();
+        assert!(result["items"].is_array());
+
+        drop(client);
+        server.join().unwrap();
+
+        let wire = recorded.lock().unwrap().clone();
+        assert!(!wire.is_empty(), "no bytes were forwarded through the relay");
+        assert!(
+            !contains_subslice(&wire, secret_marker.as_bytes()),
+            "the relay must only ever see ciphertext"
+        );
     }
 }

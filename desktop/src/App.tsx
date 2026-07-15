@@ -149,6 +149,7 @@ import {
   beginCompanionPairing,
   listCompanionDevices,
   removeCompanionDevice,
+  setCompanionRelayUrl,
   type CompanionStatusDto,
   type CompanionDeviceDto,
   listSpeculationCache,
@@ -2868,6 +2869,14 @@ function App({ onCloseWorkspace }: AppProps = {}) {
     }
   }
 
+  async function handleSetCompanionRelay(url: string) {
+    try {
+      setCompanionStatus(await setCompanionRelayUrl(url));
+    } catch (error) {
+      setOperationError("Failed to set the relay", error);
+    }
+  }
+
   async function handleToggleSpeculation(enabled: boolean) {
     try {
       const status = await setSpeculationEnabled(enabled);
@@ -4756,6 +4765,19 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                                 Pairing code (expires in a few minutes): <code>{companionPairingCode}</code>
                               </p>
                             ) : null}
+                            <p className="task-meta" data-testid="companion-relay-row">
+                              Remote access relay (optional; carries ciphertext only):{" "}
+                              <input
+                                type="text"
+                                defaultValue=""
+                                placeholder="host:port (leave blank for local only)"
+                                data-testid="companion-relay-input"
+                                onBlur={(event) =>
+                                  void handleSetCompanionRelay(event.target.value)
+                                }
+                              />{" "}
+                              {companionStatus?.relay_configured ? "configured" : "not set"}
+                            </p>
                             {companionDevices.length > 0 ? (
                               <ul data-testid="companion-device-list">
                                 {companionDevices.map((device) => (

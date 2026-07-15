@@ -4045,6 +4045,20 @@ pub fn begin_companion_pairing(
         .map_err(|err| format!("failed to begin pairing: {err:#}"))
 }
 
+// apex f3b: point the companion channel at a rendezvous relay for remote access.
+// the relay only ever carries ciphertext. an empty url clears it (local-only).
+#[tauri::command]
+pub fn set_companion_relay_url(
+    state: State<'_, JeffState>,
+    url: String,
+) -> Result<crate::models::CompanionStatusDto, String> {
+    let trimmed = url.trim();
+    let value = if trimmed.is_empty() { None } else { Some(trimmed) };
+    crate::companion::set_relay_url(&state.store, value)
+        .map_err(|err| format!("failed to set relay url: {err:#}"))?;
+    crate::companion::status(&state.store).map_err(|err| format!("companion status: {err:#}"))
+}
+
 #[tauri::command]
 pub fn list_companion_devices(
     state: State<'_, JeffState>,

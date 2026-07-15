@@ -1093,6 +1093,9 @@ pub struct CompanionStatusDto {
     pub paired_device_count: usize,
     // whether a pairing window is currently open (a new device may enroll).
     pub pairing_open: bool,
+    // apex f3b: whether a relay is configured for remote (off-network) access.
+    // without one the channel only works over a direct/local path.
+    pub relay_configured: bool,
 }
 
 // apex f3a: the pairing material a new device needs -- the "QR shown on the Mac".

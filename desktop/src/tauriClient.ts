@@ -2116,6 +2116,7 @@ export interface CompanionStatusDto {
   enabled: boolean;
   paired_device_count: number;
   pairing_open: boolean;
+  relay_configured: boolean;
 }
 
 export interface CompanionDeviceDto {
@@ -2148,4 +2149,8 @@ export async function listCompanionDevices(): Promise<CompanionDeviceDto[]> {
 
 export async function removeCompanionDevice(publicKey: string): Promise<CompanionStatusDto> {
   return invoke<CompanionStatusDto>("remove_companion_device", { publicKey });
+}
+
+export async function setCompanionRelayUrl(url: string): Promise<CompanionStatusDto> {
+  return invoke<CompanionStatusDto>("set_companion_relay_url", { url });
 }

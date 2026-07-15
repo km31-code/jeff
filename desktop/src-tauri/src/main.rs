@@ -600,6 +600,7 @@ fn main() {
             commands::get_companion_status,
             commands::set_companion_enabled,
             commands::begin_companion_pairing,
+            commands::set_companion_relay_url,
             commands::list_companion_devices,
             commands::remove_companion_device,
             commands::set_background_daemon_enabled,

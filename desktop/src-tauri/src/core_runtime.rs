@@ -26,8 +26,8 @@ use crate::models::CalendarEventDto;
 use crate::state::{CalendarState, ContextState, JeffState};
 use crate::typing_activity::TypingActivityState;
 use crate::{
-    agent_runtime, awareness_core, calendar, consolidation, context_observer, coworking, crisis,
-    memory, morning, proactive, speculation, workload,
+    agent_runtime, awareness_core, calendar, companion, consolidation, context_observer, coworking,
+    crisis, memory, morning, proactive, speculation, workload,
 };
 
 // the core's I/O seam. everything a scheduler loop needs from its host --
@@ -246,6 +246,10 @@ pub fn start(host: Arc<dyn CoreHost>, profile: CoreProfile) -> CoreHandle {
         // background schedulers as consolidation, after it, so the daemon prepares
         // it overnight.
         joins.push(spawn_morning_prep(host.clone(), shutdown.clone()));
+        // apex f3b: keep a presence at the companion relay so a paired phone can
+        // reach the core remotely. gated: no-op unless the user enabled the channel
+        // AND configured a relay. the relay only ever carries ciphertext.
+        joins.push(spawn_companion_relay(host.clone(), shutdown.clone()));
     }
 
     CoreHandle { shutdown, joins }
@@ -766,6 +770,54 @@ fn spawn_morning_prep(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHa
                 Ok(Ok(None)) => {}
                 Ok(Err(err)) => eprintln!("[jeff] morning briefing prep failed: {err:#}"),
                 Err(err) => eprintln!("[jeff] morning briefing prep join failed: {err}"),
+            }
+        }
+    })
+}
+
+// apex f3b: companion relay presence. when the companion channel is enabled and a
+// relay is configured, dial the relay as host, serve exactly one Noise session,
+// and re-dial for the next -- so a paired phone can reach the core from anywhere.
+// gated and fail-safe: disabled or unconfigured -> idle; a relay that is down ->
+// backoff and retry. the relay only ever sees ciphertext.
+fn spawn_companion_relay(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if shutdown.is_stopped() {
+                break;
+            }
+
+            let mut plan = None;
+            host.with_jeff_state(&mut |state| {
+                if companion::is_enabled(&state.store) {
+                    if let Some(relay) = companion::relay_url(&state.store) {
+                        plan = Some((state.clone(), relay));
+                    }
+                }
+            });
+
+            let Some((state, relay)) = plan else {
+                // not enabled / no relay: idle, re-check periodically.
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                continue;
+            };
+
+            // serve one blocking session off the async runtime; a returned error
+            // (relay down, peer rejected) just means we back off and re-dial.
+            let served = tokio::task::spawn_blocking(move || {
+                companion::serve_one_via_relay(&state, &relay)
+            })
+            .await;
+            match served {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    eprintln!("[jeff] companion relay session ended: {err:#}");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+                Err(err) => {
+                    eprintln!("[jeff] companion relay task failed: {err}");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
             }
         }
     })
