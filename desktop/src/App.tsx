@@ -142,6 +142,8 @@ import {
   getBackgroundDaemon,
   setBackgroundDaemonEnabled,
   type BackgroundDaemonDto,
+  getMorningReadiness,
+  type MorningReadinessDto,
   listSpeculationCache,
   discardSpeculationCacheEntry,
   CapabilityGapDto,
@@ -453,6 +455,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
   const [privacyCenterOpen, setPrivacyCenterOpen] = useState(false);
   const [privacyDashboard, setPrivacyDashboard] = useState<PrivacyCenterDashboardDto | null>(null);
   const [backgroundDaemon, setBackgroundDaemon] = useState<BackgroundDaemonDto | null>(null);
+  const [morningReadiness, setMorningReadiness] = useState<MorningReadinessDto | null>(null);
   const [speculationCache, setSpeculationCache] = useState<SpeculationCacheDto[]>([]);
   const [capabilityGaps, setCapabilityGaps] = useState<CapabilityGapDto[]>([]);
   const [customTools, setCustomTools] = useState<CustomToolDto[]>([]);
@@ -1226,6 +1229,7 @@ function App({ onCloseWorkspace }: AppProps = {}) {
       ]);
       setPrivacyDashboard(dashboard);
       setBackgroundDaemon(await getBackgroundDaemon().catch(() => null));
+      setMorningReadiness(await getMorningReadiness().catch(() => null));
       setSpeculationCache(speculation);
       setCapabilityGaps(gaps);
       setCustomTools(tools);
@@ -4660,6 +4664,22 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                             : backgroundDaemon?.pending_restart
                               ? " Starting."
                               : ""}
+                        </p>
+                        <p className="task-meta" data-testid="privacy-morning-readiness">
+                          Morning briefing:{" "}
+                          {morningReadiness?.prepared_today
+                            ? morningReadiness.delivered
+                              ? "prepared and delivered today."
+                              : `prepared${
+                                  morningReadiness.prepared_at
+                                    ? " at " +
+                                      new Date(morningReadiness.prepared_at * 1000).toLocaleTimeString(
+                                        [],
+                                        { hour: "numeric", minute: "2-digit" },
+                                      )
+                                    : ""
+                                }, ready for when you sit down.`
+                            : "not prepared yet today; it is composed ahead of your first engagement."}
                         </p>
                       </li>
                       <li data-testid="privacy-surface-speculation">

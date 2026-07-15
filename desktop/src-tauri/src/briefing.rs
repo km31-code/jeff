@@ -51,6 +51,10 @@ pub struct BriefingInputs {
     pub workload: String,
     pub facts: Vec<String>,
     pub pending_approvals: usize,
+    // apex f2b: what the daemon finished overnight (completed jobs, standing-job
+    // runs). empty for the on-demand path; populated when the briefing is prepared
+    // ahead of first engagement so the morning message leads with real progress.
+    pub overnight: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -177,8 +181,27 @@ pub async fn maybe_fire_briefing<R: Runtime>(app: &AppHandle<R>) {
         return;
     }
 
-    let inputs = gather_briefing_inputs(app, &jeff, task.id, now);
-    let message = compose_briefing(&jeff.model_router, &inputs);
+    // apex f2b: retrieval first. if the daemon (or the app's own background
+    // scheduler) prepared today's briefing ahead of this engagement, deliver that
+    // -- it already folded in the overnight work and yesterday's consolidation, and
+    // it costs no model call at the moment you sit down. only compose on demand when
+    // nothing was prepared (daemon off, or a same-day cold start), preserving the
+    // pre-f2b path exactly.
+    let today = date_of(now);
+    let prepared = jeff
+        .store
+        .get_prepared_briefing(&today)
+        .ok()
+        .flatten()
+        .filter(|pb| pb.task_id == task.id && !pb.text.trim().is_empty());
+    let from_prepared = prepared.is_some();
+    let message = match prepared {
+        Some(pb) => pb.text,
+        None => {
+            let inputs = gather_briefing_inputs(app, &jeff, task.id, now);
+            compose_briefing(&jeff.model_router, &inputs)
+        }
+    };
     if message.trim().is_empty() {
         return;
     }
@@ -186,10 +209,11 @@ pub async fn maybe_fire_briefing<R: Runtime>(app: &AppHandle<R>) {
         .await
         .is_ok()
     {
-        let _ = jeff
-            .store
-            .set_app_setting(BRIEFING_LAST_FIRED_KEY, &date_of(now));
+        let _ = jeff.store.set_app_setting(BRIEFING_LAST_FIRED_KEY, &today);
         let _ = jeff.store.set_app_setting(&ready_key, "");
+        if from_prepared {
+            let _ = jeff.store.mark_prepared_briefing_delivered(&today);
+        }
     }
 }
 
@@ -300,6 +324,9 @@ fn gather_briefing_inputs<R: Runtime>(
         workload,
         facts,
         pending_approvals,
+        // the on-demand path composes at engagement time; overnight work belongs to
+        // the prepared path (f2b), so nothing to fold in here.
+        overnight: Vec::new(),
     }
 }
 
@@ -350,7 +377,9 @@ fn gather_debrief_inputs<R: Runtime>(
     }
 }
 
-fn memory_takeaways_for_date(store: &TaskStore, task_id: i64, date: &str) -> Vec<String> {
+// pub(crate) so the f2b morning-prep path (morning.rs) builds the same yesterday
+// takeaways the on-demand briefing uses.
+pub(crate) fn memory_takeaways_for_date(store: &TaskStore, task_id: i64, date: &str) -> Vec<String> {
     crate::memory::list_episodes(store, task_id, 100)
         .map(|episodes| {
             episodes
@@ -372,7 +401,7 @@ fn memory_takeaways_for_date(store: &TaskStore, task_id: i64, date: &str) -> Vec
         .unwrap_or_default()
 }
 
-fn pending_approvals_count(store: &TaskStore, task_id: i64) -> usize {
+pub(crate) fn pending_approvals_count(store: &TaskStore, task_id: i64) -> usize {
     let legacy = store
         .list_pending_file_write_proposals(task_id)
         .map(|proposals| proposals.len())
@@ -480,13 +509,18 @@ fn compose_debrief_model(router: &ModelRouter, inputs: &DebriefInputs) -> Result
 #[cfg_attr(test, allow(dead_code))]
 pub fn build_briefing_prompt(inputs: &BriefingInputs) -> String {
     format!(
-        "Calendar: {}\nWorkload: {}\nYesterday's takeaways: {}\nPending approvals: {}",
+        "Calendar: {}\nWorkload: {}\nYesterday's takeaways: {}\nOvernight work: {}\nPending approvals: {}",
         inputs.calendar.as_deref().unwrap_or("nothing scheduled"),
         inputs.workload,
         if inputs.facts.is_empty() {
             "none".to_string()
         } else {
             inputs.facts.join("; ")
+        },
+        if inputs.overnight.is_empty() {
+            "none".to_string()
+        } else {
+            inputs.overnight.join("; ")
         },
         inputs.pending_approvals,
     )
@@ -510,6 +544,10 @@ fn deterministic_briefing(inputs: &BriefingInputs) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(calendar) = inputs.calendar.as_deref() {
         parts.push(format!("You have {calendar}."));
+    }
+    // overnight work leads: it is the concrete progress made while you were away.
+    if let Some(overnight) = inputs.overnight.first() {
+        parts.push(format!("While you were away: {overnight}."));
     }
     if let Some(fact) = inputs.facts.first() {
         parts.push(format!("From yesterday: {fact}."));
@@ -612,7 +650,9 @@ fn is_quiet<R: Runtime>(app: &AppHandle<R>) -> bool {
         .unwrap_or(false)
 }
 
-fn date_of(now: i64) -> String {
+// pub(crate) so morning-prep (f2b) keys prepared briefings by the same local date
+// the delivery path retrieves them by.
+pub(crate) fn date_of(now: i64) -> String {
     Local
         .timestamp_opt(now, 0)
         .single()
@@ -746,6 +786,7 @@ mod tests {
             workload: "2 active task(s), 1 stale".to_string(),
             facts: vec!["advisor pushes back on passive voice".to_string()],
             pending_approvals: 1,
+            overnight: Vec::new(),
         };
         let message = deterministic_briefing(&inputs);
         assert!(message.contains("Design review"));
@@ -758,7 +799,7 @@ mod tests {
                 .split(['.', '?'])
                 .filter(|s| !s.trim().is_empty())
                 .count()
-                <= 4
+                <= 5
         );
     }
 

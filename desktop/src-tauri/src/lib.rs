@@ -43,6 +43,7 @@ pub mod login_item;
 pub mod memory;
 pub mod message_kind;
 pub mod model_router;
+pub mod morning;
 pub mod models;
 pub mod native_docs;
 pub mod onboarding;

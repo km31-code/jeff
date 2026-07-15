@@ -1074,3 +1074,25 @@ pub struct BackgroundDaemonDto {
     // app's schedulers are already running would double-run them.
     pub pending_restart: bool,
 }
+
+// apex f2b: a briefing composed ahead of first engagement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreparedBriefingDto {
+    pub date: String,
+    pub task_id: i64,
+    pub text: String,
+    pub source_json: String,
+    pub prepared_at: i64,
+    pub delivered: bool,
+}
+
+// apex f2b: the Privacy Center's view of overnight morning-readiness.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MorningReadinessDto {
+    // whether today's briefing has been prepared ahead of engagement.
+    pub prepared_today: bool,
+    // when it was prepared (unix seconds), if prepared.
+    pub prepared_at: Option<i64>,
+    // whether it has already been delivered this morning.
+    pub delivered: bool,
+}

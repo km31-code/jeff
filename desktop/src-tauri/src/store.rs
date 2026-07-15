@@ -869,6 +869,17 @@ impl TaskStore {
                 payload    TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
+
+            -- apex f2b: the morning briefing composed ahead of first engagement.
+            -- one row per local day; delivery retrieves it instead of composing.
+            CREATE TABLE IF NOT EXISTS prepared_briefings (
+                date         TEXT PRIMARY KEY,
+                task_id      INTEGER NOT NULL,
+                text         TEXT NOT NULL,
+                source_json  TEXT NOT NULL DEFAULT '{{}}',
+                prepared_at  INTEGER NOT NULL,
+                delivered    INTEGER NOT NULL DEFAULT 0
+            );
             "#,
             now = SQLITE_NOW_EXPR,
             embedding_model = crate::providers::OPENAI_EMBEDDING_MODEL_ID,
@@ -3470,6 +3481,63 @@ impl TaskStore {
         Ok(out)
     }
 
+    // apex f2b: store the briefing composed ahead of first engagement. one row per
+    // local day; re-preparing the same day overwrites (source may improve as more
+    // overnight work lands). preserves the delivered flag across re-prepares so a
+    // second scheduler pass cannot resurrect an already-delivered briefing.
+    pub fn upsert_prepared_briefing(
+        &self,
+        date: &str,
+        task_id: i64,
+        text: &str,
+        source_json: &str,
+        prepared_at: i64,
+    ) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO prepared_briefings (date, task_id, text, source_json, prepared_at, delivered)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)
+             ON CONFLICT(date) DO UPDATE SET
+                 task_id = excluded.task_id,
+                 text = excluded.text,
+                 source_json = excluded.source_json,
+                 prepared_at = excluded.prepared_at",
+            params![date, task_id, text, source_json, prepared_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_prepared_briefing(&self, date: &str) -> Result<Option<crate::models::PreparedBriefingDto>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT date, task_id, text, source_json, prepared_at, delivered
+             FROM prepared_briefings WHERE date = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![date], |row| {
+            Ok(crate::models::PreparedBriefingDto {
+                date: row.get(0)?,
+                task_id: row.get(1)?,
+                text: row.get(2)?,
+                source_json: row.get(3)?,
+                prepared_at: row.get(4)?,
+                delivered: row.get::<_, i64>(5)? != 0,
+            })
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn mark_prepared_briefing_delivered(&self, date: &str) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE prepared_briefings SET delivered = 1 WHERE date = ?1",
+            params![date],
+        )?;
+        Ok(())
+    }
+
     pub fn get_app_setting_bool(&self, key: &str) -> Result<Option<bool>> {
         let raw = self.get_app_setting(key)?;
         Ok(raw.map(|value| {
@@ -5830,8 +5898,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count, 56,
-            "expected 56 application tables after the daemon event queue"
+            count, 57,
+            "expected 57 application tables after the f2b prepared_briefings table"
         );
     }
 
@@ -6346,6 +6414,33 @@ mod tests {
         // session_restored_at: absent = false, mark = true
         store.mark_session_restored().unwrap();
         assert!(store.get_session_restored_at().unwrap());
+    }
+
+    #[test]
+    fn f2b_prepared_briefing_round_trips_and_tracks_delivery() {
+        let (_dir, store) = new_test_store();
+        let task = store.create_task("Thesis").unwrap();
+        assert!(store.get_prepared_briefing("2026-07-14").unwrap().is_none());
+
+        store
+            .upsert_prepared_briefing("2026-07-14", task.id, "Morning. Two things matter.", "{}", 100)
+            .unwrap();
+        let got = store.get_prepared_briefing("2026-07-14").unwrap().unwrap();
+        assert_eq!(got.text, "Morning. Two things matter.");
+        assert_eq!(got.task_id, task.id);
+        assert!(!got.delivered, "a freshly prepared briefing is undelivered");
+
+        // re-preparing the same day overwrites text but must not resurrect an
+        // already-delivered briefing: delivery is sticky.
+        store.mark_prepared_briefing_delivered("2026-07-14").unwrap();
+        assert!(store.get_prepared_briefing("2026-07-14").unwrap().unwrap().delivered);
+        store
+            .upsert_prepared_briefing("2026-07-14", task.id, "changed", "{}", 200)
+            .unwrap();
+        assert!(
+            store.get_prepared_briefing("2026-07-14").unwrap().unwrap().delivered,
+            "re-prepare must preserve the delivered flag"
+        );
     }
 
     #[test]

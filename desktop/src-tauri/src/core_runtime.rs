@@ -27,7 +27,7 @@ use crate::state::{CalendarState, ContextState, JeffState};
 use crate::typing_activity::TypingActivityState;
 use crate::{
     agent_runtime, awareness_core, calendar, consolidation, context_observer, coworking, crisis,
-    memory, proactive, speculation, workload,
+    memory, morning, proactive, speculation, workload,
 };
 
 // the core's I/O seam. everything a scheduler loop needs from its host --
@@ -241,6 +241,11 @@ pub fn start(host: Arc<dyn CoreHost>, profile: CoreProfile) -> CoreHandle {
         // f2a they were app-only side tasks and never ran when the app was closed.
         joins.push(spawn_memory_consolidation(host.clone(), shutdown.clone()));
         joins.push(spawn_memory_session_summary(host.clone(), shutdown.clone()));
+        // apex f2b: compose the morning briefing ahead of first engagement, once
+        // per day, so delivery is a retrieval. runs on the same single-owner
+        // background schedulers as consolidation, after it, so the daemon prepares
+        // it overnight.
+        joins.push(spawn_morning_prep(host.clone(), shutdown.clone()));
     }
 
     CoreHandle { shutdown, joins }
@@ -717,6 +722,50 @@ fn spawn_memory_session_summary(host: Arc<dyn CoreHost>, shutdown: CoreShutdown)
                     Ok(Err(err)) => eprintln!("[jeff] memory_session_summary_failed: {err}"),
                     Err(err) => eprintln!("[jeff] memory_session_summary_join_failed: {err}"),
                 }
+            }
+        }
+    })
+}
+
+// apex f2b: morning-prep scheduler. once per local day (idempotent in
+// morning::prepare_todays_briefing) it composes the day's briefing ahead of first
+// engagement, folding in the overnight work the daemon finished. runs on the same
+// single-owner background schedulers as consolidation so the daemon prepares it
+// overnight; the app in Full profile prepares it when there is no daemon.
+fn spawn_morning_prep(host: Arc<dyn CoreHost>, shutdown: CoreShutdown) -> JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if shutdown.is_stopped() {
+                break;
+            }
+            // a few-minute cadence: the first pass after the machine wakes for the
+            // day prepares the briefing; the per-day idempotency guard makes every
+            // later pass a cheap no-op.
+            tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+
+            let mut bundle = None;
+            host.with_jeff_state(&mut |state| {
+                bundle = Some(state.clone());
+            });
+            let Some(state) = bundle else {
+                continue;
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            match tokio::task::spawn_blocking(move || morning::prepare_todays_briefing(&state, now))
+                .await
+            {
+                Ok(Ok(Some(prepared))) => {
+                    eprintln!(
+                        "[jeff] morning briefing prepared for {} (task {})",
+                        prepared.date, prepared.task_id
+                    );
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(err)) => eprintln!("[jeff] morning briefing prep failed: {err:#}"),
+                Err(err) => eprintln!("[jeff] morning briefing prep join failed: {err}"),
             }
         }
     })

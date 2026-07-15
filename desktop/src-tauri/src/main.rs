@@ -596,6 +596,7 @@ fn main() {
             commands::clear_content_observation,
             // apex f1b-3b: background daemon control
             commands::get_background_daemon,
+            commands::get_morning_readiness,
             commands::set_background_daemon_enabled,
         ])
         .run(tauri::generate_context!())

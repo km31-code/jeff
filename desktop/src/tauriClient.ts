@@ -2098,3 +2098,15 @@ export async function setBackgroundDaemonEnabled(
 ): Promise<BackgroundDaemonDto> {
   return invoke<BackgroundDaemonDto>("set_background_daemon_enabled", { enabled });
 }
+
+// apex f2b: overnight morning-readiness -- whether today's briefing was prepared
+// ahead of first engagement.
+export interface MorningReadinessDto {
+  prepared_today: boolean;
+  prepared_at: number | null;
+  delivered: boolean;
+}
+
+export async function getMorningReadiness(): Promise<MorningReadinessDto> {
+  return invoke<MorningReadinessDto>("get_morning_readiness");
+}

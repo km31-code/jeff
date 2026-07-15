@@ -4012,6 +4012,32 @@ fn daemon_socket(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(crate::daemon_ipc::default_socket_path(&dir))
 }
 
+// apex f2b: the Privacy Center's view of overnight morning-readiness -- whether
+// today's briefing was prepared ahead of engagement, and when.
+#[tauri::command]
+pub fn get_morning_readiness(
+    state: State<'_, JeffState>,
+) -> Result<crate::models::MorningReadinessDto, String> {
+    let now = chrono::Utc::now().timestamp();
+    let today = crate::briefing::date_of(now);
+    let prepared = state
+        .store
+        .get_prepared_briefing(&today)
+        .map_err(|err| format!("failed to read prepared briefing: {err}"))?;
+    Ok(match prepared {
+        Some(pb) => crate::models::MorningReadinessDto {
+            prepared_today: true,
+            prepared_at: Some(pb.prepared_at),
+            delivered: pb.delivered,
+        },
+        None => crate::models::MorningReadinessDto {
+            prepared_today: false,
+            prepared_at: None,
+            delivered: false,
+        },
+    })
+}
+
 #[tauri::command]
 pub fn get_background_daemon(
     app: tauri::AppHandle,
