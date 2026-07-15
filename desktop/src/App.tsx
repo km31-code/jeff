@@ -4652,11 +4652,13 @@ function App({ onCloseWorkspace }: AppProps = {}) {
                         </label>
                         <p className="task-meta">
                           Keeps standing jobs, queued work, and speculation running when Jeff is
-                          closed. Off by default. Turning it off stops the background process now.
+                          closed. When on, it starts at login and relaunches on its own if it
+                          crashes, so overnight work survives a restart. Off by default. Turning it
+                          off stops the background process now and keeps it stopped.
                           {backgroundDaemon?.running
                             ? " Running."
                             : backgroundDaemon?.pending_restart
-                              ? " Starts the next time you open Jeff."
+                              ? " Starting."
                               : ""}
                         </p>
                       </li>

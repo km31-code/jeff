@@ -874,7 +874,7 @@ directional and may be re-scoped when their epoch begins.
 | F1b-1 | Core decoupled from the AppHandle | F1a | complete; `scripts/apex_f1b1_check.sh` + `scripts/apex_f1b1b_check.sh` passed (object-safe `CoreHost` trait: `emit`, `is_quiet_mode`, closure-based state accessors -- deliberately NOT returning `tauri::State`, so a non-tauri host can implement it -- plus semantic intents `request_awareness_update`/`fire_meeting_imminent`/`fire_deadline_collision`/`check_stale_tasks`/`spawn_side_tasks`. `TauriHost` is the in-process impl; every AppHandle-based helper call is confined to it. The core now contains zero tauri types. `FakeHost` test double proves the whole seam runs with no tauri runtime) |
 | F1b-2 | Shared lib + IPC transport | F1b-1 | complete; `scripts/apex_f1b2_check.sh` + `scripts/apex_f1b2c_check.sh` passed (`daemon_ipc.rs`: unix-domain-socket transport, framed JSON with a 4-byte BE length prefix, versioned `IpcRequest`/`IpcResponse`/`IpcHandler`, server->client `IpcEvent` stream with per-connection writes mutex-serialized, 16MiB frame guard, stale-socket cleanup. lib.rs now owns all 70 modules -- the 33 that main.rs and lib.rs were each compiling as distinct types collapsed into one -- so the daemon can link the core; main.rs is a thin bin. `DaemonHost` implements `CoreHost` with no AppHandle, owning its own world model and emitting over IPC. Proven: the daemon boots the core headless, builds its own store, serves status, and survives a SIGKILL of the app) |
 | F1b-3 | Daemon owns the schedulers; app supervises | F1b-2 | complete; `scripts/apex_f1b3a_check.sh`, `scripts/apex_f1b3b_check.sh`, `scripts/apex_f1b3c_check.sh` passed (`CoreProfile{Full,AppClient,DaemonBackground}` prevents split-brain: the app hands over the mutating store-backed schedulers only to a daemon that is reachable AND protocol-matching AND core-running, and falls back to the full in-process core otherwise, so nothing is ever lost. `daemon_supervisor.rs`: off by default, started and supervised by the app, Privacy Center toggle, kill switch that actually terminates the process. Durable `daemon_event_queue`: signals produced while the app is closed are persisted and drained exactly once on next launch, so overnight work is never delivered into the void). Perception stays in the app, which holds the Accessibility grant |
-| F1c | Daemon robustness: survive OS restart and crash | F1b-3 | not started; the remaining F1 exit criterion. Today the app spawns the daemon, so the daemon comes back only when the app does. Needs: relaunch-on-crash supervision, a login-item or launchd path so the daemon is up after an OS restart without the app being opened, and real-machine crash/restart validation |
+| F1c | Daemon robustness: survive OS restart and crash | F1b-3 | complete; `scripts/apex_f1c_check.sh` passed incl. a real launchd relaunch-on-crash round-trip (`daemon_launchd.rs` per-user LaunchAgent with `RunAtLoad` = start-at-login/after-OS-restart-with-no-app-open and `KeepAlive` = relaunch-on-crash, `ThrottleInterval` crash-loop guard; supervisor prefers launchd, falls back to the f1b-3b detached spawn when launchd is unavailable; the kill switch unloads the agent BEFORE the IPC shutdown so KeepAlive cannot resurrect it, and removes the plist so it stays gone; enabling starts supervision immediately; Privacy Center discloses start-at-login + relaunch-on-crash). Round-trip proved on this machine: launchd starts the daemon at load, KeepAlive relaunches it (new pid) after `kill -9`, and unloading is a durable off switch. Also fixed a real launchd-safety bug the round-trip surfaced: the GUI-linked daemon Mach-O now embeds an `LSBackgroundOnly` Info.plist section (build.rs `rustc-link-arg-bin`) so it runs headless off the window server. Plus warning-free `cargo check`, 4 f1c unit tests (plist declares KeepAlive/RunAtLoad/throttle, pins socket/store/binary, per-user LaunchAgents path, xml-escaped values), preserved f1b-3 supervisor tests, backend 452 lib tests, frontend lint, and a real-DB boot smoke (app opens the 761KB production `jeff_store.sqlite3` with no panic). Live OS-reboot survival is the one manual/hardware-gated criterion; the crash-relaunch + start-at-login mechanisms are validated for real |
 | F2 | Overnight work and morning readiness | F1c | post-Apex |
 | F3 | Voice companion (phone/earbuds) | F1c, C4 | post-Apex |
 | F4 | Cloud continuation (opt-in) | F1c | post-Apex |
@@ -1874,14 +1874,19 @@ work lives, and the whole system ships.
 
 #### Epoch F — Everywhere (Pillar 14)
 
-- **F1 Headless daemon separation** (F1a, F1b-1, F1b-2, F1b-3 complete; F1c
-  remaining): the core moves into a headless process so standing jobs,
+- **F1 Headless daemon separation** (F1a, F1b-1, F1b-2, F1b-3, F1c complete —
+  F1 done): the core moves into a headless process so standing jobs,
   consolidation, and speculation run without the UI. Built as: an in-process
   core boundary (F1a), a `CoreHost` seam that leaves the core free of tauri
   types (F1b-1), a shared lib plus a unix-socket IPC transport and a
   `DaemonHost` with no AppHandle (F1b-2), and profile-based ownership plus
-  app supervision plus a durable event queue (F1b-3). **F1c** is what is
-  left: relaunch-on-crash and survive-OS-restart.
+  app supervision plus a durable event queue (F1b-3). **F1c** closed the last
+  gap: a per-user launchd LaunchAgent (`RunAtLoad` + `KeepAlive`) gives
+  relaunch-on-crash and survive-OS-restart, with a kill switch that unloads the
+  agent so KeepAlive cannot resurrect it, validated by a real launchd
+  crash-relaunch round-trip. It also surfaced and fixed a launchd-safety bug:
+  the GUI-linked daemon now embeds `LSBackgroundOnly` so it runs headless off
+  the window server.
 
   **Two scope decisions taken at F1b-3, which the rest of Epoch F depends on:**
   1. *The daemon does no perception.* The Accessibility grant, the screen
@@ -2161,8 +2166,9 @@ memory, not a companion app.
   and runs it headless over a local unix-socket IPC, surviving a kill of the
   app. It is off until the user enables it in the Privacy Center, and signals
   it produces while the app is closed are queued and delivered exactly once
-  when the app returns. **F1c** closes the last gap: relaunch-on-crash and
-  coming back after an OS restart without the app being opened.
+  when the app returns. **F1c** closed the last gap: a launchd LaunchAgent
+  (`RunAtLoad` + `KeepAlive`) gives relaunch-on-crash and coming back after an
+  OS restart without the app being opened.
 - **Overnight readiness (F2)**: consolidation, standing jobs, and queued
   work complete on the daemon's schedule. The morning briefing is a
   retrieval, not a composition — it was finished before the lid opened.
@@ -2179,7 +2185,9 @@ memory, not a companion app.
   standing invariant that controls precede capability.
 
 **Exit criteria:** product gate 14; daemon survives UI crash (met at F1b-2c:
-proven against a SIGKILL of the app) and OS restart (**open — F1c**); relay
+proven against a SIGKILL of the app; and at F1c: KeepAlive relaunch-on-crash
+proven by round-trip) and OS restart (met at F1c via `RunAtLoad`; live reboot
+is the one manual/hardware-gated check); relay
 compromise test shows ciphertext only; F4 off by default with explicit
 boundary disclosure (the daemon itself already ships off-by-default with a
 Privacy Center control and a working kill switch, per "controls precede

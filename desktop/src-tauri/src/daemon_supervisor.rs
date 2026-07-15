@@ -1,14 +1,21 @@
-// apex f1b-3b: the app supervises the daemon.
+// apex f1b-3b / f1c: the app supervises the daemon.
 //
-// the app owns the daemon's lifecycle (no launchd, no login item): it starts the
-// daemon when the setting is on, notices when it is already up, and can stop it.
-// a spawned daemon outlives the app -- that is the whole point, it keeps the
-// background schedulers running when the app is closed or crashes -- so it must
-// be explicitly killable, which is what stop() is for.
+// f1b-3b: the app starts the daemon when the setting is on, notices when it is
+// already up, and can stop it. a spawned daemon outlives the app -- that is the
+// whole point, it keeps the background schedulers running when the app is closed
+// -- so it must be explicitly killable, which is what stop() is for.
+//
+// f1c: supervision is handed to launchd when available. a per-user LaunchAgent
+// (see daemon_launchd) gives relaunch-on-crash and start-after-OS-restart with no
+// app open -- neither of which a direct spawn can do, since a spawned daemon only
+// ever came back when the app did. the direct spawn remains as a fallback for
+// environments where launchd is unavailable (dev on non-macos, no gui session).
 //
 // controls precede capability: the setting defaults to OFF. an always-running
 // background process only exists once the user turns it on in the Privacy
-// Center, and turning it off actually terminates it.
+// Center, and turning it off actually terminates it. because launchd KeepAlive
+// would resurrect a killed daemon, the kill switch unloads the agent first --
+// unloading is the real off switch, not the IPC shutdown.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -16,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use crate::daemon_client::{self, DaemonStatus};
 use crate::daemon_ipc::IpcClient;
+use crate::daemon_launchd;
 use crate::store::TaskStore;
 
 pub const DAEMON_ENABLED_KEY: &str = "daemon_background_enabled";
@@ -52,6 +60,9 @@ pub fn ensure_running(store: &TaskStore, socket_path: &Path) -> DaemonStatus {
         return DaemonStatus::unreachable();
     }
 
+    // already up? adopt it. launchd may have started it at login (f1c), or a
+    // prior app run spawned it. we do not touch launchd here: bootstrapping a
+    // second daemon while one already holds the socket would only crash-loop.
     let existing = daemon_client::probe(socket_path);
     if existing.owns_background_schedulers() {
         return existing;
@@ -62,16 +73,34 @@ pub fn ensure_running(store: &TaskStore, socket_path: &Path) -> DaemonStatus {
         return DaemonStatus::unreachable();
     };
 
-    // spawn detached: the daemon must outlive this app process.
-    let spawned = Command::new(&binary)
-        .env("JEFF_DAEMON_RUN_CORE", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    if let Err(err) = spawned {
-        eprintln!("[jeff] failed to start the daemon: {err}");
-        return DaemonStatus::unreachable();
+    // apex f1c: prefer launchd. installing the LaunchAgent starts the daemon
+    // (RunAtLoad) and keeps it alive across crashes and OS restarts. only when
+    // launchd is unavailable do we fall back to the f1b-3b detached spawn, which
+    // outlives the app but cannot survive the app's own death or a reboot.
+    let store_dir = socket_path.parent().unwrap_or_else(|| Path::new("."));
+    let launchd_started = match daemon_launchd::install(&binary, socket_path, store_dir) {
+        Ok(()) => {
+            eprintln!("[jeff] daemon under launchd supervision (relaunch-on-crash, start-at-login)");
+            true
+        }
+        Err(err) => {
+            eprintln!("[jeff] launchd supervision unavailable ({err}); spawning the daemon directly");
+            false
+        }
+    };
+
+    if !launchd_started {
+        // fallback: spawn detached so the daemon at least outlives this app process.
+        let spawned = Command::new(&binary)
+            .env("JEFF_DAEMON_RUN_CORE", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Err(err) = spawned {
+            eprintln!("[jeff] failed to start the daemon: {err}");
+            return DaemonStatus::unreachable();
+        }
     }
 
     // wait briefly for it to bind and host the core.
@@ -90,9 +119,16 @@ pub fn ensure_running(store: &TaskStore, socket_path: &Path) -> DaemonStatus {
     }
 }
 
-// the kill switch. asks the daemon to exit, so turning the setting off actually
-// stops the background process rather than just ignoring it next launch.
+// the kill switch. turning the setting off must actually stop the background
+// process, and keep it stopped.
 pub fn stop(socket_path: &Path) {
+    // apex f1c: unload launchd FIRST. with KeepAlive, launchd would relaunch the
+    // daemon the instant an IPC shutdown killed it -- so unloading the agent (and
+    // removing its plist, so it does not return at next login) is the real off
+    // switch. bootout also terminates the running daemon. tolerant of no agent.
+    let _ = daemon_launchd::uninstall();
+
+    // also ask a directly-spawned (non-launchd fallback) daemon to exit.
     let Ok(mut client) = IpcClient::connect(socket_path) else {
         return;
     };

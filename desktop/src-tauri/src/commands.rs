@@ -4038,7 +4038,8 @@ pub fn set_background_daemon_enabled(
         .map_err(|err| format!("failed to save the setting: {err}"))?;
 
     if !enabled {
-        // kill switch: stop the background process now, not next launch.
+        // kill switch: stop the background process now, not next launch. on macos
+        // this unloads the launchd agent so KeepAlive cannot resurrect it (f1c).
         crate::daemon_supervisor::stop(&socket);
         return Ok(crate::models::BackgroundDaemonDto {
             enabled: false,
@@ -4047,7 +4048,12 @@ pub fn set_background_daemon_enabled(
         });
     }
 
-    let running = crate::daemon_client::probe(&socket).owns_background_schedulers();
+    // apex f1c: enabling installs launchd supervision and starts the daemon now,
+    // so relaunch-on-crash and start-at-login take effect without waiting for the
+    // next app launch. never fails the toggle: if the daemon cannot come up, the
+    // app keeps running the full core itself.
+    let status = crate::daemon_supervisor::ensure_running(&state.store, &socket);
+    let running = status.owns_background_schedulers();
     Ok(crate::models::BackgroundDaemonDto {
         enabled: true,
         running,
