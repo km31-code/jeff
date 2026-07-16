@@ -19,6 +19,25 @@ issue. This is the real roadmap once the run completes.
 | 6 | 1 | Active task auto-named from a throwaway greeting ("hey what are you"); renders as a faded title above the thread and reads like a ghost/rendering artifact. | cosmetic | ceiling | open — task auto-titling should skip greetings/short non-work openers, or defer naming until there's real work. |
 | 7 | 1 | A prominent "Talk to Jeff" button sits between the thread and the input, redundant with the adjacent "mic" button. Adds clutter to the primary surface. | cosmetic | ceiling | open — needs a design decision (consolidate to one voice affordance). |
 
+## Autonomous run log (2026-07-15, keys present, Anthropic unfunded)
+- Phase 1 character eval (live, gpt-4o-mini): 14/15 (93%), above 90% bar. ~$0.001.
+- Phase 1 goal eval (live): pass (exit 0).
+- Phase 1 A/B pipeline: verified end-to-end on a 2-case smoke (legacy gpt-4o-mini
+  vs apex gpt-4o). Full 20-case Claude run is post-credit.
+- Phase 1 cached-token ratio check: 0.000 on OpenAI — it is an Anthropic
+  prompt-caching metric, so genuinely gated on Claude.
+- Phase 2 embedding model (bge-small-en-v1.5-q8_0): downloaded to the app models
+  dir and checksum-verified (36,806,944 bytes, sha256 match).
+- Phase 3 Realtime pre-check: OpenAI key mints a `gpt-realtime-2.1` session
+  (HTTP 200) — Realtime IS enabled on the org. Voice is unblocked pending mic
+  permission.
+- Total estimated LLM spend across the whole session so far: ~$0.01.
+
+Finding 8 (Phase 2, degraded/bug): `JEFF_LOCAL_LLAMACPP_SERVER` is env-var only
+(local_runtime.rs:576) with no persisted setting, so a Finder-launched app can
+never pick up the local runtime. Needs a stored config + onboarding entry to be
+usable outside a dev shell.
+
 ## Phase verdicts
 
 | Phase | Title | Verdict | Date |
